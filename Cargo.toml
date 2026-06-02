@@ -1,0 +1,27 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/marv-syntax",
+    "crates/marv-core",
+    "crates/marv-types",
+    "crates/marv-db",
+    "crates/marv-verify",
+    "crates/marv-codegen-cl",
+    "crates/marv-codegen-llvm",
+    "crates/marv-codegen-wasm",
+    "crates/marv-interp",
+    "crates/marv-store",
+    "crates/marv-server",
+    "crates/marv-cli",
+]
+
+# Shared metadata for every crate in the workspace. Individual crates inherit
+# these with `version.workspace = true` etc., so the whole toolchain moves in
+# lockstep and there is exactly one place to bump the version / edition / license.
+[workspace.package]
+version = "0.0.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+authors = ["the marv authors"]
+repository = "https://github.com/joaoh82/marv"
+description = "marv — a compiled language whose author is an agent and whose auditor is a human"
