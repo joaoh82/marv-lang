@@ -1,0 +1,1210 @@
+//! The M2 checker over the Core IR (`spec/02` §E, `spec/01` §§3–7).
+//!
+//! One demand-driven pass over a definition's Core body
+//! ([`Checker::synth`]) simultaneously performs all six families of static
+//! check the milestone requires, because they share a single traversal and a
+//! single typing environment:
+//!
+//! 1. **Type checking** — bidirectional synthesis of every node's [`Type`]
+//!    against the §E judgments `(Var)`, `(Global)`, `(App)`, `(Let)`,
+//!    `(Match)`, plus the total [`PrimOp`] table.
+//! 2. **Effect-row inference** — every node yields the [`EffectRow`] it may
+//!    exercise; `(App)` folds in the callee arrow's row, `(Perform)` adds its
+//!    capability, `(Raise)`/op-signatures add errors. The union over the body
+//!    is the inferred row.
+//! 3. **Capability checking** — a `Perform`'s capability must be a capability
+//!    *value in scope* (no ambient authority) and must not have been *forged*
+//!    by construction (`spec/01` §5).
+//! 4. **Error-set inference** — the inferred errors must be a subset of the
+//!    declared error set; any missing one is reported with a fix.
+//! 5. **Second-class references** — a `Ref` may be passed down but never stored
+//!    in an aggregate field, returned, or declared as a struct field
+//!    (`spec/01` §4).
+//! 6. **Linearity** — every `linear` binding is used *exactly once on every
+//!    control path*, tracked as per-binder `(min, max)` use counts that compose
+//!    across `Let` sequencing and `Match` branches (`spec/02` §E).
+//!
+//! Effect/error **subsumption** (the declared signature row must be a superset
+//! of the inferred body row) and the return-position reference check run once
+//! per definition in [`Checker::check_def`], after the body is synthesized.
+//!
+//! ## What the front end can reach today
+//!
+//! The M0/M1 front end emits only `fn`/`struct` over arithmetic, `if`, calls and
+//! field access — no `Perform`, `Raise`, enum `Ctor`, or `linear` consumption,
+//! and every lowered arrow currently carries the empty row. So from real `.mv`
+//! source the reachable diagnostics are the type/return-reference/struct-field
+//! ones; the capability, error-set, exhaustiveness, and linear-consumption rules
+//! are exercised over hand-written Core (see `tests/rules.rs`). The checker
+//! itself is complete over the whole Core IR regardless of which surface forms
+//! exist yet.
+
+// The synthesis methods take `&mut Vec<Binder>` and push/pop the typing
+// environment as they descend through binders, so a `&mut [Binder]` slice (what
+// `clippy::ptr_arg` would suggest) genuinely will not do.
+#![allow(clippy::ptr_arg)]
+
+use std::collections::BTreeMap;
+
+use marv_core::ir::*;
+
+use crate::diagnostic::{Code, Diagnostic, Edit, Fix};
+use crate::world::World;
+
+/// Per-binder linear use profile across all control paths reaching a point:
+/// `level → (min_uses, max_uses)`. `min` is the fewest uses on any path, `max`
+/// the most. Only `linear` binders are tracked. See the module docs.
+type Uses = BTreeMap<u32, (u32, u32)>;
+
+/// A checker value type: a concrete Core [`Type`], an unconstrained integer
+/// literal (compatible with any width), or `Unknown` — an opaque/unresolved
+/// type (e.g. an imported global the [`World`] does not know) that is compatible
+/// with everything, so it neither produces nor masks real errors downstream.
+#[derive(Debug, Clone, PartialEq)]
+enum Ty {
+    Known(Type),
+    IntLit,
+    Unknown,
+}
+
+/// How a binder entered scope — used only to detect a *forged* capability
+/// (`spec/01` §5): one produced by `Ctor`/`Prim` rather than received or
+/// narrowed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Prov {
+    /// A function parameter or `match`-bound field: power that was *received*.
+    Received,
+    /// Bound to a `Ctor`/`Prim` result: constructed, hence forgeable.
+    Computed,
+    /// Any other `let` value (an application, a projection, …).
+    Other,
+}
+
+/// One binding in the typing environment, indexed by de Bruijn *level*
+/// (`env[0]` is the outermost binder). A `Var(idx)` at depth `d` refers to
+/// `env[d - 1 - idx]`.
+#[derive(Debug, Clone)]
+struct Binder {
+    ty: Ty,
+    linear: bool,
+    prov: Prov,
+}
+
+/// The result of synthesizing a Core term: its type, the effect row it may
+/// exercise, and the linear-use profile of the binders in scope.
+struct Out {
+    ty: Ty,
+    eff: EffectRow,
+    uses: Uses,
+}
+
+/// Check a single definition against `world`, returning its diagnostics in a
+/// deterministic order. `name` is used only to make messages friendlier.
+pub fn check_def(world: &World, def: &Def, name: Option<&str>) -> Vec<Diagnostic> {
+    let mut c = Checker {
+        world,
+        diags: Vec::new(),
+    };
+    c.check_def(def, name);
+    c.diags
+}
+
+/// The checker state for one definition.
+struct Checker<'a> {
+    world: &'a World,
+    diags: Vec<Diagnostic>,
+}
+
+impl<'a> Checker<'a> {
+    fn emit(&mut self, d: Diagnostic) {
+        self.diags.push(d);
+    }
+
+    // ---- definition entry point ----------------------------------------
+
+    fn check_def(&mut self, def: &Def, name: Option<&str>) {
+        match def.kind {
+            DefKind::Struct => self.check_struct(def),
+            DefKind::Fn => self.check_fn(def, name),
+            // Other kinds carry no body the M2 checker inspects (enums/caps/
+            // errors are declarations; consts/impls/interfaces arrive with the
+            // surface forms that introduce them).
+            _ => {}
+        }
+    }
+
+    /// A `struct` may not declare a field of reference type: storing a
+    /// second-class reference in an aggregate lets it escape its call frame
+    /// (`spec/01` §4).
+    fn check_struct(&mut self, def: &Def) {
+        let (fields, _) = peel_struct(&def.ty);
+        for (i, f) in fields.iter().enumerate() {
+            if let Type::Ref { .. } = peel_ref_target(f) {
+                self.emit(escaping_ref_diag(EscapeSite::StructField(i)));
+            }
+        }
+    }
+
+    fn check_fn(&mut self, def: &Def, _name: Option<&str>) {
+        let body = match &def.body {
+            Some(b) => b,
+            None => return,
+        };
+
+        // Peel the curried arrow/lambda spine in lockstep to recover the
+        // parameter types, the innermost return type, and the innermost declared
+        // effect row (outer, partial-application arrows are always pure).
+        let mut env: Vec<Binder> = Vec::new();
+        let mut cur_ty = &def.ty;
+        let mut cur_body = body;
+        let mut declared_eff = EffectRow::empty();
+        while let (
+            Type::Arrow { ret, effects, .. },
+            Core::Lam {
+                param, body: lbody, ..
+            },
+        ) = (cur_ty, cur_body)
+        {
+            let linear = matches!(param, Type::Linear(_));
+            env.push(Binder {
+                ty: Ty::Known(param.clone()),
+                linear,
+                prov: Prov::Received,
+            });
+            declared_eff = effects.clone();
+            cur_ty = ret;
+            cur_body = lbody;
+        }
+        let declared_ret = cur_ty;
+
+        let out = self.synth(cur_body, &mut env);
+
+        // Return-type check (§E: the body's type is the return type).
+        if !compatible(&Ty::Known(declared_ret.clone()), &out.ty) {
+            self.emit(
+                Diagnostic::error(
+                    Code::TypeMismatch,
+                    format!(
+                        "function body has type `{}` but its signature declares `{}`",
+                        show_ty(&out.ty),
+                        show_type(declared_ret)
+                    ),
+                )
+                .with_related("return type declared here"),
+            );
+        }
+
+        // Returned reference (§4): a reference in return position escapes.
+        if let Type::Ref { .. } = peel_ref_target(declared_ret) {
+            self.emit(escaping_ref_diag(EscapeSite::Return));
+        }
+
+        // Effect & error subsumption (§E): declared row ⊇ inferred row.
+        self.check_subsumption(&declared_eff, &out.eff);
+
+        // Linearity of parameters: each `linear` parameter must be consumed
+        // exactly once on every path through the body.
+        let nparams = env.len() as u32;
+        for level in 0..nparams {
+            if env[level as usize].linear {
+                let profile = out.uses.get(&level).copied().unwrap_or((0, 0));
+                self.check_linear(profile);
+            }
+        }
+    }
+
+    /// Report each capability and error the body infers but the signature does
+    /// not declare, with the mechanical fix (`spec/03` §2).
+    fn check_subsumption(&mut self, declared: &EffectRow, inferred: &EffectRow) {
+        for cap in &inferred.caps {
+            if !declared.caps.contains(cap) {
+                let name = self.world.cap_name(cap);
+                let param = lowercase_first(&name);
+                self.emit(
+                    Diagnostic::error(
+                        Code::MissingCapability,
+                        format!(
+                            "this function exercises capability `{name}` but its signature \
+                             declares no `{name}`"
+                        ),
+                    )
+                    .with_related(format!(
+                        "`{name}` first required by a `perform` in the body"
+                    ))
+                    .with_fix(Fix::new(
+                        format!("add capability parameter `{param}: {name}`"),
+                        Edit::insert(format!("{param}: {name}, ")),
+                        0.9,
+                    )),
+                );
+            }
+        }
+        for err in &inferred.errors {
+            if !declared.errors.contains(err) {
+                let name = self.world.error_name(err);
+                self.emit(
+                    Diagnostic::error(
+                        Code::MissingError,
+                        format!(
+                            "this function can raise `{name}`, which is not in its declared \
+                             error set"
+                        ),
+                    )
+                    .with_fix(Fix::new(
+                        format!("add `{name}` to the declared error set"),
+                        Edit::insert(name.clone()),
+                        0.9,
+                    )),
+                );
+            }
+        }
+    }
+
+    // ---- synthesis ------------------------------------------------------
+
+    /// Synthesize a Core term's type, effect row, and linear-use profile under
+    /// `env`. `env` is pushed/popped around the binders the term introduces, so
+    /// it is restored to its entry state on return.
+    fn synth(&mut self, c: &Core, env: &mut Vec<Binder>) -> Out {
+        match c {
+            Core::Atom(a) => Out {
+                ty: self.atom_ty(a, env),
+                eff: EffectRow::empty(),
+                uses: atom_uses(a, env),
+            },
+
+            Core::Let { value, body } => {
+                let vout = self.synth(value, env);
+                let linear = is_linear(&vout.ty);
+                env.push(Binder {
+                    ty: vout.ty.clone(),
+                    linear,
+                    prov: value_prov(value),
+                });
+                let level = env.len() as u32 - 1;
+                let mut bout = self.synth(body, env);
+                if linear {
+                    let profile = bout.uses.get(&level).copied().unwrap_or((0, 0));
+                    self.check_linear(profile);
+                }
+                bout.uses.remove(&level);
+                env.pop();
+                Out {
+                    ty: bout.ty,
+                    eff: union(vout.eff, &bout.eff),
+                    uses: seq(&vout.uses, &bout.uses),
+                }
+            }
+
+            Core::Lam {
+                param,
+                effects,
+                body,
+            } => {
+                // A value-level lambda. Its body's inferred effects must be a
+                // subset of its declared row, just like a top-level function.
+                let linear = matches!(param, Type::Linear(_));
+                env.push(Binder {
+                    ty: Ty::Known(param.clone()),
+                    linear,
+                    prov: Prov::Received,
+                });
+                let level = env.len() as u32 - 1;
+                let mut bout = self.synth(body, env);
+                self.check_subsumption(effects, &bout.eff);
+                if linear {
+                    let profile = bout.uses.get(&level).copied().unwrap_or((0, 0));
+                    self.check_linear(profile);
+                }
+                bout.uses.remove(&level);
+                env.pop();
+                // Defining a lambda exercises no effect itself.
+                Out {
+                    ty: Ty::Known(Type::Arrow {
+                        param: Box::new(param.clone()),
+                        ret: Box::new(ty_to_type(&bout.ty)),
+                        effects: effects.clone(),
+                    }),
+                    eff: EffectRow::empty(),
+                    uses: bout.uses,
+                }
+            }
+
+            Core::App { func, arg } => {
+                let ft = self.atom_ty(func, env);
+                let at = self.atom_ty(arg, env);
+                let uses = seq(&atom_uses(func, env), &atom_uses(arg, env));
+                match ft {
+                    Ty::Unknown => Out {
+                        ty: Ty::Unknown,
+                        eff: EffectRow::empty(),
+                        uses,
+                    },
+                    Ty::Known(Type::Arrow {
+                        param,
+                        ret,
+                        effects,
+                    }) => {
+                        if !compatible(&Ty::Known(*param.clone()), &at) {
+                            self.emit(Diagnostic::error(
+                                Code::TypeMismatch,
+                                format!(
+                                    "argument has type `{}` but the function expects `{}`",
+                                    show_ty(&at),
+                                    show_type(&param)
+                                ),
+                            ));
+                        }
+                        Out {
+                            ty: Ty::Known(*ret),
+                            eff: effects,
+                            uses,
+                        }
+                    }
+                    other => {
+                        self.emit(Diagnostic::error(
+                            Code::NotAFunction,
+                            format!(
+                                "`{}` is not a function and cannot be called",
+                                show_ty(&other)
+                            ),
+                        ));
+                        Out {
+                            ty: Ty::Unknown,
+                            eff: EffectRow::empty(),
+                            uses,
+                        }
+                    }
+                }
+            }
+
+            Core::Ctor { ty, tag, fields } => self.synth_ctor(ty, *tag, fields, env),
+
+            Core::Proj { base, idx } => {
+                let bt = self.atom_ty(base, env);
+                let ty = self.proj_ty(&bt, *idx);
+                Out {
+                    ty,
+                    eff: EffectRow::empty(),
+                    uses: atom_uses(base, env),
+                }
+            }
+
+            Core::Match {
+                scrutinee,
+                branches,
+            } => self.synth_match(scrutinee, branches, env),
+
+            Core::Prim { op, args } => self.synth_prim(*op, args, env),
+
+            Core::Perform { cap, op, args } => self.synth_perform(cap, *op, args, env),
+
+            Core::Raise { error, args } => {
+                // Check payload arity/types if the error is known.
+                if let Some(decl) = self.world.error(error) {
+                    self.check_args(&decl.payload.clone(), args, env, "error payload");
+                }
+                let mut eff = EffectRow::empty();
+                eff.errors.push(*error);
+                let mut uses = Uses::new();
+                for a in args {
+                    uses = seq(&uses, &atom_uses(a, env));
+                }
+                // `Raise` yields the bottom of the error union: any type.
+                Out {
+                    ty: Ty::Unknown,
+                    eff,
+                    uses,
+                }
+            }
+
+            Core::Loop { cond, body, .. } => {
+                let cout = self.synth(cond, env);
+                if !compatible(&Ty::Known(Type::Bool), &cout.ty) {
+                    self.emit(Diagnostic::error(
+                        Code::TypeMismatch,
+                        format!(
+                            "loop condition has type `{}`, expected `bool`",
+                            show_ty(&cout.ty)
+                        ),
+                    ));
+                }
+                let bout = self.synth(body, env);
+                // A loop body runs zero-or-more times: a linear value consumed
+                // inside it is consumed an unknown number of times. Model that as
+                // "0 on some path, ≥2 on another" so both the not-all-paths and
+                // duplicated checks fire for any linear use in a loop body.
+                let body_uses: Uses = bout
+                    .uses
+                    .into_iter()
+                    .map(|(l, (_, mx))| (l, if mx >= 1 { (0, 2) } else { (0, 0) }))
+                    .collect();
+                Out {
+                    ty: Ty::Known(Type::Unit),
+                    eff: union(cout.eff, &bout.eff),
+                    uses: seq(&cout.uses, &body_uses),
+                }
+            }
+        }
+    }
+
+    fn synth_ctor(&mut self, ty: &Hash, tag: u32, fields: &[Atom], env: &mut Vec<Binder>) -> Out {
+        // Expected field types, if the nominal is a known struct or enum.
+        let expected: Option<Vec<Type>> = if let Some(s) = self.world.struct_decl(ty) {
+            Some(s.fields.clone())
+        } else {
+            self.world
+                .enum_decl(ty)
+                .and_then(|e| e.variants.get(tag as usize))
+                .map(|v| v.fields.clone())
+        };
+
+        let mut uses = Uses::new();
+        for (i, a) in fields.iter().enumerate() {
+            let at = self.atom_ty(a, env);
+            // Second-class reference may not be stored in an aggregate field.
+            if is_ref(&at) {
+                self.emit(escaping_ref_diag(EscapeSite::CtorField(i)));
+            }
+            if let Some(exp) = &expected {
+                if let Some(et) = exp.get(i) {
+                    if !compatible(&Ty::Known(et.clone()), &at) {
+                        self.emit(Diagnostic::error(
+                            Code::TypeMismatch,
+                            format!(
+                                "field {i} has type `{}` but the constructor expects `{}`",
+                                show_ty(&at),
+                                show_type(et)
+                            ),
+                        ));
+                    }
+                }
+            }
+            uses = seq(&uses, &atom_uses(a, env));
+        }
+
+        // A constructed value of a `linear` struct is itself linear.
+        let linear_struct = self
+            .world
+            .struct_decl(ty)
+            .map(|s| s.linear)
+            .unwrap_or(false);
+        let nominal = Type::Nominal {
+            def: *ty,
+            args: Vec::new(),
+        };
+        let result = if linear_struct {
+            Type::Linear(Box::new(nominal))
+        } else {
+            nominal
+        };
+        Out {
+            ty: Ty::Known(result),
+            eff: EffectRow::empty(),
+            uses,
+        }
+    }
+
+    fn synth_match(&mut self, scrutinee: &Atom, branches: &[Branch], env: &mut Vec<Binder>) -> Out {
+        let st = self.atom_ty(scrutinee, env);
+        let s_uses = atom_uses(scrutinee, env);
+
+        // Recover the variant arities/field-types and the total variant count of
+        // the scrutinee, so exhaustiveness and branch binders are checked.
+        let (variant_count, variant_fields, variant_names): (
+            Option<usize>,
+            Vec<Vec<Type>>,
+            Vec<String>,
+        ) = match &st {
+            Ty::Known(Type::Bool) => (
+                Some(2),
+                vec![Vec::new(), Vec::new()],
+                vec!["false".into(), "true".into()],
+            ),
+            Ty::Known(Type::Nominal { def, .. }) => {
+                if let Some(e) = self.world.enum_decl(def) {
+                    (
+                        Some(e.variants.len()),
+                        e.variants.iter().map(|v| v.fields.clone()).collect(),
+                        e.variants.iter().map(|v| v.name.clone()).collect(),
+                    )
+                } else {
+                    (None, Vec::new(), Vec::new())
+                }
+            }
+            _ => (None, Vec::new(), Vec::new()),
+        };
+
+        // Exhaustiveness (§E): a known scrutinee must have a branch per variant.
+        if let Some(v) = variant_count {
+            if branches.len() < v {
+                let missing: Vec<String> =
+                    variant_names.iter().skip(branches.len()).cloned().collect();
+                let listed = if missing.is_empty() {
+                    String::new()
+                } else {
+                    format!(" (missing: {})", missing.join(", "))
+                };
+                self.emit(
+                    Diagnostic::error(
+                        Code::NonExhaustiveMatch,
+                        format!("`match` covers {} of {v} variants{listed}", branches.len()),
+                    )
+                    .with_fix(Fix::new(
+                        "add the missing match arm(s)",
+                        Edit::insert(missing_arms_text(&missing)),
+                        0.85,
+                    )),
+                );
+            }
+        }
+
+        // Synthesize each branch under its bound fields; collect the branch's
+        // result type, effects, and outer-binder use profile.
+        let mut branch_tys: Vec<Ty> = Vec::new();
+        let mut branch_eff = EffectRow::empty();
+        let mut branch_use_sets: Vec<Uses> = Vec::new();
+        for (bi, br) in branches.iter().enumerate() {
+            let base = env.len() as u32;
+            let fields = variant_fields.get(bi).cloned().unwrap_or_default();
+            for k in 0..br.binds {
+                let fty = fields
+                    .get(k as usize)
+                    .cloned()
+                    .map(Ty::Known)
+                    .unwrap_or(Ty::Unknown);
+                let linear = is_linear(&fty);
+                env.push(Binder {
+                    ty: fty,
+                    linear,
+                    prov: Prov::Received,
+                });
+            }
+            let mut bout = self.synth(&br.body, env);
+            // Branch-local linear fields must be consumed within the branch.
+            for k in 0..br.binds {
+                let level = base + k;
+                if env[level as usize].linear {
+                    let profile = bout.uses.get(&level).copied().unwrap_or((0, 0));
+                    self.check_linear(profile);
+                }
+                bout.uses.remove(&level);
+            }
+            for _ in 0..br.binds {
+                env.pop();
+            }
+            branch_eff = union(branch_eff, &bout.eff);
+            branch_tys.push(bout.ty);
+            branch_use_sets.push(bout.uses);
+        }
+
+        // Result type: branches must agree (the first known type is the join).
+        let mut result = Ty::Unknown;
+        for t in &branch_tys {
+            if matches!(result, Ty::Unknown) {
+                result = t.clone();
+            } else if !compatible(&result, t) && !matches!(t, Ty::Unknown) {
+                self.emit(Diagnostic::error(
+                    Code::TypeMismatch,
+                    format!(
+                        "match arms have incompatible types `{}` and `{}`",
+                        show_ty(&result),
+                        show_ty(t)
+                    ),
+                ));
+            }
+        }
+
+        let merged = branch_merge(&branch_use_sets);
+        Out {
+            ty: result,
+            eff: union(branch_eff, &EffectRow::empty()),
+            uses: seq(&s_uses, &merged),
+        }
+    }
+
+    fn synth_prim(&mut self, op: PrimOp, args: &[Atom], env: &mut Vec<Binder>) -> Out {
+        let arg_tys: Vec<Ty> = args.iter().map(|a| self.atom_ty(a, env)).collect();
+        let mut uses = Uses::new();
+        for a in args {
+            uses = seq(&uses, &atom_uses(a, env));
+        }
+        let ty = self.prim_result(op, &arg_tys);
+        Out {
+            ty,
+            eff: EffectRow::empty(),
+            uses,
+        }
+    }
+
+    /// Type the result of a primitive, reporting [`Code::BadPrimOperand`] for
+    /// ill-typed operands. `Unknown` operands are permissive (no false errors).
+    fn prim_result(&mut self, op: PrimOp, args: &[Ty]) -> Ty {
+        use PrimOp::*;
+        let bad = |c: &mut Self, what: &str| {
+            c.emit(Diagnostic::error(
+                Code::BadPrimOperand,
+                format!("operator `{}` {what}", prim_name(op)),
+            ));
+        };
+        match op {
+            Add | Sub | Mul | Div | Rem => {
+                let (l, r) = (arg(args, 0), arg(args, 1));
+                if !numeric(l) || !numeric(r) {
+                    bad(self, "requires numeric operands");
+                    return Ty::Unknown;
+                }
+                if !compatible(l, r) {
+                    bad(self, "requires both operands to have the same type");
+                    return Ty::Unknown;
+                }
+                join_numeric(l, r)
+            }
+            Lt | Le | Gt | Ge => {
+                let (l, r) = (arg(args, 0), arg(args, 1));
+                if !numeric(l) || !numeric(r) {
+                    bad(self, "requires numeric operands");
+                } else if !compatible(l, r) {
+                    bad(self, "requires both operands to have the same type");
+                }
+                Ty::Known(Type::Bool)
+            }
+            Eq | Ne => {
+                let (l, r) = (arg(args, 0), arg(args, 1));
+                if !compatible(l, r) {
+                    bad(self, "requires both operands to have the same type");
+                }
+                Ty::Known(Type::Bool)
+            }
+            And | Or => {
+                for i in 0..2 {
+                    if !compatible(&Ty::Known(Type::Bool), arg(args, i)) {
+                        bad(self, "requires `bool` operands");
+                    }
+                }
+                Ty::Known(Type::Bool)
+            }
+            Not => {
+                if !compatible(&Ty::Known(Type::Bool), arg(args, 0)) {
+                    bad(self, "requires a `bool` operand");
+                }
+                Ty::Known(Type::Bool)
+            }
+            Len => {
+                match arg(args, 0) {
+                    Ty::Known(Type::Slice(_)) | Ty::Known(Type::Array(_, _)) | Ty::Unknown => {}
+                    _ => bad(self, "requires a slice or array operand"),
+                }
+                Ty::Known(Type::Int(IntTy::Usize))
+            }
+            Index => {
+                let elem = match arg(args, 0) {
+                    Ty::Known(Type::Slice(e)) | Ty::Known(Type::Array(e, _)) => {
+                        Ty::Known((**e).clone())
+                    }
+                    Ty::Unknown => Ty::Unknown,
+                    _ => {
+                        bad(self, "requires a slice or array as its first operand");
+                        Ty::Unknown
+                    }
+                };
+                if !numeric(arg(args, 1)) {
+                    bad(self, "requires an integer index");
+                }
+                elem
+            }
+        }
+    }
+
+    fn synth_perform(&mut self, cap: &Atom, op: OpId, args: &[Atom], env: &mut Vec<Binder>) -> Out {
+        let cap_ty = self.atom_ty(cap, env);
+
+        // The capability identity (its nominal hash) and whether it is a known,
+        // in-scope capability value.
+        let cap_hash = match &cap_ty {
+            Ty::Known(Type::Nominal { def, .. }) if self.world.is_cap(def) => Some(*def),
+            _ => None,
+        };
+        if cap_hash.is_none() {
+            self.emit(Diagnostic::error(
+                Code::UnauthorizedPerform,
+                "`perform` requires a capability value in scope; none was received \
+                 (no ambient authority)"
+                    .to_string(),
+            ));
+        }
+
+        // A capability must be received or narrowed — never forged by
+        // construction (`spec/01` §5).
+        if let Atom::Var(idx) = cap {
+            let d = env.len();
+            if (*idx as usize) < d {
+                let level = d - 1 - *idx as usize;
+                if env[level].prov == Prov::Computed {
+                    self.emit(Diagnostic::error(
+                        Code::ForgedCapability,
+                        "capability value was constructed; capabilities are unforgeable and \
+                         may only be received or narrowed"
+                            .to_string(),
+                    ));
+                }
+            }
+        }
+
+        // Operation signature: type the arguments and gather the result type and
+        // the errors performing it may raise.
+        let mut eff = EffectRow::empty();
+        if let Some(h) = cap_hash {
+            eff.caps.push(h);
+        }
+        let ret = if let Some(h) = cap_hash {
+            if let Some(sig) = self
+                .world
+                .cap(&h)
+                .and_then(|c| c.ops.get(op.0 as usize))
+                .cloned()
+            {
+                self.check_args(&sig.params, args, env, "capability operation");
+                for e in &sig.errors {
+                    eff.errors.push(*e);
+                }
+                Ty::Known(sig.ret)
+            } else {
+                Ty::Unknown
+            }
+        } else {
+            Ty::Unknown
+        };
+
+        let mut uses = atom_uses(cap, env);
+        for a in args {
+            uses = seq(&uses, &atom_uses(a, env));
+        }
+        Out { ty: ret, eff, uses }
+    }
+
+    /// Check a positional argument list against expected parameter types.
+    fn check_args(&mut self, expected: &[Type], args: &[Atom], env: &[Binder], what: &str) {
+        for (i, a) in args.iter().enumerate() {
+            if let Some(et) = expected.get(i) {
+                let at = self.atom_ty(a, env);
+                if !compatible(&Ty::Known(et.clone()), &at) {
+                    self.emit(Diagnostic::error(
+                        Code::TypeMismatch,
+                        format!(
+                            "{what} argument {i} has type `{}`, expected `{}`",
+                            show_ty(&at),
+                            show_type(et)
+                        ),
+                    ));
+                }
+            }
+        }
+    }
+
+    // ---- atoms & helpers ------------------------------------------------
+
+    fn atom_ty(&self, a: &Atom, env: &[Binder]) -> Ty {
+        match a {
+            Atom::Lit(l) => lit_ty(l),
+            Atom::Global(h) => self
+                .world
+                .global(h)
+                .map(|t| Ty::Known(t.clone()))
+                .unwrap_or(Ty::Unknown),
+            Atom::Var(idx) => {
+                let d = env.len();
+                if (*idx as usize) >= d {
+                    return Ty::Unknown;
+                }
+                env[d - 1 - *idx as usize].ty.clone()
+            }
+        }
+    }
+
+    /// The type of projecting field `idx` from a base, peeling references and
+    /// `linear` wrappers and resolving nominal structs / tuples.
+    fn proj_ty(&self, base: &Ty, idx: u32) -> Ty {
+        let t = match base {
+            Ty::Known(t) => t,
+            _ => return Ty::Unknown,
+        };
+        match peel(t) {
+            Type::Nominal { def, .. } => self
+                .world
+                .struct_decl(def)
+                .and_then(|s| s.fields.get(idx as usize))
+                .cloned()
+                .map(Ty::Known)
+                .unwrap_or(Ty::Unknown),
+            Type::Tuple(elems) => elems
+                .get(idx as usize)
+                .cloned()
+                .map(Ty::Known)
+                .unwrap_or(Ty::Unknown),
+            _ => Ty::Unknown,
+        }
+    }
+
+    /// Emit the appropriate linearity diagnostic for a `(min, max)` use profile,
+    /// or nothing if the value is consumed exactly once on every path.
+    fn check_linear(&mut self, (min, max): (u32, u32)) {
+        if max == 0 {
+            self.emit(linear_diag(
+                Code::LinearUnused,
+                "a `linear` value is never consumed; it must be used exactly once",
+                "consume it (pass it to a consuming function, or close/free it)",
+            ));
+        } else if max >= 2 {
+            self.emit(linear_diag(
+                Code::LinearDuplicated,
+                "a `linear` value is consumed more than once along some path",
+                "remove the extra use so the value is consumed exactly once",
+            ));
+        } else if min == 0 {
+            self.emit(linear_diag(
+                Code::LinearNotAllPaths,
+                "a `linear` value is consumed on some control paths but not all",
+                "consume it in every branch (or in none, moving the use after the match)",
+            ));
+        }
+    }
+}
+
+// ============================ free helpers ===============================
+
+/// Where a reference escaped, for the diagnostic message.
+enum EscapeSite {
+    StructField(usize),
+    CtorField(usize),
+    Return,
+}
+
+fn escaping_ref_diag(site: EscapeSite) -> Diagnostic {
+    let (msg, fix_title) = match site {
+        EscapeSite::StructField(i) => (
+            format!(
+                "field {i} has reference type; a second-class reference may not be stored in a \
+                 struct (it would escape its call frame)"
+            ),
+            "store the referent by value instead of a reference",
+        ),
+        EscapeSite::CtorField(i) => (
+            format!(
+                "field {i} is a reference; a second-class reference may not be placed in an \
+                 aggregate (it would escape its call frame)"
+            ),
+            "store the referent by value instead of a reference",
+        ),
+        EscapeSite::Return => (
+            "a second-class reference may not be returned; it would outlive the call that \
+             created it"
+                .to_string(),
+            "return the referent by value instead of a reference",
+        ),
+    };
+    Diagnostic::error(Code::EscapingReference, msg).with_fix(Fix::new(
+        fix_title,
+        Edit::insert(""),
+        0.6,
+    ))
+}
+
+fn linear_diag(code: Code, msg: &str, fix_title: &str) -> Diagnostic {
+    Diagnostic::error(code, msg.to_string()).with_fix(Fix::new(fix_title, Edit::insert(""), 0.6))
+}
+
+/// `Out`-free linear-use profile for an atom: a use of a `linear` `Var` is one
+/// use on the single path; everything else is empty.
+fn atom_uses(a: &Atom, env: &[Binder]) -> Uses {
+    if let Atom::Var(idx) = a {
+        let d = env.len();
+        if (*idx as usize) < d {
+            let level = (d - 1 - *idx as usize) as u32;
+            if env[level as usize].linear {
+                let mut u = Uses::new();
+                u.insert(level, (1, 1));
+                return u;
+            }
+        }
+    }
+    Uses::new()
+}
+
+/// Sequence two use profiles (both execute): add `min` and `max` per level.
+fn seq(a: &Uses, b: &Uses) -> Uses {
+    let mut out = a.clone();
+    for (k, (bmin, bmax)) in b {
+        let e = out.entry(*k).or_insert((0, 0));
+        e.0 += bmin;
+        e.1 += bmax;
+    }
+    out
+}
+
+/// Merge sibling branches (exactly one executes): `min` is the least over
+/// branches (a level absent from a branch contributes 0), `max` the greatest.
+fn branch_merge(branches: &[Uses]) -> Uses {
+    let mut keys: BTreeMap<u32, ()> = BTreeMap::new();
+    for b in branches {
+        for k in b.keys() {
+            keys.insert(*k, ());
+        }
+    }
+    let mut out = Uses::new();
+    for k in keys.keys() {
+        let mut min = u32::MAX;
+        let mut max = 0u32;
+        for b in branches {
+            let (bmin, bmax) = b.get(k).copied().unwrap_or((0, 0));
+            min = min.min(bmin);
+            max = max.max(bmax);
+        }
+        if branches.is_empty() {
+            min = 0;
+        }
+        out.insert(*k, (min, max));
+    }
+    out
+}
+
+fn lit_ty(l: &Literal) -> Ty {
+    match l {
+        Literal::Unit => Ty::Known(Type::Unit),
+        Literal::Bool(_) => Ty::Known(Type::Bool),
+        Literal::Int(_) => Ty::IntLit,
+        Literal::Float(_) => Ty::Known(Type::Float(FloatTy::F64)),
+        Literal::Str(_) => Ty::Known(Type::Str),
+        Literal::Char(_) => Ty::Known(Type::Char),
+    }
+}
+
+fn value_prov(value: &Core) -> Prov {
+    match value {
+        Core::Ctor { .. } | Core::Prim { .. } => Prov::Computed,
+        _ => Prov::Other,
+    }
+}
+
+fn is_linear(t: &Ty) -> bool {
+    matches!(t, Ty::Known(Type::Linear(_)))
+}
+
+fn is_ref(t: &Ty) -> bool {
+    matches!(t, Ty::Known(ty) if matches!(peel_ref_target(ty), Type::Ref { .. }))
+}
+
+/// Peel `Linear` wrappers to reach the underlying type (for ref/struct checks).
+fn peel_ref_target(t: &Type) -> &Type {
+    match t {
+        Type::Linear(inner) => peel_ref_target(inner),
+        other => other,
+    }
+}
+
+/// Peel both `Ref` and `Linear` wrappers to reach a nominal/tuple for
+/// projection.
+fn peel(t: &Type) -> &Type {
+    match t {
+        Type::Ref { of, .. } => peel(of),
+        Type::Linear(inner) => peel(inner),
+        other => other,
+    }
+}
+
+/// The fields and linearity of a lowered struct type (`Tuple`, possibly
+/// `Linear`-wrapped).
+fn peel_struct(t: &Type) -> (Vec<Type>, bool) {
+    match t {
+        Type::Linear(inner) => {
+            let (f, _) = peel_struct(inner);
+            (f, true)
+        }
+        Type::Tuple(fields) => (fields.clone(), false),
+        _ => (Vec::new(), false),
+    }
+}
+
+/// Structural type compatibility with the checker's two special types: `Unknown`
+/// is compatible with anything, an integer literal with any integer type. Arrow
+/// effect rows are ignored (subsumption is checked separately).
+fn compatible(a: &Ty, b: &Ty) -> bool {
+    match (a, b) {
+        (Ty::Unknown, _) | (_, Ty::Unknown) => true,
+        (Ty::IntLit, Ty::IntLit) => true,
+        (Ty::IntLit, Ty::Known(Type::Int(_))) | (Ty::Known(Type::Int(_)), Ty::IntLit) => true,
+        (Ty::IntLit, _) | (_, Ty::IntLit) => false,
+        (Ty::Known(x), Ty::Known(y)) => type_eq(x, y),
+    }
+}
+
+/// Structural type equality that ignores arrow effect rows (those are compared
+/// by the dedicated effect/error subsumption check, not by unification).
+fn type_eq(a: &Type, b: &Type) -> bool {
+    use Type::*;
+    match (a, b) {
+        (Unit, Unit) | (Bool, Bool) | (Str, Str) | (Char, Char) => true,
+        (Int(x), Int(y)) => x == y,
+        (Float(x), Float(y)) => x == y,
+        (Array(e1, n1), Array(e2, n2)) => n1 == n2 && type_eq(e1, e2),
+        (Slice(e1), Slice(e2)) => type_eq(e1, e2),
+        (Tuple(xs), Tuple(ys)) => {
+            xs.len() == ys.len() && xs.iter().zip(ys).all(|(x, y)| type_eq(x, y))
+        }
+        (
+            Arrow {
+                param: p1, ret: r1, ..
+            },
+            Arrow {
+                param: p2, ret: r2, ..
+            },
+        ) => type_eq(p1, p2) && type_eq(r1, r2),
+        (Nominal { def: d1, args: a1 }, Nominal { def: d2, args: a2 }) => {
+            d1 == d2 && a1.len() == a2.len() && a1.iter().zip(a2).all(|(x, y)| type_eq(x, y))
+        }
+        (
+            Ref {
+                mutable: m1,
+                of: o1,
+            },
+            Ref {
+                mutable: m2,
+                of: o2,
+            },
+        ) => m1 == m2 && type_eq(o1, o2),
+        (Linear(x), Linear(y)) => type_eq(x, y),
+        (Var(x), Var(y)) => x == y,
+        _ => false,
+    }
+}
+
+fn numeric(t: &Ty) -> bool {
+    matches!(
+        t,
+        Ty::IntLit | Ty::Unknown | Ty::Known(Type::Int(_)) | Ty::Known(Type::Float(_))
+    )
+}
+
+/// The result type of an arithmetic op given two numeric operands: prefer a
+/// concrete width over an integer literal.
+fn join_numeric(l: &Ty, r: &Ty) -> Ty {
+    match (l, r) {
+        (Ty::Known(t), _) | (_, Ty::Known(t)) => Ty::Known(t.clone()),
+        _ => Ty::IntLit,
+    }
+}
+
+fn ty_to_type(t: &Ty) -> Type {
+    match t {
+        Ty::Known(t) => t.clone(),
+        // An integer literal with no constraint defaults to `i32`; `Unknown`
+        // collapses to unit only for display/return purposes (it never reaches a
+        // hash — the checker does not re-emit Core).
+        Ty::IntLit => Type::Int(IntTy::I32),
+        Ty::Unknown => Type::Unit,
+    }
+}
+
+fn arg(args: &[Ty], i: usize) -> &Ty {
+    args.get(i).unwrap_or(&Ty::Unknown)
+}
+
+fn union(mut a: EffectRow, b: &EffectRow) -> EffectRow {
+    for c in &b.caps {
+        if !a.caps.contains(c) {
+            a.caps.push(*c);
+        }
+    }
+    for e in &b.errors {
+        if !a.errors.contains(e) {
+            a.errors.push(*e);
+        }
+    }
+    a
+}
+
+fn lowercase_first(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) => c.to_lowercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    }
+}
+
+fn missing_arms_text(missing: &[String]) -> String {
+    missing
+        .iter()
+        .map(|v| format!("{v} => {{ todo }},\n"))
+        .collect()
+}
+
+fn prim_name(op: PrimOp) -> &'static str {
+    use PrimOp::*;
+    match op {
+        Add => "+",
+        Sub => "-",
+        Mul => "*",
+        Div => "/",
+        Rem => "%",
+        Eq => "==",
+        Ne => "!=",
+        Lt => "<",
+        Le => "<=",
+        Gt => ">",
+        Ge => ">=",
+        And => "and",
+        Or => "or",
+        Not => "not",
+        Len => "len",
+        Index => "index",
+    }
+}
+
+// ---- display ------------------------------------------------------------
+
+fn show_ty(t: &Ty) -> String {
+    match t {
+        Ty::Known(t) => show_type(t),
+        Ty::IntLit => "{integer}".to_string(),
+        Ty::Unknown => "{unknown}".to_string(),
+    }
+}
+
+fn show_type(t: &Type) -> String {
+    match t {
+        Type::Unit => "()".into(),
+        Type::Bool => "bool".into(),
+        Type::Int(i) => int_name(*i).into(),
+        Type::Float(FloatTy::F32) => "f32".into(),
+        Type::Float(FloatTy::F64) => "f64".into(),
+        Type::Str => "str".into(),
+        Type::Char => "char".into(),
+        Type::Array(e, n) => format!("[{n}]{}", show_type(e)),
+        Type::Slice(e) => format!("[]{}", show_type(e)),
+        Type::Tuple(es) => {
+            let inner: Vec<String> = es.iter().map(show_type).collect();
+            format!("({})", inner.join(", "))
+        }
+        Type::Arrow { param, ret, .. } => format!("fn({}) -> {}", show_type(param), show_type(ret)),
+        Type::Nominal { def, .. } => format!("nominal#{}", &def.to_hex()[..8]),
+        Type::Ref { mutable: true, of } => format!("&mut {}", show_type(of)),
+        Type::Ref { mutable: false, of } => format!("&{}", show_type(of)),
+        Type::Linear(inner) => format!("linear {}", show_type(inner)),
+        Type::Var(i) => format!("T{i}"),
+    }
+}
+
+fn int_name(i: IntTy) -> &'static str {
+    match i {
+        IntTy::I8 => "i8",
+        IntTy::I16 => "i16",
+        IntTy::I32 => "i32",
+        IntTy::I64 => "i64",
+        IntTy::Isize => "isize",
+        IntTy::U8 => "u8",
+        IntTy::U16 => "u16",
+        IntTy::U32 => "u32",
+        IntTy::U64 => "u64",
+        IntTy::Usize => "usize",
+    }
+}

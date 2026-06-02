@@ -12,6 +12,7 @@ implementation, and are expected to grow with each milestone.
 | [`cli.md`](cli.md) | The `marv` command-line interface and its subcommands. |
 | [`formatter.md`](formatter.md) | The canonical formatter: what "canonical form" means and the current M0 status. |
 | [`core-ir.md`](core-ir.md) | The Core IR and content hashing: ANF + de Bruijn lowering and `blake3` identity (M1). |
+| [`checker.md`](checker.md) | The checker: type / effect / capability / error-set / reference / linearity checking and the error-code catalog (M2). |
 
 ## Relationship to the rest of the repo
 
