@@ -7,3 +7,5 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
+blake3 = "1"
+marv-syntax = { path = "../marv-syntax" }
