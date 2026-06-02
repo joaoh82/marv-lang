@@ -14,41 +14,59 @@ minimal, review never spends attention on style, and the round-trip property
   `marv-syntax`, milestone M0).
 - `marv fmt` — the CLI wrapper. See [`cli.md`](cli.md).
 
-## Current status: the M0 whitespace subset
+## Current status: M0 parse-and-reprint (with whitespace fallback)
 
-The lexer/parser/AST are still being built, so a true parse-and-reprint formatter
-does not exist yet. What ships today is the conservative subset that needs no
-parser — a **whitespace canonicalizer**:
+`format` is now **hybrid**. It parses its input and, if the input is an M0-subset
+module, reprints it in true canonical form (the parser's inverse). Input that is
+*outside* the parsed subset — or otherwise unparseable — falls back to the
+original parser-free **whitespace canonicalizer**. As later milestones widen the
+parsed grammar, more programs take the full parse-and-reprint path.
+
+### The parsed subset (full canonicalization)
+
+When the input parses, the formatter applies every canonical rule:
 
 | Rule | Effect |
 |------|--------|
-| Line endings | `\r\n` and `\r` → `\n` |
-| Tabs | expand to 4 spaces |
-| Trailing whitespace | stripped from every line |
-| Blank-line runs | collapsed to a single blank line |
-| Leading blank lines | dropped |
+| Indentation | 4 spaces per block level, recomputed from structure |
+| Statements | one per line; blank lines between top-level items |
+| Binary operators | every node fully parenthesized as `(a op b)` |
+| Spacing | exactly one space around `=`, `:`, `->`, operators; `, ` separators |
+| Trailing commas / semicolons | removed |
+| Integer literals | `1_000` → `1000` |
+| String escapes | normalized (`\n`, `\t`, `\r`, `\"`, `\\`) |
 | File ending | exactly one trailing newline |
 
-Properties it already guarantees:
+The covered subset is module headers, imports, `struct`/`fn` declarations
+(`pure fn`, `linear struct`), the type language (named, `[]T`, `&`/`&mut`, `()`),
+`let`/`var`/`return` statements, block tails, and value expressions with binary
+operators and `if`/`else`. See `crates/marv-syntax/src/ast.rs`.
 
-- **Deterministic** — same input, same output, every time.
-- **Idempotent** — `format(format(x)) == format(x)`. Enforced by tests.
+### The whitespace fallback
 
-What it deliberately does **not** do yet (these require the parser): reflow
-internal spacing (`fn  main` stays as written), normalize indentation depth,
-insert canonical parenthesization, or normalize `;` separators.
+For input the parser does not (yet) accept, `format` normalizes line endings,
+expands tabs to 4 spaces, strips trailing whitespace, collapses blank-line runs,
+drops leading blank lines, and guarantees a single trailing newline — but does
+not reflow code. It is exposed directly as `marv_syntax::canonicalize_whitespace`.
+
+Both paths are **deterministic** and **idempotent** (`format(format(x)) ==
+format(x)`), enforced by tests.
 
 ## Tests
 
 - Unit tests: `crates/marv-syntax/src/lib.rs` (`#[cfg(test)]`).
-- Golden + property tests: `crates/marv-syntax/tests/golden.rs`, driven by
-  `tests/fmt/*.in.mv` / `*.out.mv` fixtures and the canonical `examples/*.mv`.
+- Round-trip + idempotence property tests: `crates/marv-syntax/tests/roundtrip.rs`
+  — a built-in deterministic LCG generates thousands of in-subset ASTs and asserts
+  `parse(format(ast)) == ast` (the M0 acceptance gate).
+- Golden tests: `crates/marv-syntax/tests/golden.rs`, driven by `tests/fmt/*.in.mv`
+  / `*.out.mv` fixtures and the canonical `examples/*.mv`.
 
 ## Roadmap
 
-1. **M0 completion** — lexer + recursive-descent parser + AST, then replace the
-   whitespace pass with parse-and-reprint. Prove `parse ∘ format == id` with
-   proptest.
+1. **M0 (done)** — lexer + recursive-descent parser + AST + parse-and-reprint
+   formatter over a bounded subset; `parse ∘ format == id` proven by a property
+   test. Widen the parsed grammar (contracts, `while`/`for`, `match`, `enum`,
+   `?`, error unions) toward full coverage so the whitespace fallback fades out.
 2. Expose the formatter as the `marv/canonical` and `marv/format` protocol
    methods (`spec/03`, milestone M3).
 
