@@ -1,0 +1,31 @@
+mod report
+import std.io (Fs)
+import std.collections (List)
+
+struct Sale { region: str, amount: i64 }
+
+error LoadError { NotFound, BadFormat }
+
+/// Pure aggregation: the signature proves no I/O and no allocation. The loop
+/// carries an `invariant` (a Tier-1/Tier-2 proof obligation).
+pure fn total(sales: &[]Sale) -> i64
+    ensures result >= 0
+{
+    var sum: i64 = 0
+    var i: usize = 0
+    while i < len(sales)
+        invariant i <= len(sales)
+    {
+        sum = sum + sales[i].amount
+        i = i + 1
+    }
+    sum
+}
+
+/// The effect row in the signature proves: touches the filesystem, nothing
+/// else. The inferred error set is the union of the file and parse errors.
+fn load_and_total(fs: Fs, path: str) -> !i64 {
+    let bytes = fs.read(path)?
+    let sales = parse_sales(bytes)?
+    total(&sales)
+}

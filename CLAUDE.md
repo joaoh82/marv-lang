@@ -53,8 +53,34 @@ crates/
   marv-server/      # JSON-RPC agent-protocol server (wraps marv-db queries)
   marv-cli/         # `marv` command-line front-end
 std/                # marv standard library, written in marv
+examples/           # illustrative .mv programs, kept in canonical form
 tests/              # golden tests, round-trip property tests, differential tests
+docs/               # human-facing toolchain documentation (usage + impl status)
 ```
+
+## Keeping examples, tests, and docs current
+
+`examples/`, `tests/`, and `docs/` are first-class and must not be allowed to
+drift from the implementation. Treat updating them as **part of** any change that
+affects observable behavior, not a follow-up:
+
+- **`examples/`** — illustrative `.mv` programs that track the language as the
+  specs describe it. Every file must be in canonical form; the
+  `examples_are_canonical` test (`crates/marv-syntax/tests/golden.rs`) enforces
+  this. When syntax/semantics change, update the affected examples (and run
+  `marv fmt examples/*.mv`). Add an example when a milestone introduces a feature
+  worth showing.
+- **`tests/`** — repository-level golden/round-trip/differential fixtures. When a
+  phase changes output (formatter normalization, Core-IR hashing, diagnostics),
+  add or refresh the matching fixture in the same change. The runnable harness
+  lives in the relevant crate's `tests/` and reads these fixtures by path.
+- **`docs/`** — toolchain usage and per-milestone implementation status. When a
+  milestone changes observable behavior (a new subcommand, a new protocol method,
+  the formatter learning to reflow), update the matching doc in the same change.
+  Keep status claims honest about what is and isn't implemented yet.
+
+A change that alters behavior without touching the relevant example/test/doc is
+incomplete.
 
 ## Build milestones (implement in this order)
 
