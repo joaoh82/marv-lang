@@ -1,0 +1,13 @@
+mod sample
+import std.io (Io)
+
+struct Pair { a: i32, b: i32 }
+
+pure fn pick(p: Pair, flag: bool) -> i32 {
+    let base = (p.a + (p.b * 2))
+    if flag {
+        p.a
+    } else {
+        base
+    }
+}

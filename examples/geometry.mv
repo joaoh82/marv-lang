@@ -1,0 +1,24 @@
+mod geometry
+import std.math (Abs)
+
+struct Point { x: i32, y: i32 }
+
+linear struct Handle {}
+
+pure fn max(a: i32, b: i32) -> i32 {
+    if (a < b) {
+        b
+    } else {
+        a
+    }
+}
+
+pure fn manhattan(p: &Point, q: &Point) -> i32 {
+    let dx = max((p.x - q.x), (q.x - p.x))
+    let dy = max((p.y - q.y), (q.y - p.y))
+    (dx + dy)
+}
+
+fn translate(p: &mut Point, dx: i32, dy: i32) {
+    p.move(dx, dy)
+}

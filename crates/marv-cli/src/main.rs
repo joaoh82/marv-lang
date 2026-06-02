@@ -21,10 +21,13 @@ USAGE:
     marv <command> [args]
 
 COMMANDS:
-    fmt [--check] [files...]   Canonicalize marv source. With no files, reads
-                               stdin and writes canonical form to stdout.
-                               With --check, exits non-zero if any input is not
-                               already in canonical form (writes nothing).
+    fmt [--write|--check] [files...]
+                               Canonicalize marv source. With no files, reads
+                               stdin and writes canonical form to stdout. With
+                               files and no flag, prints each file's canonical
+                               form to stdout. With --write, rewrites each file
+                               in place. With --check, writes nothing and exits
+                               non-zero if any input is not already canonical.
     check [files...]           Type / effect / capability check (milestone M2).
     build [target]             Compile a target (milestone M4).
     verify [files...]          Discharge contracts via SMT (milestone M6).
@@ -68,7 +71,13 @@ fn not_yet_implemented(command: &str, milestone: &str) -> ExitCode {
 /// `marv fmt` — canonicalize source via `marv-syntax::format`.
 fn cmd_fmt(args: &[String]) -> ExitCode {
     let check_only = args.iter().any(|a| a == "--check");
+    let write = args.iter().any(|a| a == "--write");
     let files: Vec<&String> = args.iter().filter(|a| !a.starts_with("--")).collect();
+
+    if check_only && write {
+        eprintln!("marv fmt: --check and --write are mutually exclusive");
+        return ExitCode::FAILURE;
+    }
 
     // No files: act as a stdin -> stdout filter.
     if files.is_empty() {
@@ -93,7 +102,8 @@ fn cmd_fmt(args: &[String]) -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
-    // Files: format each in place (or, with --check, report which differ).
+    // Files: print to stdout by default, rewrite in place with --write, or
+    // report non-canonical files with --check.
     let mut had_error = false;
     let mut needs_formatting = false;
 
@@ -116,11 +126,16 @@ fn cmd_fmt(args: &[String]) -> ExitCode {
             continue;
         }
 
-        if formatted != src {
-            if let Err(e) = std::fs::write(path, &formatted) {
-                eprintln!("marv fmt: {path}: {e}");
-                had_error = true;
+        if write {
+            if formatted != src {
+                if let Err(e) = std::fs::write(path, &formatted) {
+                    eprintln!("marv fmt: {path}: {e}");
+                    had_error = true;
+                }
             }
+        } else if let Err(e) = io::stdout().write_all(formatted.as_bytes()) {
+            eprintln!("marv fmt: writing stdout: {e}");
+            return ExitCode::FAILURE;
         }
     }
 
