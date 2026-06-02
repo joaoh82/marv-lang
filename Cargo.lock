@@ -121,6 +121,10 @@ version = "0.0.0"
 [[package]]
 name = "marv-types"
 version = "0.0.0"
+dependencies = [
+ "marv-core",
+ "marv-syntax",
+]
 
 [[package]]
 name = "marv-verify"

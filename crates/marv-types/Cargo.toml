@@ -7,3 +7,7 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
+marv-core = { path = "../marv-core" }
+
+[dev-dependencies]
+marv-syntax = { path = "../marv-syntax" }
