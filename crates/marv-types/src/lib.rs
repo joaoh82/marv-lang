@@ -39,7 +39,7 @@ pub mod check;
 pub mod diagnostic;
 pub mod world;
 
-pub use check::check_def;
+pub use check::{check_def, effect_row};
 pub use diagnostic::{Code, Diagnostic, Edit, Fix, Position, Related, Severity, Span};
 pub use world::{
     CapDecl, EnumDecl, ErrorDecl, OpSig, StructDecl, VariantDecl, World, WorldBuilder,

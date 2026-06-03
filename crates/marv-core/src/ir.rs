@@ -13,6 +13,18 @@
 //! with the minimal-but-forward-looking shape M1 needs. Their *encoding* — and
 //! therefore the hash — is pinned explicitly in [`crate::hash`] via stable tag
 //! bytes, so reordering a variant in this file never changes a content hash.
+//!
+//! ## Serde / the protocol wire form (`spec/03` §4.4)
+//!
+//! Every Core node derives `serde::{Serialize, Deserialize}` with serde's default
+//! *externally-tagged* representation, which is exactly the JSON the agent
+//! protocol's `marv/core` query emits: a struct variant `Lam` becomes
+//! `{"Lam": { … }}`, a newtype variant `Var(0)` becomes `{"Var": 0}`, and a unit
+//! variant `I32` becomes `"I32"` (see `spec/03` §4.4). [`Hash`] is the one
+//! exception — it (de)serializes as the spec's `"b3:<hex>"` string rather than a
+//! byte array, so content identities are human-readable on the wire.
+
+use serde::{Deserialize, Serialize};
 
 /// A content hash of a Core definition: `blake3`-256 over its canonical encoding
 /// (`spec/02` §F). Also used for content-addressed references to other
@@ -32,6 +44,40 @@ impl Hash {
         }
         s
     }
+
+    /// The protocol wire spelling: the `b3:` algorithm tag followed by the full
+    /// lowercase hex (`spec/03` §4.4, e.g. `"b3:9f2c1a…"`).
+    pub fn to_b3(&self) -> String {
+        format!("b3:{}", self.to_hex())
+    }
+
+    /// Parse a `b3:<hex>` (or bare `<hex>`) string back into a [`Hash`]. Returns
+    /// `None` on a wrong-length or non-hex body.
+    pub fn from_b3(s: &str) -> Option<Hash> {
+        let hex = s.strip_prefix("b3:").unwrap_or(s);
+        if hex.len() != 64 {
+            return None;
+        }
+        let mut bytes = [0u8; 32];
+        for (i, b) in bytes.iter_mut().enumerate() {
+            *b = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).ok()?;
+        }
+        Some(Hash(bytes))
+    }
+}
+
+impl serde::Serialize for Hash {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&self.to_b3())
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Hash {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Hash, D::Error> {
+        let s = String::deserialize(d)?;
+        Hash::from_b3(&s)
+            .ok_or_else(|| serde::de::Error::custom(format!("invalid b3 content hash: {s:?}")))
+    }
 }
 
 impl std::fmt::Debug for Hash {
@@ -48,7 +94,7 @@ impl std::fmt::Display for Hash {
 }
 
 /// Width of an integer type. Names match the surface spellings (`i32`, `usize`…).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum IntTy {
     I8,
     I16,
@@ -63,14 +109,14 @@ pub enum IntTy {
 }
 
 /// Width of a floating-point type.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FloatTy {
     F32,
     F64,
 }
 
 /// A canonical Core type (`spec/02` §C `Type`).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Type {
     Unit,
     Bool,
@@ -109,7 +155,7 @@ pub enum Type {
 /// Both fields are *set-like*: their declaration order is incidental, so the
 /// encoder sorts them into a single canonical order before hashing (`spec/02`
 /// §F rule 3). `pure` is exactly the empty row.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct EffectRow {
     /// Capabilities this computation may exercise, as content hashes of cap decls.
     pub caps: Vec<Hash>,
@@ -131,7 +177,7 @@ impl EffectRow {
 
 /// A literal value. The M0 surface produces `Unit`/`Bool`/`Int`/`Str`; the rest
 /// are defined for forward compatibility and pinned in the encoder.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Literal {
     Unit,
     Bool(bool),
@@ -144,7 +190,7 @@ pub enum Literal {
 
 /// An atomic operand (`spec/02` §C `Atom`). ANF guarantees every operand is one
 /// of these three.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Atom {
     /// de Bruijn index into the local environment.
     Var(u32),
@@ -156,7 +202,7 @@ pub enum Atom {
 /// A total primitive operation (`spec/02` §C `Core::Prim`). The M0 binary
 /// operators map here; `Not`/`Len`/`Index`/`Cast` round out the total set the
 /// later milestones need.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PrimOp {
     Add,
     Sub,
@@ -180,7 +226,7 @@ pub enum PrimOp {
 }
 
 /// Comparison operator used inside contract predicates ([`Pred`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CmpOp {
     Eq,
     Ne,
@@ -191,11 +237,11 @@ pub enum CmpOp {
 }
 
 /// Identifies a capability method at a [`Core::Perform`] site (`spec/02` §C).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OpId(pub u32);
 
 /// A Core term (`spec/02` §C `Core`).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Core {
     Atom(Atom),
     /// let-binding; binds exactly one variable (index 0) in `body`. ANF spine.
@@ -258,7 +304,7 @@ pub enum Core {
 
 /// One arm of a [`Core::Match`]. `binds` is the constructor arity introduced
 /// into scope for the branch body (0 for nullary variants such as `bool`).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Branch {
     pub binds: u32,
     pub body: Core,
@@ -267,7 +313,7 @@ pub struct Branch {
 /// First-order predicate language used by contracts (Tier-2 proof obligations,
 /// `spec/02` §C `Pred`). Defined in full for forward compatibility; M1 does not
 /// yet parse `requires`/`ensures`, so lowered defs carry empty contracts.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Pred {
     True,
     False,
@@ -287,7 +333,7 @@ pub enum Pred {
 }
 
 /// The kind of a top-level definition (`spec/02` §C `Def.kind`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DefKind {
     Fn,
     Struct,
@@ -302,7 +348,7 @@ pub enum DefKind {
 /// A top-level, content-addressed definition (`spec/02` §C `Def`). Its [`Hash`]
 /// is computed over this struct with all `Hash` children already resolved —
 /// forming a Merkle DAG of code (see [`crate::hash`]).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Def {
     pub kind: DefKind,
     pub ty: Type,

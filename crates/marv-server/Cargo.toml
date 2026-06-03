@@ -6,4 +6,18 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 
+[lib]
+name = "marv_server"
+path = "src/lib.rs"
+
+[[bin]]
+name = "marv-server"
+path = "src/main.rs"
+
 [dependencies]
+serde.workspace = true
+serde_json.workspace = true
+salsa.workspace = true
+marv-db = { path = "../marv-db" }
+marv-core = { path = "../marv-core" }
+marv-types = { path = "../marv-types" }
