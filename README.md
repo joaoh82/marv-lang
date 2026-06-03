@@ -162,7 +162,8 @@ deliberate growing subset (today: `fn`/`struct`, `let`/`var`, `if`/`else`, arith
 ops, calls/recursion, `pure` + `requires`/`ensures` contracts); enums/`match`, loops, `?`
 error handling, generics, capabilities-from-source, and collections are the next surface
 work. The full backlog (surface growth → backend breadth → verification breadth → AOT/LLVM →
-self-hosting) is tracked as tasks in the project tracker.
+self-hosting) — with phases, ordering, and the dependency graph — is in
+[`docs/roadmap.md`](docs/roadmap.md), mapped to the `MARV-#` tasks in the project tracker.
 
 ## Contributing
 
