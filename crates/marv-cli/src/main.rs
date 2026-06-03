@@ -17,6 +17,7 @@ use std::io::{self, Read, Write};
 use std::process::ExitCode;
 
 use marv_codegen_cl as codegen;
+use marv_codegen_wasm as wasm;
 use marv_interp::Program;
 
 use pipeline::{any_errors, load, print_diags, Loaded};
@@ -37,11 +38,13 @@ COMMANDS:
                                non-zero if any input is not already canonical.
     check <file>               Type / effect / capability check a `.mv` source
                                file or a `.core.json` Core-IR snapshot.
-    build [--target native-cranelift] [--run] [--entry NAME] <file> [args...]
-                               Compile with the Cranelift backend. Refuses to
-                               build a file that fails `check`. With --run, also
-                               JIT-executes the entry point and prints its
-                               integer result.
+    build [--target T] [--run] [--out PATH] [--entry NAME] <file> [args...]
+                               Compile. Refuses to build a file that fails
+                               `check`. Targets: `native-cranelift` (default;
+                               --run JIT-executes the entry and prints its
+                               integer result) and `wasm-component` (writes a
+                               .wasm module to --out, default <file>.wasm, and
+                               reports the host imports = capabilities it needs).
     run [--grant CAP,CAP] [--entry NAME] <file> [args...]
                                Interpret an entry point (the semantics oracle).
                                Capabilities enter only through --grant; the
@@ -117,8 +120,12 @@ fn cmd_check(args: &[String]) -> ExitCode {
 
 // ---- build --------------------------------------------------------------
 
-/// `marv build [--target native-cranelift] [--run] [--entry NAME] <file>` —
-/// check, then compile with Cranelift; optionally JIT-run the entry point.
+/// `marv build [--target T] [--run] [--out PATH] [--entry NAME] <file>` —
+/// check, then compile with the selected backend.
+///
+/// Targets: `native-cranelift` (Cranelift JIT; `--run` executes it) and
+/// `wasm-component` (a WebAssembly module written to `--out`, default
+/// `<file>.wasm`). Both refuse code that fails `check`.
 fn cmd_build(args: &[String]) -> ExitCode {
     let inv = match parse_invocation(args) {
         Ok(i) => i,
@@ -127,20 +134,12 @@ fn cmd_build(args: &[String]) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    if inv.target != "native-cranelift" {
-        eprintln!(
-            "marv build: unsupported target `{}` (only `native-cranelift` is implemented; \
-             LLVM/WASM are later milestones)",
-            inv.target
-        );
-        return ExitCode::FAILURE;
-    }
-    let Some(file) = &inv.file else {
+    let Some(file) = inv.file.clone() else {
         eprintln!("marv build: expected a file");
         return ExitCode::FAILURE;
     };
 
-    let loaded = match load(file) {
+    let loaded = match load(&file) {
         Ok(l) => l,
         Err(e) => {
             eprintln!("marv build: {e}");
@@ -157,6 +156,24 @@ fn cmd_build(args: &[String]) -> ExitCode {
         return ExitCode::FAILURE;
     }
 
+    match inv.target.as_str() {
+        "native-cranelift" => build_native(&inv, &file, &loaded),
+        // `wasm-component` is the spec's name for the WASM target; today the
+        // artifact is a core module (the component's substrate), with
+        // capabilities as host imports per the component model (`spec/01` §9).
+        "wasm-component" | "wasm" => build_wasm(&inv, &file, &loaded),
+        other => {
+            eprintln!(
+                "marv build: unsupported target `{other}` (have `native-cranelift`, \
+                 `wasm-component`; LLVM is a later milestone)"
+            );
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Cranelift backend: JIT-compile, and with `--run` execute the entry point.
+fn build_native(inv: &Invocation, file: &str, loaded: &Loaded) -> ExitCode {
     let jit = match codegen::compile(&loaded.module_path, &loaded.defs) {
         Ok(j) => j,
         Err(e) => {
@@ -164,7 +181,6 @@ fn cmd_build(args: &[String]) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-
     let arity = match jit.entry_arity(&inv.entry) {
         Ok(n) => n,
         Err(e) => {
@@ -172,7 +188,6 @@ fn cmd_build(args: &[String]) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-
     if !inv.run {
         eprintln!(
             "marv build: {file}: compiled via native-cranelift (entry takes {arity} word \
@@ -180,8 +195,6 @@ fn cmd_build(args: &[String]) -> ExitCode {
         );
         return ExitCode::SUCCESS;
     }
-
-    // --run: JIT-execute the entry point with integer arguments.
     let ints = match parse_int_args(&inv.args, arity) {
         Ok(v) => v,
         Err(e) => {
@@ -199,6 +212,56 @@ fn cmd_build(args: &[String]) -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// WebAssembly backend: emit a `.wasm` module and report its capability
+/// manifest (the host imports it requires; a pure module requires none).
+fn build_wasm(inv: &Invocation, file: &str, loaded: &Loaded) -> ExitCode {
+    let artifact = match wasm::compile(&loaded.module_path, &loaded.defs, &loaded.world) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("marv build: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let out = inv.out.clone().unwrap_or_else(|| default_wasm_out(file));
+    if let Err(e) = std::fs::write(&out, &artifact.bytes) {
+        eprintln!("marv build: {out}: {e}");
+        return ExitCode::FAILURE;
+    }
+
+    eprintln!(
+        "marv build: {file}: wrote {out} ({} bytes) via wasm-component",
+        artifact.bytes.len()
+    );
+    if artifact.imports.is_empty() {
+        eprintln!("  capabilities required: none (pure — imports nothing)");
+    } else {
+        eprintln!("  capabilities required (host imports):");
+        for imp in &artifact.imports {
+            eprintln!("    {}::op{} ({} arg(s))", imp.cap, imp.op, imp.params);
+        }
+    }
+    eprintln!("  exports: {}", join_exports(&artifact.exports));
+    ExitCode::SUCCESS
+}
+
+/// Default `.wasm` output path: the input file with its extension replaced.
+fn default_wasm_out(file: &str) -> String {
+    let base = file
+        .strip_suffix(".core.json")
+        .or_else(|| file.strip_suffix(".mv"))
+        .unwrap_or(file);
+    format!("{base}.wasm")
+}
+
+fn join_exports(exports: &[wasm::ExportInfo]) -> String {
+    exports
+        .iter()
+        .map(|e| format!("{}/{}", e.name, e.arity))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 // ---- run ----------------------------------------------------------------
@@ -263,6 +326,8 @@ struct Invocation {
     run: bool,
     entry: String,
     grant: Vec<String>,
+    /// Output path for `build` artifacts (`--out`/`-o`); defaults per target.
+    out: Option<String>,
     file: Option<String>,
     args: Vec<String>,
 }
@@ -276,6 +341,7 @@ fn parse_invocation(args: &[String]) -> Result<Invocation, String> {
         run: false,
         entry: String::new(),
         grant: Vec::new(),
+        out: None,
         file: None,
         args: Vec::new(),
     };
@@ -294,6 +360,7 @@ fn parse_invocation(args: &[String]) -> Result<Invocation, String> {
             "--" => only_args = true,
             "--run" => inv.run = true,
             "--target" => inv.target = take_value(args, &mut i, "--target")?,
+            "--out" | "-o" => inv.out = Some(take_value(args, &mut i, "--out")?),
             "--entry" => inv.entry = take_value(args, &mut i, "--entry")?,
             "--grant" => {
                 let list = take_value(args, &mut i, "--grant")?;

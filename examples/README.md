@@ -20,8 +20,10 @@ fmt` normalizes them with its whitespace fallback for now. `geometry.mv`,
 `factorial.mv`, and `arithmetic.mv` are inside the parsed subset, so `marv fmt`
 reprints them from the AST and the `examples_are_canonical` test exercises the
 parser itself. `factorial.mv` and `arithmetic.mv` additionally lie inside the
-*executable* subset, so both the interpreter and the Cranelift backend run them
-(`marv run` / `marv build --run`).
+*executable* subset, so all three backends run them — the interpreter
+(`marv run`), the Cranelift JIT (`marv build --run`), and WebAssembly
+(`marv build --target wasm-component`, then via wasmtime or the browser demo in
+[`../web/`](../web)).
 
 ## Invariant: examples stay canonical
 

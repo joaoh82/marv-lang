@@ -36,6 +36,11 @@ fixtures from this directory by relative path. `cargo test` exercises:
   Each `run/*.mv` program is executed by *both* the interpreter and the Cranelift
   backend and the two results must match (and equal a golden value); the
   `run/uses_ungranted_cap.core.json` snapshot must be rejected by the checker.
+- **`wasm_agrees_with_interpreter`** (`../crates/marv-codegen-wasm/tests/differential.rs`)
+  — the M5 acceptance gate. The same `run/*.mv` corpus is compiled to WebAssembly
+  and executed under **wasmtime**, matching the interpreter; a pure module imports
+  nothing while a capability-using module surfaces that capability as a host
+  import. The browser side of the sandbox lives in [`../web/`](../web).
 
 Fixtures come in two flavors: **in-subset** cases (e.g. `fmt/decls.in.mv`) drive
 the real parse-and-reprint formatter (indentation, parenthesization, spacing),

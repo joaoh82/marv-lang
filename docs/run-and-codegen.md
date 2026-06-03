@@ -87,12 +87,60 @@ marv build --run examples/factorial.mv --entry factorial 6  # 720 (Cranelift JIT
 marv run   examples/arithmetic.mv                            # 42  (entry defaults to main)
 ```
 
+## The WebAssembly backend (M5)
+
+`marv-codegen-wasm` is the third backend, emitting a WebAssembly module with
+`wasm-encoder`. It compiles the same integer/boolean subset as Cranelift, plus
+`Core::Perform`, and every scalar is an `i64` — so it stays in lockstep with the
+oracle. `marv build --target wasm-component <file> -o out.wasm` writes the module
+and prints its capability manifest.
+
+### Capabilities are host imports
+
+This is the web sandbox `spec/01` §9 is built on. A `perform` of a capability
+lowers to a **call to an imported function** — one import per
+`(capability, operation)`, named `(CapName, "op<n>")`. Consequences:
+
+- A **pure** module performs nothing, so it **imports nothing**. There is no slot
+  through which any host could hand it authority — it can only compute.
+- A module that wants the network imports `Net::op0`. The host decides whether to
+  satisfy that import. Withhold it and the module **cannot be instantiated**, let
+  alone open a socket. The import list is the capability manifest, statically
+  inspectable (`WebAssembly.Module.imports` / the `marv build` output).
+- A capability parameter carries **no ABI slot** — authority is the import, not a
+  value threaded through the call. `demo.fetch(net)` exports as a zero-argument
+  wasm function; the `Net` it needs shows up as an *import*, not a parameter.
+
+### The differential gate and the browser demo
+
+`crates/marv-codegen-wasm/tests/differential.rs` runs the same `tests/run/*.mv`
+corpus through **wasmtime** and asserts it matches the interpreter, and checks
+that a pure module imports nothing while a `Net`-performing module imports exactly
+`Net`.
+
+[`../web/`](../web) is a dependency-free browser demo (serve it with any static
+server) proving the sandbox live:
+
+- `factorial.wasm` (pure) — manifest shows *imports: none*; runs with zero authority.
+- `fetcher.wasm` (imports `Net`) — with the grant unchecked the page supplies no
+  `Net` import and instantiation **fails** (the module cannot reach the network);
+  with it checked the page supplies `Net` and `fetch()` runs through it.
+
+```sh
+marv build --target wasm-component examples/factorial.mv -o web/factorial.wasm
+marv build --target wasm-component web/fetcher.core.json -o web/fetcher.wasm
+cd web && python3 -m http.server 8087   # then open http://localhost:8087/
+```
+
 ## Status and what's next
 
 - **Done:** interpreter over the full Core IR (capability injection, effect
-  logging, currying, recursion, `match`); Cranelift JIT over the integer/boolean
-  subset; `marv run`/`marv build --target native-cranelift`; the differential gate.
-- **Next (M4 cont. / M5+):** aggregates and `match` over enums in the native
-  backend; ahead-of-time object/executable emission and an LLVM backend for
-  release builds; the WASM/component backend (M5). The interpreter remains the
-  oracle each new backend is differentially tested against.
+  logging, currying, recursion, `match`); a Cranelift JIT and a WebAssembly
+  backend over the integer/boolean subset; `marv run`, `marv build --target
+  native-cranelift`, `marv build --target wasm-component`; the three-way
+  differential gate (interpreter ↔ Cranelift ↔ wasm) and a browser sandbox demo.
+- **Next:** aggregates and enum `match` in the native/wasm backends;
+  ahead-of-time object/executable emission and an LLVM backend for release builds;
+  string/aggregate-typed capability operands (needs linear memory) and full
+  component-model / WIT packaging. The interpreter remains the oracle each backend
+  is differentially tested against.
