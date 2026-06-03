@@ -25,3 +25,12 @@ license = "MIT OR Apache-2.0"
 authors = ["the marv authors"]
 repository = "https://github.com/joaoh82/marv"
 description = "marv — a compiled language whose author is an agent and whose auditor is a human"
+
+# Shared third-party dependency versions. Centralized so every crate that needs
+# salsa (the incremental query engine, M3's backbone) or serde (the JSON-RPC wire
+# format) moves in lockstep. Crates opt in with `salsa.workspace = true` etc.
+[workspace.dependencies]
+salsa = "0.24"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+blake3 = "1"

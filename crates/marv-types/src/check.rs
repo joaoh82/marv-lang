@@ -109,6 +109,53 @@ pub fn check_def(world: &World, def: &Def, name: Option<&str>) -> Vec<Diagnostic
     c.diags
 }
 
+/// The **inferred** effect row of a function definition's body — the union of
+/// every capability it performs and every error it can raise, regardless of what
+/// its signature declares (`spec/02` §E effect/error inference).
+///
+/// This is the value the declared row is checked *against* in
+/// [`check_def`]: a `MissingCapability`/`MissingError` diagnostic fires exactly
+/// when this row is not a subset of the declared one. The query server uses it
+/// for `marv/effects` and `marv/errorSet` (so they report what a body *actually*
+/// exercises, not merely what it declares), and `marv/applyFix` uses it to
+/// synthesize the repaired declaration. A non-`Fn` def, or a `Fn` with no body,
+/// has the empty row.
+pub fn effect_row(world: &World, def: &Def) -> EffectRow {
+    if def.kind != DefKind::Fn {
+        return EffectRow::empty();
+    }
+    let body = match &def.body {
+        Some(b) => b,
+        None => return EffectRow::empty(),
+    };
+    let mut c = Checker {
+        world,
+        diags: Vec::new(),
+    };
+    // Peel the curried arrow/lambda spine exactly as `check_fn` does, descending
+    // into the innermost body before synthesizing its effect row.
+    let mut env: Vec<Binder> = Vec::new();
+    let mut cur_ty = &def.ty;
+    let mut cur_body = body;
+    while let (
+        Type::Arrow { ret, .. },
+        Core::Lam {
+            param, body: lbody, ..
+        },
+    ) = (cur_ty, cur_body)
+    {
+        let linear = matches!(param, Type::Linear(_));
+        env.push(Binder {
+            ty: Ty::Known(param.clone()),
+            linear,
+            prov: Prov::Received,
+        });
+        cur_ty = ret;
+        cur_body = lbody;
+    }
+    c.synth(cur_body, &mut env).eff
+}
+
 /// The checker state for one definition.
 struct Checker<'a> {
     world: &'a World,
