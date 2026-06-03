@@ -63,13 +63,22 @@ pub struct Field {
     pub ty: Type,
 }
 
-/// `[pure] fn name(params) [-> ret] { body }`.
+/// `[pure] fn name(params) [-> ret] [requires e]* [ensures e]* { body }`.
+///
+/// Contract clauses (`spec/01` §7) sit between the signature and the body, each
+/// on its own line. `requires` expressions may mention the parameters;
+/// `ensures` expressions may additionally mention `result`. They are boolean
+/// expressions in the ordinary expression language (lowered to `Pred`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FnDecl {
     pub is_pure: bool,
     pub name: String,
     pub params: Vec<Param>,
     pub ret: Option<Type>,
+    /// Preconditions, in source order (`requires` clauses).
+    pub requires: Vec<Expr>,
+    /// Postconditions, in source order (`ensures` clauses; may mention `result`).
+    pub ensures: Vec<Expr>,
     pub body: Block,
 }
 

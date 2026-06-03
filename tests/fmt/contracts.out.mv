@@ -1,0 +1,12 @@
+mod m
+
+pure fn f(a: i32, b: i32) -> i32
+    requires (a <= b)
+    ensures ((result >= a) and (result <= b))
+{
+    if (a < b) {
+        a
+    } else {
+        b
+    }
+}

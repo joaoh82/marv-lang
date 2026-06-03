@@ -19,9 +19,9 @@
 //!
 //! Workspace: `openSnapshot`, `applyEdits`, `closeSnapshot`. Read-only queries:
 //! `check`, `typeAt`, `signature`, `errorSet`, `effects`, `callers`, `callees`,
-//! `canonical`, `core`, `hash`. Mutation: `applyFix`, `format`. (Verification and
-//! build/run — `verify`/`build`/`run`/`commit` — belong to later milestones and
-//! report method-not-found.)
+//! `canonical`, `core`, `hash`. Mutation: `applyFix`, `format`. Verification:
+//! `verify` (Tier-2 SMT discharge, M6). Build/run — `build`/`run`/`commit` —
+//! belong to later milestones and report method-not-found.
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, Write};
@@ -221,6 +221,7 @@ impl Server {
             "canonical" => self.canonical(params),
             "core" => self.core(params),
             "hash" => self.hash(params),
+            "verify" => self.verify(params),
             "applyFix" => self.apply_fix(params),
             "format" => self.format(params),
             other => Err(RpcError::method_not_found(other)),
@@ -433,6 +434,28 @@ impl Server {
         let name = self.def_param(params)?;
         let (_f, d) = self.find_def(&snap, &name)?;
         Ok(json!({ "hash": d.hash }))
+    }
+
+    /// `marv/verify` — discharge a definition's contracts via SMT (Tier 2),
+    /// returning `proved` / `failed` (with a counterexample) / `unsupported`
+    /// (`spec/03` §3.3, §4.3). Re-derives the full Core `Def` (the distilled
+    /// `DefInfo` does not carry contracts) and hands it to `marv-verify`.
+    fn verify(&mut self, params: &Value) -> RpcResult {
+        let snap = self.snapshot(params)?.clone();
+        let name = self.def_param(params)?;
+        for f in &snap.files {
+            let Ok((_module_path, defs)) = marv_db::verify_inputs(f.kind, &f.text) else {
+                continue;
+            };
+            if let Some(vd) = defs
+                .into_iter()
+                .find(|d| d.qualified == name || d.name == name)
+            {
+                let outcome = marv_verify::verify_def(&vd.def, &vd.params);
+                return Ok(verify_result_json(&outcome));
+            }
+        }
+        Err(RpcError::app(format!("unknown definition `{name}`")))
     }
 
     fn type_at(&mut self, params: &Value) -> RpcResult {
@@ -679,4 +702,50 @@ pub fn serve<R: BufRead, W: Write>(
         writer.flush()?;
     }
     Ok(())
+}
+
+/// Render a [`marv_verify::VerifyOutcome`] as the `marv/verify` result object
+/// (`spec/03` §4.3): `proved` / `failed` (with a counterexample) / `unsupported`
+/// (with a Tier-1 runtime fallback note).
+fn verify_result_json(outcome: &marv_verify::VerifyOutcome) -> Value {
+    use marv_verify::VerifyOutcome;
+    match outcome {
+        VerifyOutcome::Proved => json!({ "status": "proved", "tier": 2 }),
+        VerifyOutcome::Failed {
+            obligation,
+            counterexample,
+            message,
+        } => {
+            let mut model = serde_json::Map::new();
+            for (k, v) in counterexample {
+                model.insert(k.clone(), scalar_json(v));
+            }
+            json!({
+                "status": "failed",
+                "obligation": obligation,
+                "counterexample": Value::Object(model),
+                "message": message,
+            })
+        }
+        VerifyOutcome::Unsupported { reason } | VerifyOutcome::SolverUnavailable { reason } => {
+            json!({
+                "status": "unsupported",
+                "reason": reason,
+                "fallback": "runtime-checked (Tier 1)",
+            })
+        }
+    }
+}
+
+/// Parse a model scalar back into a JSON number/bool where possible (so a
+/// counterexample reads `{"x": -5}`, not `{"x": "-5"}`), else keep it a string.
+fn scalar_json(v: &str) -> Value {
+    if let Ok(n) = v.parse::<i64>() {
+        return json!(n);
+    }
+    match v {
+        "true" => json!(true),
+        "false" => json!(false),
+        other => json!(other),
+    }
 }

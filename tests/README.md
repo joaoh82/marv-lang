@@ -41,6 +41,11 @@ fixtures from this directory by relative path. `cargo test` exercises:
   and executed under **wasmtime**, matching the interpreter; a pure module imports
   nothing while a capability-using module surfaces that capability as a host
   import. The browser side of the sandbox lives in [`../web/`](../web).
+- **`proves_correct_clamp`** / **`counterexample_for_buggy_clamp`** /
+  **`out_of_subset_is_unsupported`** (`../crates/marv-verify/tests/verify.rs`) —
+  the M6 acceptance gate. A correct `clamp` is proved via SMT; a buggy one yields
+  a concrete counterexample; a division-using function reports `unsupported`
+  (→ Tier-1 runtime fallback). These need a `z3` binary and skip when absent.
 
 Fixtures come in two flavors: **in-subset** cases (e.g. `fmt/decls.in.mv`) drive
 the real parse-and-reprint formatter (indentation, parenthesization, spacing),

@@ -22,6 +22,10 @@ use marv_types::{check_def, Diagnostic, Severity, World};
 pub struct Loaded {
     pub module_path: String,
     pub defs: Vec<(String, Def)>,
+    /// Parameter names per definition, aligned with `defs`. Core erases names,
+    /// so these come from the AST (source) or the snapshot's `params` field;
+    /// `verify` uses them to label counterexamples.
+    pub param_names: Vec<Vec<String>>,
     pub world: World,
 }
 
@@ -74,12 +78,31 @@ fn load_source(src: &str) -> Result<Loaded, LoadError> {
     let lowered =
         lower_module(&module).map_err(|e| LoadError::Front(format!("lower error: {e}")))?;
     let world = World::from_module(&lowered);
+    // Parameter names per def (source order), recovered from the AST.
+    let param_names = lowered
+        .defs
+        .iter()
+        .map(|e| fn_param_names(&module, &e.name))
+        .collect();
     let defs = lowered.defs.into_iter().map(|e| (e.name, e.def)).collect();
     Ok(Loaded {
         module_path,
         defs,
+        param_names,
         world,
     })
+}
+
+/// The parameter names of a named function in the AST (empty for non-functions).
+fn fn_param_names(module: &marv_syntax::Module, name: &str) -> Vec<String> {
+    for item in &module.items {
+        if let marv_syntax::Item::Fn(f) = item {
+            if f.name == name {
+                return f.params.iter().map(|p| p.name.clone()).collect();
+            }
+        }
+    }
+    Vec::new()
 }
 
 fn load_core(src: &str) -> Result<Loaded, LoadError> {
@@ -87,10 +110,12 @@ fn load_core(src: &str) -> Result<Loaded, LoadError> {
         .map_err(|e| LoadError::Front(format!("core ingest error: {e}")))?;
     let world = spec.world.build();
     let module_path = spec.module.clone();
+    let param_names = spec.defs.iter().map(|d| d.params.clone()).collect();
     let defs = spec.defs.into_iter().map(|d| (d.name, d.def)).collect();
     Ok(Loaded {
         module_path,
         defs,
+        param_names,
         world,
     })
 }

@@ -1,17 +1,12 @@
 mod math
 
-/// Clamp `x` into the inclusive range [lo, hi].
-///
-/// A `pure` function over integers with a `requires`/`ensures` contract — the
-/// kind of definition the Tier-2 SMT verifier (`marv-verify`, M6) can discharge
-/// statically. See spec/01-design-spec.md §7.
 pure fn clamp(x: i32, lo: i32, hi: i32) -> i32
-    requires lo <= hi
-    ensures result >= lo and result <= hi
+    requires (lo <= hi)
+    ensures ((result >= lo) and (result <= hi))
 {
-    if x < lo {
+    if (x < lo) {
         lo
-    } else if x > hi {
+    } else if (x > hi) {
         hi
     } else {
         x

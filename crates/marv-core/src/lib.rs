@@ -36,7 +36,9 @@
 pub mod hash;
 pub mod ir;
 pub mod lower;
+pub mod pred;
 
 pub use hash::{content_hash, symbol_hash};
 pub use ir::*;
 pub use lower::{lower_module, DefEntry, LowerError, LoweredModule};
+pub use pred::render_pred;

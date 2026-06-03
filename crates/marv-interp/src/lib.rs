@@ -91,6 +91,18 @@ pub enum RunError {
     Unsupported(String),
     /// A referenced global is neither a known function nor a value.
     UnknownGlobal(Hash),
+    /// A `requires` precondition was violated at runtime (Tier 1, `spec/01` §7).
+    /// Carries the rendered clause.
+    PreconditionFailed(String),
+    /// An `ensures` postcondition was violated at runtime (Tier 1).
+    PostconditionFailed(String),
+}
+
+/// Which contract a Tier-1 failure came from, for the error variant/message.
+#[derive(Clone, Copy)]
+enum Contract {
+    Pre,
+    Post,
 }
 
 impl std::fmt::Display for RunError {
@@ -110,11 +122,99 @@ impl std::fmt::Display for RunError {
             RunError::Uncaught(e) => write!(f, "uncaught error `{e}`"),
             RunError::Unsupported(d) => write!(f, "unsupported construct: {d}"),
             RunError::UnknownGlobal(h) => write!(f, "unknown global {}", h.to_b3()),
+            RunError::PreconditionFailed(p) => write!(f, "precondition violated: requires {p}"),
+            RunError::PostconditionFailed(p) => write!(f, "postcondition violated: ensures {p}"),
         }
     }
 }
 
 impl std::error::Error for RunError {}
+
+/// Check a list of contract predicates against the parameter values (and, for
+/// postconditions, the result). A violation is a Tier-1 runtime failure
+/// (`spec/01` §7). Atoms use the flat contract convention (`Var(k)` = parameter
+/// k, `Var(n)` = `result`).
+fn check_contracts(
+    preds: &[Pred],
+    params: &[Value],
+    result: Option<&Value>,
+    which: Contract,
+) -> Result<(), RunError> {
+    for p in preds {
+        match eval_pred(p, params, result) {
+            Some(true) => {}
+            // A predicate the runtime can't evaluate is skipped, not failed —
+            // it is left to Tier-2 / a future runtime extension.
+            None => {}
+            Some(false) => {
+                let label = |i: u32| -> String {
+                    let i = i as usize;
+                    if i < params.len() {
+                        format!("arg{i}")
+                    } else {
+                        "result".to_string()
+                    }
+                };
+                let rendered = marv_core::render_pred(p, &label);
+                return Err(match which {
+                    Contract::Pre => RunError::PreconditionFailed(rendered),
+                    Contract::Post => RunError::PostconditionFailed(rendered),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Evaluate a contract predicate to a boolean, or `None` if it uses a feature
+/// the runtime does not evaluate yet (bounded quantifiers).
+fn eval_pred(p: &Pred, params: &[Value], result: Option<&Value>) -> Option<bool> {
+    match p {
+        Pred::True => Some(true),
+        Pred::False => Some(false),
+        Pred::Cmp(op, a, b) => {
+            let x = pred_atom(a, params, result)?;
+            let y = pred_atom(b, params, result)?;
+            let ord = compare(&x, &y).ok()?;
+            Some(match op {
+                CmpOp::Eq => ord == Some(std::cmp::Ordering::Equal),
+                CmpOp::Ne => ord != Some(std::cmp::Ordering::Equal),
+                CmpOp::Lt => ord == Some(std::cmp::Ordering::Less),
+                CmpOp::Le => matches!(
+                    ord,
+                    Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)
+                ),
+                CmpOp::Gt => ord == Some(std::cmp::Ordering::Greater),
+                CmpOp::Ge => matches!(
+                    ord,
+                    Some(std::cmp::Ordering::Greater | std::cmp::Ordering::Equal)
+                ),
+            })
+        }
+        Pred::And(l, r) => Some(eval_pred(l, params, result)? && eval_pred(r, params, result)?),
+        Pred::Or(l, r) => Some(eval_pred(l, params, result)? || eval_pred(r, params, result)?),
+        Pred::Not(inner) => Some(!eval_pred(inner, params, result)?),
+        Pred::Forall { .. } | Pred::Exists { .. } => None,
+    }
+}
+
+/// Resolve a contract atom to a runtime value.
+fn pred_atom(a: &Atom, params: &[Value], result: Option<&Value>) -> Option<Value> {
+    match a {
+        Atom::Var(i) => {
+            let i = *i as usize;
+            if i < params.len() {
+                Some(params[i].clone())
+            } else if i == params.len() {
+                result.cloned()
+            } else {
+                None
+            }
+        }
+        Atom::Lit(l) => Some(lit_value(l)),
+        Atom::Global(_) => None,
+    }
+}
 
 /// The result of a completed run: the entry point's value and the ordered log
 /// of capability effects it performed.
@@ -220,6 +320,13 @@ impl Program {
             env.push(v);
         }
 
+        // Tier-1 contract checking (`spec/01` §7): in this debug runner, every
+        // `requires` is checked before the body executes. Contract atoms use the
+        // flat convention `Var(k)` = parameter k, so the parameter environment
+        // (`env`, by level) is exactly the variable context.
+        let params = env.clone();
+        check_contracts(&def.requires, &params, None, Contract::Pre)?;
+
         // Evaluate the innermost body under the bound parameters.
         let body = peel_lams(
             def.body
@@ -228,6 +335,10 @@ impl Program {
         );
         let mut effects = Vec::new();
         let value = self.eval(body, &mut env, &mut effects)?;
+
+        // …and every `ensures` after, with `result` bound to the returned value.
+        check_contracts(&def.ensures, &params, Some(&value), Contract::Post)?;
+
         Ok(Outcome { value, effects })
     }
 

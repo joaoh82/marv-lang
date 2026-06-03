@@ -19,6 +19,7 @@ use std::process::ExitCode;
 use marv_codegen_cl as codegen;
 use marv_codegen_wasm as wasm;
 use marv_interp::Program;
+use marv_verify::{verify_def, VerifyOutcome};
 
 use pipeline::{any_errors, load, print_diags, Loaded};
 
@@ -74,7 +75,7 @@ fn main() -> ExitCode {
         "check" => cmd_check(rest),
         "build" => cmd_build(rest),
         "run" => cmd_run(rest),
-        "verify" => not_yet_implemented("verify", "M6"),
+        "verify" => cmd_verify(rest),
         other => {
             eprintln!("marv: unknown command `{other}`\n");
             eprint!("{USAGE}");
@@ -83,10 +84,115 @@ fn main() -> ExitCode {
     }
 }
 
-/// Report a subcommand that is parsed but not yet built, naming its milestone.
-fn not_yet_implemented(command: &str, milestone: &str) -> ExitCode {
-    eprintln!("marv {command}: not yet implemented (milestone {milestone})");
-    ExitCode::FAILURE
+// ---- verify -------------------------------------------------------------
+
+/// `marv verify [--def NAME] <file>` — discharge each function's contracts via
+/// the SMT backend (Tier 2), printing `proved` / `failed` (with a
+/// counterexample) / `unsupported` (`spec/03` §3.3, §4.3). Exits non-zero only
+/// when a contract is provably *violated*.
+fn cmd_verify(args: &[String]) -> ExitCode {
+    let mut def_filter: Option<String> = None;
+    let mut file: Option<String> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--def" => {
+                i += 1;
+                match args.get(i) {
+                    Some(v) => def_filter = Some(v.clone()),
+                    None => {
+                        eprintln!("marv verify: --def requires a value");
+                        return ExitCode::FAILURE;
+                    }
+                }
+            }
+            f if f.starts_with("--") => {
+                eprintln!("marv verify: unknown flag `{f}`");
+                return ExitCode::FAILURE;
+            }
+            _ if file.is_none() => file = Some(args[i].clone()),
+            _ => {}
+        }
+        i += 1;
+    }
+    let Some(file) = file else {
+        eprintln!("marv verify: expected a file");
+        return ExitCode::FAILURE;
+    };
+
+    let loaded = match load(&file) {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("marv verify: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let mut any_failed = false;
+    let mut verified_any = false;
+    for (i, (name, def)) in loaded.defs.iter().enumerate() {
+        if def.kind != marv_core::DefKind::Fn {
+            continue;
+        }
+        let qualified = if loaded.module_path.is_empty() {
+            name.clone()
+        } else {
+            format!("{}.{}", loaded.module_path, name)
+        };
+        if let Some(t) = &def_filter {
+            if t != name && t != &qualified {
+                continue;
+            }
+        }
+        // Only functions that carry contracts are worth reporting.
+        if def.requires.is_empty() && def.ensures.is_empty() {
+            continue;
+        }
+        verified_any = true;
+        let names = loaded.param_names.get(i).cloned().unwrap_or_default();
+        let outcome = verify_def(def, &names);
+        if matches!(outcome, VerifyOutcome::Failed { .. }) {
+            any_failed = true;
+        }
+        print_verify(&qualified, &outcome);
+    }
+
+    if !verified_any {
+        eprintln!("marv verify: {file}: no contracts to verify");
+    }
+    if any_failed {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
+/// Print one definition's verification result (`spec/03` §4.3 shape, in prose).
+fn print_verify(name: &str, outcome: &VerifyOutcome) {
+    match outcome {
+        VerifyOutcome::Proved => println!("proved   {name}  (Tier 2: holds for all inputs)"),
+        VerifyOutcome::Failed {
+            obligation,
+            counterexample,
+            message,
+        } => {
+            println!("FAILED   {name}  — {message}");
+            println!("    obligation: {obligation}");
+            let assigns: Vec<String> = counterexample
+                .iter()
+                .map(|(k, v)| format!("{k} = {v}"))
+                .collect();
+            println!("    counterexample: {{ {} }}", assigns.join(", "));
+        }
+        VerifyOutcome::Unsupported { reason } => {
+            println!("unsupported {name}  — {reason}");
+            println!("    fallback: runtime-checked (Tier 1)");
+        }
+        VerifyOutcome::SolverUnavailable { reason } => {
+            println!("unsupported {name}  — {reason}");
+            println!("    fallback: runtime-checked (Tier 1)");
+        }
+    }
 }
 
 // ---- check --------------------------------------------------------------
@@ -300,6 +406,7 @@ fn cmd_run(args: &[String]) -> ExitCode {
         module_path,
         defs,
         world,
+        ..
     } = loaded;
     let program = Program::new(&module_path, defs, world);
     match program.run(&inv.entry, &inv.grant, &inv.args) {

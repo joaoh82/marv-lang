@@ -52,6 +52,17 @@ pub enum LowerError {
     UnresolvedProjection { field: String },
     /// A projection of a field the resolved struct does not declare.
     UnknownField { ty: String, field: String },
+    /// A contract clause that is not a boolean predicate the `Pred` language can
+    /// express (it must be a comparison, `and`/`or`, or a boolean literal).
+    ContractNotPredicate,
+    /// A contract comparison whose operand is not atomic. `Pred::Cmp` compares
+    /// atoms (a variable, `result`, or a literal), so `result >= lo + 1` and the
+    /// like cannot be expressed yet.
+    ContractOperandNotAtomic,
+    /// A contract referenced a name that is neither a parameter nor `result`.
+    UnknownContractVar { name: String },
+    /// `result` was used in a `requires` clause (it only exists post-return).
+    ResultInRequires,
 }
 
 impl std::fmt::Display for LowerError {
@@ -64,6 +75,27 @@ impl std::fmt::Display for LowerError {
             ),
             LowerError::UnknownField { ty, field } => {
                 write!(f, "struct `{ty}` has no field `{field}`")
+            }
+            LowerError::ContractNotPredicate => write!(
+                f,
+                "a contract clause must be a boolean predicate (a comparison, `and`/`or`, or a \
+                 boolean literal)"
+            ),
+            LowerError::ContractOperandNotAtomic => write!(
+                f,
+                "a contract comparison operand must be atomic (a parameter, `result`, or a literal)"
+            ),
+            LowerError::UnknownContractVar { name } => {
+                write!(
+                    f,
+                    "contract refers to `{name}`, which is not a parameter or `result`"
+                )
+            }
+            LowerError::ResultInRequires => {
+                write!(
+                    f,
+                    "`result` may only appear in an `ensures` clause, not `requires`"
+                )
             }
         }
     }
@@ -274,13 +306,94 @@ impl Lowerer {
 
         // Finalize: rewrite de Bruijn levels to indices over the whole term.
         let body = to_indices(&lam, 0);
+
+        // Lower the contract clauses (`spec/01` §7). Contract atoms use a *flat*
+        // convention independent of the body's de Bruijn spine: `Var(k)` is the
+        // k-th parameter (0-based), and in `ensures` `Var(n)` (n = parameter
+        // count) is `result`. This is the same convention the Tier-1 runtime
+        // checker and the Tier-2 SMT verifier consume.
+        let names: Vec<&str> = f.params.iter().map(|p| p.name.as_str()).collect();
+        let requires = f
+            .requires
+            .iter()
+            .map(|e| self.lower_pred(e, &names, false))
+            .collect::<Result<Vec<_>, _>>()?;
+        let ensures = f
+            .ensures
+            .iter()
+            .map(|e| self.lower_pred(e, &names, true))
+            .collect::<Result<Vec<_>, _>>()?;
+
         Ok(Def {
             kind: DefKind::Fn,
             ty: arrow,
-            requires: Vec::new(),
-            ensures: Vec::new(),
+            requires,
+            ensures,
             body: Some(body),
         })
+    }
+
+    // ---- contracts ------------------------------------------------------
+
+    /// Lower a surface boolean expression into a contract [`Pred`]. `params` are
+    /// the parameter names (their position is the flat contract index);
+    /// `allow_result` permits `result` (index `params.len()`), as in `ensures`.
+    fn lower_pred(
+        &self,
+        e: &Expr,
+        params: &[&str],
+        allow_result: bool,
+    ) -> Result<Pred, LowerError> {
+        match e {
+            Expr::Bool(true) => Ok(Pred::True),
+            Expr::Bool(false) => Ok(Pred::False),
+            Expr::Binary(l, op, r) => match op {
+                BinOp::And => Ok(Pred::And(
+                    Box::new(self.lower_pred(l, params, allow_result)?),
+                    Box::new(self.lower_pred(r, params, allow_result)?),
+                )),
+                BinOp::Or => Ok(Pred::Or(
+                    Box::new(self.lower_pred(l, params, allow_result)?),
+                    Box::new(self.lower_pred(r, params, allow_result)?),
+                )),
+                BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
+                    let cmp = cmp_op(*op).ok_or(LowerError::ContractNotPredicate)?;
+                    let la = self.lower_pred_atom(l, params, allow_result)?;
+                    let ra = self.lower_pred_atom(r, params, allow_result)?;
+                    Ok(Pred::Cmp(cmp, la, ra))
+                }
+                // Arithmetic operators are not boolean predicates.
+                _ => Err(LowerError::ContractNotPredicate),
+            },
+            _ => Err(LowerError::ContractNotPredicate),
+        }
+    }
+
+    /// Lower a contract comparison operand to an [`Atom`] (a parameter, `result`,
+    /// or a literal). Compound operands are rejected — `Pred::Cmp` is atomic.
+    fn lower_pred_atom(
+        &self,
+        e: &Expr,
+        params: &[&str],
+        allow_result: bool,
+    ) -> Result<Atom, LowerError> {
+        match e {
+            Expr::Int(n) => Ok(Atom::Lit(Literal::Int(*n))),
+            Expr::Bool(b) => Ok(Atom::Lit(Literal::Bool(*b))),
+            Expr::Var(name) if name == "result" => {
+                if allow_result {
+                    Ok(Atom::Var(params.len() as u32))
+                } else {
+                    Err(LowerError::ResultInRequires)
+                }
+            }
+            Expr::Var(name) => params
+                .iter()
+                .position(|p| p == name)
+                .map(|i| Atom::Var(i as u32))
+                .ok_or_else(|| LowerError::UnknownContractVar { name: name.clone() }),
+            _ => Err(LowerError::ContractOperandNotAtomic),
+        }
     }
 
     // ---- blocks & tails -------------------------------------------------
@@ -608,6 +721,20 @@ fn struct_name(t: &SType) -> Option<String> {
         SType::Ref { inner, .. } => struct_name(inner),
         _ => None,
     }
+}
+
+/// Map a surface comparison operator to a contract [`CmpOp`], or `None` for a
+/// non-comparison operator.
+fn cmp_op(op: BinOp) -> Option<CmpOp> {
+    Some(match op {
+        BinOp::Eq => CmpOp::Eq,
+        BinOp::Ne => CmpOp::Ne,
+        BinOp::Lt => CmpOp::Lt,
+        BinOp::Le => CmpOp::Le,
+        BinOp::Gt => CmpOp::Gt,
+        BinOp::Ge => CmpOp::Ge,
+        _ => return None,
+    })
 }
 
 /// Map a surface binary operator to its total Core primitive.

@@ -159,11 +159,15 @@ fn gen_fn(rng: &mut Rng) -> FnDecl {
         None
     };
     let body = gen_block(rng, 3);
+    // Contracts have their own targeted round-trip test (`contracts.rs`); the
+    // fuzzer leaves them empty so it does not need a boolean-expression generator.
     FnDecl {
         is_pure,
         name,
         params,
         ret,
+        requires: Vec::new(),
+        ensures: Vec::new(),
         body,
     }
 }

@@ -285,3 +285,78 @@ fn core_and_hash() {
     );
     assert_eq!(core2["hash"], core["hash"], "alpha-equivalent ⇒ same hash");
 }
+
+/// §4.3 — `verify`: a correct `clamp` proves; a buggy one fails with a concrete
+/// counterexample. Needs a z3 binary; when absent the server reports
+/// `unsupported` (the Tier-1 fallback) and the test skips rather than fails.
+const CLAMP_PAIR: &str = "\
+mod math
+
+pure fn clamp(x: i32, lo: i32, hi: i32) -> i32
+    requires lo <= hi
+    ensures result >= lo and result <= hi
+{
+    if x < lo {
+        lo
+    } else if x > hi {
+        hi
+    } else {
+        x
+    }
+}
+
+pure fn clampbug(x: i32, lo: i32, hi: i32) -> i32
+    requires lo <= hi
+    ensures result >= lo and result <= hi
+{
+    if x > hi {
+        hi
+    } else {
+        x
+    }
+}
+";
+
+#[test]
+fn verify_proves_and_counterexamples_over_the_protocol() {
+    let mut server = Server::new();
+    let opened = call(
+        &mut server,
+        "marv/openSnapshot",
+        json!({ "files": [{ "path": "math.mv", "text": CLAMP_PAIR }] }),
+    );
+    let snap = opened.get("snapshotId").cloned().unwrap();
+
+    let ok = call(
+        &mut server,
+        "marv/verify",
+        json!({ "snapshotId": snap, "def": "math.clamp" }),
+    );
+    // Skip if no solver is available in this environment.
+    if ok.get("status").and_then(Value::as_str) == Some("unsupported")
+        && ok
+            .get("reason")
+            .and_then(Value::as_str)
+            .is_some_and(|r| r.contains("z3"))
+    {
+        eprintln!("skipping: no z3 solver available");
+        return;
+    }
+
+    assert_eq!(ok["status"], "proved", "correct clamp should prove: {ok:#}");
+
+    let bug = call(
+        &mut server,
+        "marv/verify",
+        json!({ "snapshotId": snap, "def": "math.clampbug" }),
+    );
+    assert_eq!(bug["status"], "failed", "buggy clamp should fail: {bug:#}");
+    let cx = &bug["counterexample"];
+    assert!(cx.is_object(), "counterexample is an object: {bug:#}");
+    // The model assigns the parameters and the result as JSON numbers.
+    assert!(cx.get("x").is_some() && cx.get("result").is_some());
+    assert!(
+        bug["obligation"].as_str().unwrap().contains("result"),
+        "obligation names the violated clause: {bug:#}"
+    );
+}
