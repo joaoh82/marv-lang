@@ -1,0 +1,62 @@
+name: Release
+
+# Tag-driven releases: push a semver tag (e.g. v0.1.0) to build the `marv` and
+# `marv-mcp` binaries for macOS + Linux and attach them to a GitHub Release.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: macos-13
+            target: x86_64-apple-darwin
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pinned Rust toolchain + target
+        run: |
+          rustup show
+          rustup target add ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build release binaries
+        run: cargo build --release --target ${{ matrix.target }} -p marv-cli -p marv-mcp
+
+      - name: Package
+        shell: bash
+        run: |
+          set -euo pipefail
+          dist="marv-${GITHUB_REF_NAME}-${{ matrix.target }}"
+          mkdir -p "$dist"
+          cp "target/${{ matrix.target }}/release/marv" "$dist/"
+          cp "target/${{ matrix.target }}/release/marv-mcp" "$dist/"
+          cp README.md LICENSE-MIT LICENSE-APACHE AGENTS.md "$dist/"
+          tar czf "${dist}.tar.gz" "$dist"
+          shasum -a 256 "${dist}.tar.gz" > "${dist}.tar.gz.sha256"
+
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            marv-*.tar.gz
+            marv-*.tar.gz.sha256
+          generate_release_notes: true
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
