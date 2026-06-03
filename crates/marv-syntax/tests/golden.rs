@@ -39,7 +39,10 @@ fn fmt_golden_fixtures() {
             .unwrap_or_else(|_| panic!("missing golden output {}", out_path.display()));
 
         let got = marv_syntax::format(&input);
-        assert_eq!(got, expected, "format({file_name}) did not match golden output");
+        assert_eq!(
+            got, expected,
+            "format({file_name}) did not match golden output"
+        );
 
         // The formatter must be idempotent: formatting canonical input is a no-op.
         assert_eq!(
@@ -51,7 +54,11 @@ fn fmt_golden_fixtures() {
         checked += 1;
     }
 
-    assert!(checked > 0, "no *.in.mv fixtures found in {}", dir.display());
+    assert!(
+        checked > 0,
+        "no *.in.mv fixtures found in {}",
+        dir.display()
+    );
 }
 
 #[test]

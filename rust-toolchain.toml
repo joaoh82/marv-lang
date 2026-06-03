@@ -1,0 +1,4 @@
+# Pinned so `cargo fmt --check` and clippy are deterministic in CI and locally.
+[toolchain]
+channel = "1.94.0"
+components = ["rustfmt", "clippy"]

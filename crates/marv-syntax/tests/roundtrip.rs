@@ -59,10 +59,23 @@ const IDENTS: &[&str] = &[
     "a", "b", "c", "x", "y", "z", "foo", "bar", "baz", "n", "sum", "item", "count", "value", "tmp",
     "out", "lo", "hi",
 ];
-const TYPE_NAMES: &[&str] = &["i32", "i64", "u32", "usize", "str", "bool", "Foo", "Bar", "Sale", "Io"];
+const TYPE_NAMES: &[&str] = &[
+    "i32", "i64", "u32", "usize", "str", "bool", "Foo", "Bar", "Sale", "Io",
+];
 const STRUCT_NAMES: &[&str] = &["Point", "Sale", "Config", "Pair", "Record", "Span"];
-const FN_NAMES: &[&str] = &["main", "run", "total", "add", "step", "build", "load", "clamp"];
-const MOD_PARTS: &[&str] = &["std", "core", "io", "mem", "fmt", "collections", "demo", "app"];
+const FN_NAMES: &[&str] = &[
+    "main", "run", "total", "add", "step", "build", "load", "clamp",
+];
+const MOD_PARTS: &[&str] = &[
+    "std",
+    "core",
+    "io",
+    "mem",
+    "fmt",
+    "collections",
+    "demo",
+    "app",
+];
 // Characters that exercise the string escaper/unescaper round-trip.
 const STR_CHARS: &[char] = &['a', 'Z', '0', '9', ' ', '"', '\\', '\n', '\t'];
 
@@ -113,7 +126,11 @@ fn gen_import(rng: &mut Rng) -> Import {
     let path = gen_path(rng, MOD_PARTS, 1, 3);
     let names = if rng.chance(1, 2) {
         let count = 1 + rng.below(3);
-        Some((0..count).map(|_| rng.pick(TYPE_NAMES).to_string()).collect())
+        Some(
+            (0..count)
+                .map(|_| rng.pick(TYPE_NAMES).to_string())
+                .collect(),
+        )
     } else {
         None
     };
@@ -250,7 +267,9 @@ fn gen_expr(rng: &mut Rng, depth: u32) -> Expr {
         ),
         1 => {
             let callee = gen_postfix(rng, depth - 1);
-            let args = (0..rng.below(3)).map(|_| gen_expr(rng, depth - 1)).collect();
+            let args = (0..rng.below(3))
+                .map(|_| gen_expr(rng, depth - 1))
+                .collect();
             Expr::Call(Box::new(callee), args)
         }
         2 => Expr::Field(

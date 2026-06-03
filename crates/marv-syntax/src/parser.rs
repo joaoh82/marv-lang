@@ -103,7 +103,9 @@ impl Parser {
     fn ident(&mut self) -> PResult<String> {
         match self.bump() {
             Tok::Ident(name) => Ok(name),
-            other => Err(ParseError::new(format!("expected identifier, found {other:?}"))),
+            other => Err(ParseError::new(format!(
+                "expected identifier, found {other:?}"
+            ))),
         }
     }
 

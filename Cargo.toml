@@ -12,6 +12,7 @@ members = [
     "crates/marv-interp",
     "crates/marv-store",
     "crates/marv-server",
+    "crates/marv-mcp",
     "crates/marv-cli",
 ]
 

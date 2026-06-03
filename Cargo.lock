@@ -722,6 +722,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "marv-mcp"
+version = "0.0.0"
+dependencies = [
+ "marv-server",
+ "serde_json",
+]
+
+[[package]]
 name = "marv-server"
 version = "0.0.0"
 dependencies = [
