@@ -97,7 +97,27 @@ fn format_fn(decl: &FnDecl) -> String {
         s.push_str(" -> ");
         s.push_str(&format_type(ret));
     }
-    s.push(' ');
+    // Contracts (if any) each go on their own indented line, and the body's
+    // brace then starts a fresh line; otherwise the brace shares the signature
+    // line. This is the canonical form the parser round-trips (`spec/01` §7).
+    if decl.requires.is_empty() && decl.ensures.is_empty() {
+        s.push(' ');
+    } else {
+        let pad = indent(1);
+        for r in &decl.requires {
+            s.push('\n');
+            s.push_str(&pad);
+            s.push_str("requires ");
+            s.push_str(&format_expr(r));
+        }
+        for e in &decl.ensures {
+            s.push('\n');
+            s.push_str(&pad);
+            s.push_str("ensures ");
+            s.push_str(&format_expr(e));
+        }
+        s.push('\n');
+    }
     s.push_str(&format_block(&decl.body, 0));
     s
 }

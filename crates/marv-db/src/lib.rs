@@ -25,8 +25,8 @@ pub mod corespec;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 pub use analysis::{
-    analyze_text, qualify, repair_core_text, DefInfo, DiagInfo, FileAnalysis, FixInfo, ParamInfo,
-    SourceKind,
+    analyze_text, qualify, repair_core_text, verify_inputs, DefInfo, DiagInfo, FileAnalysis,
+    FixInfo, ParamInfo, SourceKind, VerifyDef,
 };
 pub use corespec::{
     CapSpec, CoreDefSpec, CoreModuleSpec, EnumSpec, ErrorSpec, GlobalSpec, OpSpec, StructSpec,

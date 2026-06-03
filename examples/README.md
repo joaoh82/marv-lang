@@ -9,17 +9,19 @@ fixture source for the test suite. As of M4 the integer/boolean subset is
 | File | Shows |
 |------|-------|
 | [`hello.mv`](hello.mv) | Capabilities as parameters — power enters only through `Io`. |
-| [`clamp.mv`](clamp.mv) | A `pure` function with `requires`/`ensures` contracts (Tier-2 verifiable subset). |
+| [`clamp.mv`](clamp.mv) | **Verifiable (M6):** a `pure` function with `requires`/`ensures` contracts. `marv verify examples/clamp.mv` proves it (Tier 2); `marv run` enforces it at runtime (Tier 1). |
 | [`report.mv`](report.mv) | `struct`/`error` decls, second-class `&` references, a loop `invariant`, effect rows, and inferred error sets. |
 | [`geometry.mv`](geometry.mv) | The **M0 parsed subset** end to end: `struct`/`linear struct`, `pure fn`, `&`/`&mut` params, `if`/`else`, fully-parenthesized binary operators. Round-trips through the real parser. |
 | [`factorial.mv`](factorial.mv) | **Runnable (M4):** recursion + an `if`. `marv run --entry factorial 6` and `marv build --run …` both yield `720`. |
 | [`arithmetic.mv`](arithmetic.mv) | **Runnable (M4):** a nullary `main` that calls two other functions — curried cross-function calls lowered to direct native calls. |
 
-`hello`, `clamp`, and `report` use features still beyond the M0 parser, so `marv
-fmt` normalizes them with its whitespace fallback for now. `geometry.mv`,
+`hello` and `report` use features still beyond the M0 parser, so `marv fmt`
+normalizes them with its whitespace fallback for now. `geometry.mv`, `clamp.mv`,
 `factorial.mv`, and `arithmetic.mv` are inside the parsed subset, so `marv fmt`
 reprints them from the AST and the `examples_are_canonical` test exercises the
-parser itself. `factorial.mv` and `arithmetic.mv` additionally lie inside the
+parser itself (`clamp.mv` joined this set in M6, when `requires`/`ensures`
+clauses became parseable — note the formatter does not yet preserve `///` doc
+comments, so contract examples carry none). `factorial.mv` and `arithmetic.mv` additionally lie inside the
 *executable* subset, so all three backends run them — the interpreter
 (`marv run`), the Cranelift JIT (`marv build --run`), and WebAssembly
 (`marv build --target wasm-component`, then via wasmtime or the browser demo in

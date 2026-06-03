@@ -245,14 +245,52 @@ impl Parser {
             None
         };
 
+        let (requires, ensures) = self.parse_contracts()?;
+
         let body = self.parse_block()?;
         Ok(FnDecl {
             is_pure,
             name,
             params,
             ret,
+            requires,
+            ensures,
             body,
         })
+    }
+
+    /// Parse zero or more `requires`/`ensures` contract clauses (`spec/01` §7)
+    /// that sit on their own lines between the signature and the body block.
+    /// `requires`/`ensures` are contextual keywords (ordinary identifiers
+    /// elsewhere), so a clause is recognized only here, after the signature.
+    fn parse_contracts(&mut self) -> PResult<(Vec<Expr>, Vec<Expr>)> {
+        let mut requires = Vec::new();
+        let mut ensures = Vec::new();
+        loop {
+            // A clause sits on the next line; peek past the newline without
+            // committing unless the line actually opens with a clause keyword.
+            let save = self.pos;
+            self.skip_nl();
+            let is_req = matches!(self.peek(), Tok::Ident(k) if k == "requires");
+            let is_ens = matches!(self.peek(), Tok::Ident(k) if k == "ensures");
+            if !is_req && !is_ens {
+                self.pos = save;
+                break;
+            }
+            self.bump(); // the clause keyword
+            let expr = self.parse_expr()?;
+            if is_req {
+                requires.push(expr);
+            } else {
+                ensures.push(expr);
+            }
+        }
+        // When contracts are present the body's `{` is on its own next line;
+        // consume the separating newline so `parse_block` sees the brace.
+        if !requires.is_empty() || !ensures.is_empty() {
+            self.skip_nl();
+        }
+        Ok((requires, ensures))
     }
 
     fn parse_param(&mut self) -> PResult<Param> {

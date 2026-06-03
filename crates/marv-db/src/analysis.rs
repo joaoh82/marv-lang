@@ -138,6 +138,77 @@ pub fn analyze_text(kind: SourceKind, text: &str) -> FileAnalysis {
     }
 }
 
+/// One definition with everything the Tier-2 verifier needs: its full Core
+/// [`Def`] (carrying the `requires`/`ensures` contracts the distilled
+/// [`DefInfo`] does not) and the parameter names (for labeling counterexamples).
+#[derive(Debug, Clone)]
+pub struct VerifyDef {
+    pub name: String,
+    pub qualified: String,
+    pub def: Def,
+    pub params: Vec<String>,
+}
+
+/// Recover the full Core definitions of a file for verification (`marv/verify`).
+/// Unlike [`analyze_text`], which distils for the read-only queries, this keeps
+/// the whole [`Def`] so contracts can be discharged. Returns a parse/lower/ingest
+/// error message on failure.
+pub fn verify_inputs(kind: SourceKind, text: &str) -> Result<(String, Vec<VerifyDef>), String> {
+    match kind {
+        SourceKind::Source => {
+            let module = parse(text).map_err(|e| format!("parse error: {e}"))?;
+            let module_path = module.name.join(".");
+            let lowered = lower_module(&module).map_err(|e| format!("lower error: {e}"))?;
+            let defs = lowered
+                .defs
+                .into_iter()
+                .map(|e| {
+                    let params = source_fn_params(&module, &e.name);
+                    let qualified = qualify(&module_path, &e.name);
+                    VerifyDef {
+                        name: e.name,
+                        qualified,
+                        def: e.def,
+                        params,
+                    }
+                })
+                .collect();
+            Ok((module_path, defs))
+        }
+        SourceKind::Core => {
+            let spec: CoreModuleSpec =
+                serde_json::from_str(text).map_err(|e| format!("core ingest error: {e}"))?;
+            let module_path = spec.module.clone();
+            let defs = spec
+                .defs
+                .into_iter()
+                .map(|d| {
+                    let qualified = qualify(&module_path, &d.name);
+                    VerifyDef {
+                        name: d.name,
+                        qualified,
+                        def: d.def,
+                        params: d.params,
+                    }
+                })
+                .collect();
+            Ok((module_path, defs))
+        }
+    }
+}
+
+/// Parameter names of a named function in the AST (empty for non-functions).
+fn source_fn_params(module: &Module, name: &str) -> Vec<String> {
+    for item in &module.items {
+        if let Item::Fn(f) = item {
+            if f.name == name {
+                return f.params.iter().map(|p| p.name.clone()).collect();
+            }
+        }
+    }
+    Vec::new()
+}
+
 // ---- source pipeline ----------------------------------------------------
 
 fn analyze_source(text: &str) -> FileAnalysis {

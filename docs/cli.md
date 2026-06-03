@@ -17,12 +17,9 @@ marv <command> [args]
 | `check`  | **working** (M2) | Type / effect / capability / error-set / reference / linearity checking. |
 | `build`  | **working** (M4 `native-cranelift`, M5 `wasm-component`) | Compile a target: Cranelift JIT or a WebAssembly module. |
 | `run`    | **working** (M4) | Interpret an entry point with an explicit capability grant set. |
-| `verify` | milestone M6 | Discharge contracts via SMT. |
+| `verify` | **working** (M6, Tier 2) | Discharge `requires`/`ensures` contracts via SMT. |
 
-Commands that are not yet implemented parse their arguments and exit non-zero
-with `not yet implemented (milestone Mx)`, so scripts get an honest signal.
-
-`check`, `build`, and `run` accept either a `.mv` **source** file (parsed and
+`check`, `build`, `run`, and `verify` accept either a `.mv` **source** file (parsed and
 lowered through the front end) or a `*.core.json` **Core-IR snapshot**
 (`marv_db::CoreModuleSpec`) — currently the only way to express a body that
 `perform`s a capability, since the surface has no `perform` form yet
@@ -161,6 +158,28 @@ with capabilities as host imports; full component/WIT packaging is a later step.
 All three backends — interpreter, Cranelift, and WASM — are differentially tested
 for agreement on a corpus under [`../tests/run/`](../tests/run); the WASM sandbox
 also ships a browser demo. See [`run-and-codegen.md`](run-and-codegen.md).
+
+## `marv verify`
+
+```
+marv verify [--def NAME] <file>
+```
+
+Discharges each function's `requires`/`ensures` contracts with the SMT backend
+(Tier 2, `marv-verify`) and prints one of `proved` / `failed` (with a concrete
+counterexample) / `unsupported` per function (`spec/03` §3.3, §4.3). `--def`
+restricts to one definition. Exits non-zero only when a contract is provably
+**violated** (a `failed`); `unsupported` is success (the honest fallback to
+Tier-1 runtime checks). Requires a `z3` binary on `PATH`; without one, every
+function reports `unsupported` and falls back to runtime checking.
+
+```sh
+marv verify examples/clamp.mv
+#   proved   math.clamp  (Tier 2: holds for all inputs)
+```
+
+See [`verification.md`](verification.md) for the two tiers, the verified subset,
+and how a counterexample is produced.
 
 ## Exit codes
 

@@ -415,6 +415,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "easy-smt"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "515cd4ec35e586919a532a81ed1e9285e2502ed3f49ecb9ba75fa3fe29eb950f"
+dependencies = [
+ "log",
+ "unicode-segmentation",
+]
+
+[[package]]
 name = "either"
 version = "1.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -641,6 +651,7 @@ dependencies = [
  "marv-interp",
  "marv-syntax",
  "marv-types",
+ "marv-verify",
  "serde_json",
 ]
 
@@ -716,6 +727,7 @@ dependencies = [
  "marv-core",
  "marv-db",
  "marv-types",
+ "marv-verify",
  "salsa",
  "serde",
  "serde_json",
@@ -740,6 +752,11 @@ dependencies = [
 [[package]]
 name = "marv-verify"
 version = "0.0.0"
+dependencies = [
+ "easy-smt",
+ "marv-core",
+ "marv-syntax",
+]
 
 [[package]]
 name = "memchr"
@@ -1189,6 +1206,12 @@ name = "unicode-ident"
 version = "1.0.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
+
+[[package]]
+name = "unicode-segmentation"
+version = "1.13.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c6f5d3c3b1bf09027a88a6bc961fc00497d651009560b5463668dc81b0fa87a8"
 
 [[package]]
 name = "version_check"
