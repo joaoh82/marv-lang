@@ -9,6 +9,7 @@ implementation, and are expected to grow with each milestone.
 
 | Doc | Covers |
 |-----|--------|
+| [`roadmap.md`](roadmap.md) | The forward roadmap: phases, ordering, and the dependency graph mapping to the `MARV-#` tracker tasks. |
 | [`language-reference.md`](language-reference.md) | The language: types, memory model, effects/capabilities, error sets, contracts, modules — with "implemented vs. designed" markers. |
 | [`stdlib.md`](stdlib.md) | The standard prelude (`std/`): `Option`, `Result`, and the capability interfaces. |
 | [`platform-support.md`](platform-support.md) | Backends (interpreter, Cranelift, WASM, LLVM-stub), host/target matrix, and tooling prerequisites. |
