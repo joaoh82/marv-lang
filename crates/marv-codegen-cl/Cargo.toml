@@ -7,3 +7,15 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
+marv-core = { path = "../marv-core" }
+cranelift = "0.132"
+cranelift-jit = "0.132"
+cranelift-module = "0.132"
+cranelift-native = "0.132"
+
+[dev-dependencies]
+marv-syntax = { path = "../marv-syntax" }
+marv-types = { path = "../marv-types" }
+marv-interp = { path = "../marv-interp" }
+marv-db = { path = "../marv-db" }
+serde_json.workspace = true

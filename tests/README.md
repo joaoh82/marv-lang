@@ -9,6 +9,8 @@ tests against the Stage-0 oracle.
 ```
 tests/
   fmt/        # formatter golden fixtures: paired *.in.mv (raw) / *.out.mv (canonical)
+  run/        # M4 execution corpus: runnable .mv programs (+ one .core.json that
+              # must fail to compile) for the interpreter↔Cranelift differential test
 ```
 
 More subdirectories arrive with their milestones — e.g. `core/` for Core-IR hash
@@ -29,6 +31,11 @@ fixtures from this directory by relative path. `cargo test` exercises:
   M0 acceptance gate. A built-in deterministic LCG generates thousands of
   in-subset ASTs and asserts `parse(format(ast)) == ast`, plus idempotence. No
   external crates (proptest can be swapped in later).
+- **`interpreter_and_cranelift_agree`** / **`capability_outside_effect_row_fails_to_compile`**
+  (`../crates/marv-codegen-cl/tests/differential.rs`) — the M4 acceptance gate.
+  Each `run/*.mv` program is executed by *both* the interpreter and the Cranelift
+  backend and the two results must match (and equal a golden value); the
+  `run/uses_ungranted_cap.core.json` snapshot must be rejected by the checker.
 
 Fixtures come in two flavors: **in-subset** cases (e.g. `fmt/decls.in.mv`) drive
 the real parse-and-reprint formatter (indentation, parenthesization, spacing),

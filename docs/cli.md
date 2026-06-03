@@ -14,12 +14,19 @@ marv <command> [args]
 | Command | Status | Description |
 |---------|--------|-------------|
 | `fmt`    | **working** (M0, parse-and-reprint + whitespace fallback) | Canonicalize marv source. |
-| `check`  | milestone M2 | Type / effect / capability checking. |
-| `build`  | milestone M4 | Compile a target. |
+| `check`  | **working** (M2) | Type / effect / capability / error-set / reference / linearity checking. |
+| `build`  | **working** (M4, `native-cranelift`) | Compile a target with the Cranelift backend; optionally JIT-run it. |
+| `run`    | **working** (M4) | Interpret an entry point with an explicit capability grant set. |
 | `verify` | milestone M6 | Discharge contracts via SMT. |
 
 Commands that are not yet implemented parse their arguments and exit non-zero
 with `not yet implemented (milestone Mx)`, so scripts get an honest signal.
+
+`check`, `build`, and `run` accept either a `.mv` **source** file (parsed and
+lowered through the front end) or a `*.core.json` **Core-IR snapshot**
+(`marv_db::CoreModuleSpec`) — currently the only way to express a body that
+`perform`s a capability, since the surface has no `perform` form yet
+(`spec/03` §3.1).
 
 ## `marv fmt`
 
@@ -63,9 +70,78 @@ the parser-free **whitespace canonicalizer** (line endings, tabs → 4 spaces,
 trailing-whitespace stripping, blank-line collapsing, single trailing newline).
 Both paths are deterministic and idempotent. See [`formatter.md`](formatter.md).
 
+## `marv check`
+
+```
+marv check <file>
+```
+
+Runs the M2 checker over every definition and prints each diagnostic as
+`severity[CODE] qualified.name: message`, followed by any related notes and the
+mechanically-derivable fix titles the checker attached (`spec/03` §2). Exits
+non-zero if any diagnostic is error severity. See [`checker.md`](checker.md) for
+the rule and error-code catalog.
+
+```sh
+marv check examples/factorial.mv
+marv check tests/run/uses_ungranted_cap.core.json   # reports E0110, exits 1
+```
+
+## `marv run`
+
+```
+marv run [--grant CAP,CAP] [--entry NAME] <file> [args...]
+```
+
+Interprets an entry point with the tree-walking interpreter (`marv-interp`) —
+the reference semantics oracle. It first runs `check` and **refuses to run** if
+there are errors.
+
+- **`--grant`** — the comma-separated capabilities the host hands to the program.
+  The entry's capability parameters are filled *only* from this set; an
+  ungranted capability makes the entry un-runnable (`spec/03` §4.5, the sandbox).
+- **`--entry`** — which function to call. Defaults to `main`, or the sole
+  function if there is exactly one.
+- **`[args...]`** — fill the entry's non-capability value parameters, in order
+  (parsed at each parameter's type).
+
+The entry's result is printed to stdout; any capability effects it performed are
+logged to stderr as `effect: <cap> op#<n> [<args>]`.
+
+```sh
+marv run examples/factorial.mv --entry factorial 6     # prints 720
+marv run examples/arithmetic.mv                         # entry defaults to main → 42
+```
+
+## `marv build`
+
+```
+marv build [--target native-cranelift] [--run] [--entry NAME] <file> [args...]
+```
+
+Compiles with the Cranelift backend (`marv-codegen-cl`). Like `run`, it first
+runs `check` and **refuses to compile** code with errors — this is where a
+program that uses a capability absent from its effect row fails to build
+(`spec/03` §5).
+
+- **`--target`** — only `native-cranelift` is implemented; the LLVM and WASM
+  backends are later milestones (M4/M5). Unknown targets are rejected.
+- **`--run`** — after compiling, JIT-executes the entry point and prints its
+  integer result. Without it, `build` reports success and the entry's arity.
+- **`--entry`** / **`[args...]`** — as for `run` (integer arguments).
+
+```sh
+marv build examples/factorial.mv                       # compiles, reports success
+marv build --run examples/factorial.mv --entry factorial 6   # prints 720
+```
+
+The interpreter and the Cranelift backend are differentially tested for
+agreement on a corpus under [`../tests/run/`](../tests/run); see
+[`run-and-codegen.md`](run-and-codegen.md).
+
 ## Exit codes
 
 | Code | Meaning |
 |------|---------|
 | `0` | Success (and, for `fmt --check`, all inputs already canonical). |
-| `1` | Usage error, I/O error, unimplemented command, or `--check` found non-canonical input. |
+| `1` | Usage error, I/O error, unimplemented command, `--check` found non-canonical input, a `check`/`build`/`run` found checker errors, or a backend/runtime failure. |

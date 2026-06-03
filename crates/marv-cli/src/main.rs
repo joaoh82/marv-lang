@@ -3,16 +3,23 @@
 //! Subcommands mirror the agent protocol (`spec/03-compiler-protocol.md`):
 //!
 //! - `fmt`    — canonicalize source (wired to `marv-syntax::format`).
-//! - `check`  — type / effect / capability checking (milestone M2).
-//! - `build`  — compile a target (milestone M4).
+//! - `check`  — type / effect / capability checking (`marv-types`, M2).
+//! - `build`  — compile a target (`marv-codegen-cl`, M4).
+//! - `run`    — interpret an entry point with an explicit capability grant set
+//!   (`marv-interp`, M4; `spec/03` §4.5).
 //! - `verify` — discharge contracts via SMT (milestone M6).
 //!
-//! Only `fmt` does real work today; the rest are wired for argument parsing and
-//! report the milestone that will implement them. Argument parsing is
-//! hand-rolled to keep the workspace dependency-free for now.
+//! Argument parsing is hand-rolled to keep the front end small.
+
+mod pipeline;
 
 use std::io::{self, Read, Write};
 use std::process::ExitCode;
+
+use marv_codegen_cl as codegen;
+use marv_interp::Program;
+
+use pipeline::{any_errors, load, print_diags, Loaded};
 
 const USAGE: &str = "\
 marv — the marv language toolchain
@@ -28,8 +35,18 @@ COMMANDS:
                                form to stdout. With --write, rewrites each file
                                in place. With --check, writes nothing and exits
                                non-zero if any input is not already canonical.
-    check [files...]           Type / effect / capability check (milestone M2).
-    build [target]             Compile a target (milestone M4).
+    check <file>               Type / effect / capability check a `.mv` source
+                               file or a `.core.json` Core-IR snapshot.
+    build [--target native-cranelift] [--run] [--entry NAME] <file> [args...]
+                               Compile with the Cranelift backend. Refuses to
+                               build a file that fails `check`. With --run, also
+                               JIT-executes the entry point and prints its
+                               integer result.
+    run [--grant CAP,CAP] [--entry NAME] <file> [args...]
+                               Interpret an entry point (the semantics oracle).
+                               Capabilities enter only through --grant; the
+                               entry's value parameters are filled from [args...]
+                               in order.
     verify [files...]          Discharge contracts via SMT (milestone M6).
 
     -h, --help                 Print this help.
@@ -51,8 +68,9 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         "fmt" => cmd_fmt(rest),
-        "check" => not_yet_implemented("check", "M2"),
-        "build" => not_yet_implemented("build", "M4"),
+        "check" => cmd_check(rest),
+        "build" => cmd_build(rest),
+        "run" => cmd_run(rest),
         "verify" => not_yet_implemented("verify", "M6"),
         other => {
             eprintln!("marv: unknown command `{other}`\n");
@@ -67,6 +85,261 @@ fn not_yet_implemented(command: &str, milestone: &str) -> ExitCode {
     eprintln!("marv {command}: not yet implemented (milestone {milestone})");
     ExitCode::FAILURE
 }
+
+// ---- check --------------------------------------------------------------
+
+/// `marv check <file>` — run the M2 checker and print every diagnostic.
+fn cmd_check(args: &[String]) -> ExitCode {
+    let files: Vec<&String> = args.iter().filter(|a| !a.starts_with("--")).collect();
+    let [file] = files.as_slice() else {
+        eprintln!("marv check: expected exactly one file");
+        return ExitCode::FAILURE;
+    };
+    let loaded = match load(file) {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("marv check: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let diags = loaded.check();
+    print_diags(&diags);
+    if any_errors(&diags) {
+        ExitCode::FAILURE
+    } else {
+        eprintln!(
+            "marv check: {file}: ok ({} definition(s))",
+            loaded.defs.len()
+        );
+        ExitCode::SUCCESS
+    }
+}
+
+// ---- build --------------------------------------------------------------
+
+/// `marv build [--target native-cranelift] [--run] [--entry NAME] <file>` —
+/// check, then compile with Cranelift; optionally JIT-run the entry point.
+fn cmd_build(args: &[String]) -> ExitCode {
+    let inv = match parse_invocation(args) {
+        Ok(i) => i,
+        Err(e) => {
+            eprintln!("marv build: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    if inv.target != "native-cranelift" {
+        eprintln!(
+            "marv build: unsupported target `{}` (only `native-cranelift` is implemented; \
+             LLVM/WASM are later milestones)",
+            inv.target
+        );
+        return ExitCode::FAILURE;
+    }
+    let Some(file) = &inv.file else {
+        eprintln!("marv build: expected a file");
+        return ExitCode::FAILURE;
+    };
+
+    let loaded = match load(file) {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("marv build: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    // A build refuses code that does not check — this is where a program using a
+    // capability absent from its effect row fails to compile (`spec/03` §5).
+    let diags = loaded.check();
+    print_diags(&diags);
+    if any_errors(&diags) {
+        eprintln!("marv build: {file}: refusing to compile (checker reported errors)");
+        return ExitCode::FAILURE;
+    }
+
+    let jit = match codegen::compile(&loaded.module_path, &loaded.defs) {
+        Ok(j) => j,
+        Err(e) => {
+            eprintln!("marv build: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let arity = match jit.entry_arity(&inv.entry) {
+        Ok(n) => n,
+        Err(e) => {
+            eprintln!("marv build: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    if !inv.run {
+        eprintln!(
+            "marv build: {file}: compiled via native-cranelift (entry takes {arity} word \
+             argument(s))"
+        );
+        return ExitCode::SUCCESS;
+    }
+
+    // --run: JIT-execute the entry point with integer arguments.
+    let ints = match parse_int_args(&inv.args, arity) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("marv build: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    match jit.run_i64(&inv.entry, &ints) {
+        Ok(v) => {
+            println!("{v}");
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("marv build: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+// ---- run ----------------------------------------------------------------
+
+/// `marv run [--grant CAP,CAP] [--entry NAME] <file> [args...]` — interpret the
+/// entry point with an explicit capability grant set (`spec/03` §4.5).
+fn cmd_run(args: &[String]) -> ExitCode {
+    let inv = match parse_invocation(args) {
+        Ok(i) => i,
+        Err(e) => {
+            eprintln!("marv run: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let Some(file) = &inv.file else {
+        eprintln!("marv run: expected a file");
+        return ExitCode::FAILURE;
+    };
+
+    let loaded = match load(file) {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("marv run: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let diags = loaded.check();
+    print_diags(&diags);
+    if any_errors(&diags) {
+        eprintln!("marv run: {file}: refusing to run (checker reported errors)");
+        return ExitCode::FAILURE;
+    }
+
+    let Loaded {
+        module_path,
+        defs,
+        world,
+    } = loaded;
+    let program = Program::new(&module_path, defs, world);
+    match program.run(&inv.entry, &inv.grant, &inv.args) {
+        Ok(outcome) => {
+            println!("{}", outcome.value.render());
+            for e in &outcome.effects {
+                let rendered: Vec<String> = e.args.iter().map(|a| a.render()).collect();
+                eprintln!("effect: {} op#{} [{}]", e.cap, e.op, rendered.join(", "));
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("marv run: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+// ---- shared invocation parsing -----------------------------------------
+
+/// The flags and operands shared by `build` and `run`.
+struct Invocation {
+    target: String,
+    run: bool,
+    entry: String,
+    grant: Vec<String>,
+    file: Option<String>,
+    args: Vec<String>,
+}
+
+/// Parse `[--target T] [--run] [--entry NAME] [--grant LIST] <file> [args...]`.
+/// The first non-flag operand is the file; everything after it is passed
+/// through as program arguments.
+fn parse_invocation(args: &[String]) -> Result<Invocation, String> {
+    let mut inv = Invocation {
+        target: "native-cranelift".to_string(),
+        run: false,
+        entry: String::new(),
+        grant: Vec::new(),
+        file: None,
+        args: Vec::new(),
+    };
+    let mut i = 0;
+    let mut only_args = false; // set once a literal `--` is seen
+    while i < args.len() {
+        let a = &args[i];
+        if only_args {
+            inv.args.push(a.clone());
+            i += 1;
+            continue;
+        }
+        match a.as_str() {
+            // A literal `--` ends flag parsing; the rest are program arguments
+            // even if they look like flags.
+            "--" => only_args = true,
+            "--run" => inv.run = true,
+            "--target" => inv.target = take_value(args, &mut i, "--target")?,
+            "--entry" => inv.entry = take_value(args, &mut i, "--entry")?,
+            "--grant" => {
+                let list = take_value(args, &mut i, "--grant")?;
+                inv.grant.extend(
+                    list.split(',')
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string),
+                );
+            }
+            // Flags are recognized in any position; the first bare operand is the
+            // file, and every bare operand after it is a program argument.
+            flag if flag.starts_with("--") => return Err(format!("unknown flag `{flag}`")),
+            _ if inv.file.is_none() => inv.file = Some(a.clone()),
+            _ => inv.args.push(a.clone()),
+        }
+        i += 1;
+    }
+    Ok(inv)
+}
+
+/// Consume the value following a `--flag` token, advancing the cursor past it.
+fn take_value(args: &[String], i: &mut usize, flag: &str) -> Result<String, String> {
+    *i += 1;
+    args.get(*i)
+        .cloned()
+        .ok_or_else(|| format!("{flag} requires a value"))
+}
+
+/// Parse exactly `arity` command-line integers for a Cranelift `--run`.
+fn parse_int_args(args: &[String], arity: usize) -> Result<Vec<i64>, String> {
+    if args.len() != arity {
+        return Err(format!(
+            "entry expects {arity} integer argument(s), got {}",
+            args.len()
+        ));
+    }
+    args.iter()
+        .enumerate()
+        .map(|(i, s)| {
+            s.parse::<i64>()
+                .map_err(|_| format!("argument {i} `{s}` is not an integer"))
+        })
+        .collect()
+}
+
+// ---- fmt ----------------------------------------------------------------
 
 /// `marv fmt` — canonicalize source via `marv-syntax::format`.
 fn cmd_fmt(args: &[String]) -> ExitCode {
