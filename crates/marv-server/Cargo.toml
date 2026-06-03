@@ -22,3 +22,4 @@ marv-db = { path = "../marv-db" }
 marv-core = { path = "../marv-core" }
 marv-types = { path = "../marv-types" }
 marv-verify = { path = "../marv-verify" }
+marv-store = { path = "../marv-store" }

@@ -360,3 +360,40 @@ fn verify_proves_and_counterexamples_over_the_protocol() {
         "obligation names the violated clause: {bug:#}"
     );
 }
+
+/// §3.4 — `commit`: freezing a snapshot's definitions into the content-addressed
+/// store is reported as a delta, and is idempotent (re-committing the same
+/// source adds nothing and reports the defs as already reviewed).
+#[test]
+fn commit_freezes_and_is_idempotent() {
+    let src = "\
+mod demo
+pure fn factorial(n: i64) -> i64 {
+    if n < 2 {
+        1
+    } else {
+        n * factorial(n - 1)
+    }
+}
+";
+    let mut server = Server::new();
+    let opened = call(
+        &mut server,
+        "marv/openSnapshot",
+        json!({ "files": [{ "path": "demo.mv", "text": src }] }),
+    );
+    let snap = opened.get("snapshotId").cloned().unwrap();
+
+    let first = call(&mut server, "marv/commit", json!({ "snapshotId": snap }));
+    assert_eq!(first["added"], 1, "first commit adds the def: {first:#}");
+    assert_eq!(first["alreadyReviewed"], 0);
+    let hash = first["committed"][0]["hash"].as_str().unwrap().to_string();
+    assert!(hash.starts_with("b3:"));
+
+    let second = call(&mut server, "marv/commit", json!({ "snapshotId": snap }));
+    assert_eq!(second["added"], 0, "re-commit adds nothing: {second:#}");
+    assert_eq!(second["alreadyReviewed"], 1);
+    assert_eq!(second["committed"][0]["hash"].as_str().unwrap(), hash);
+    assert_eq!(second["committed"][0]["reviewed"], true);
+    assert_eq!(second["storeSize"], 1);
+}

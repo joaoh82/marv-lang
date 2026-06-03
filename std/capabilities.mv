@@ -1,0 +1,63 @@
+mod std.io
+
+/// The standard **capability** types (`spec/01` §5). Power is never ambient: a
+/// function can perform an effect only by receiving one of these as a parameter,
+/// and its effect row records which it uses. Capabilities are unforgeable — you
+/// receive one and may *narrow* it (attenuation), but can never construct one.
+///
+/// They are declared as interfaces: the operations a holder of the capability
+/// may perform. A concrete host (a native runtime, or a WASM host import set —
+/// see `marv-codegen-wasm`) supplies the implementations the page/process
+/// chooses to grant.
+
+/// `Io` is the root capability. Everything else is narrowed from it, so handing
+/// a function only `Fs` (not `Io`) provably bounds it to the filesystem.
+interface Io {
+    fn fs(io: &Io) -> Fs
+    fn net(io: &Io) -> Net
+    fn clock(io: &Io) -> Clock
+    fn rand(io: &Io) -> Rand
+    fn alloc(io: &Io) -> Alloc
+    fn stdout(io: &Io) -> Stream
+}
+
+/// A byte sink/source (e.g. standard output).
+interface Stream {
+    fn write(s: &Stream, bytes: &[]u8) -> ! ()
+}
+
+/// Filesystem access.
+interface Fs {
+    fn read(fs: &Fs, path: str) -> ![]u8
+    fn write(fs: &Fs, path: str, bytes: &[]u8) -> ! ()
+}
+
+/// Network access. A function without a `Net` parameter provably cannot reach
+/// the network — the property the WASM sandbox demo (`web/`) makes visible.
+interface Net {
+    fn get(net: &Net, url: str) -> ![]u8
+    fn connect(net: &Net, host: str, port: u16) -> !Conn
+}
+
+/// An open network connection.
+linear interface Conn {
+    fn send(conn: &mut Conn, bytes: &[]u8) -> !usize
+    fn recv(conn: &mut Conn, buf: &mut []u8) -> !usize
+    fn close(conn: Conn) -> ! ()
+}
+
+/// A clock (monotonic time, in nanoseconds).
+interface Clock {
+    fn now(clock: &Clock) -> i64
+}
+
+/// A source of randomness.
+interface Rand {
+    fn next_u64(rand: &Rand) -> u64
+}
+
+/// An allocator. A function with no `Alloc` parameter provably performs no heap
+/// allocation (`spec/01` §4.2).
+interface Alloc {
+    fn alloc(a: &Alloc, bytes: usize) -> ![]u8
+}
