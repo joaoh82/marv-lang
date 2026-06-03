@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>marv · capability-gated WebAssembly sandbox</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font: 15px/1.5 system-ui, sans-serif; max-width: 820px; margin: 2rem auto; padding: 0 1rem; }
+  h1 { font-size: 1.5rem; margin-bottom: 0; }
+  .sub { color: #888; margin-top: .25rem; }
+  section { border: 1px solid #8884; border-radius: 10px; padding: 1rem 1.25rem; margin: 1.25rem 0; }
+  h2 { font-size: 1.1rem; margin: 0 0 .5rem; }
+  button { font: inherit; padding: .35rem .8rem; border-radius: 7px; border: 1px solid #8886; cursor: pointer; }
+  input[type=number] { font: inherit; width: 6rem; padding: .25rem .4rem; }
+  code, pre { font-family: ui-monospace, monospace; }
+  .manifest { background: #8881; border-radius: 6px; padding: .5rem .75rem; margin: .5rem 0; font-size: .9em; }
+  .ok { color: #1a8a3a; } .blocked { color: #c0392b; } .net { color: #2a6fb0; }
+  .log { background: #0a0a0a0c; border-radius: 6px; padding: .6rem .75rem; min-height: 1.4em; white-space: pre-wrap; }
+  label { user-select: none; }
+</style>
+</head>
+<body>
+  <h1>marv → WebAssembly: capability-gated sandbox</h1>
+  <p class="sub">
+    Each module below was compiled from marv to a core WebAssembly module by
+    <code>marv build --target wasm-component</code>. A capability is a <em>host import</em>:
+    the page decides which to provide. A module's import list is its capability
+    manifest — statically inspectable, right here, before any code runs.
+  </p>
+
+  <section>
+    <h2>1 · A pure module (imports nothing → unconditionally sandboxed)</h2>
+    <p><code>demo.factorial(n)</code> — compiled from <code>examples/factorial.mv</code>.
+       It performs no capability, so it imports <strong>nothing</strong>: there is no
+       slot through which this page (or anyone) could hand it authority.</p>
+    <div class="manifest" id="fac-manifest">loading…</div>
+    <p>
+      factorial(<input type="number" id="fac-n" value="10" min="0" max="20" />)
+      <button id="fac-run">run (sandboxed)</button>
+    </p>
+    <div class="log" id="fac-out"></div>
+  </section>
+
+  <section>
+    <h2>2 · A module that wants the network (imports <code>Net</code>)</h2>
+    <p><code>demo.fetch(net)</code> — compiled from <code>web/fetcher.core.json</code>.
+       It <code>perform</code>s a <code>Net</code> operation, so it imports
+       <code>Net::op0</code>. Whether it can run — and so whether it can reach the
+       network — is entirely the host's choice:</p>
+    <div class="manifest" id="net-manifest">loading…</div>
+    <p>
+      <label><input type="checkbox" id="net-grant" /> grant <code>Net</code> capability</label>
+      <button id="net-run">run fetch()</button>
+    </p>
+    <div class="log" id="net-out"></div>
+    <p class="sub">
+      Without the grant, the page does not supply the <code>Net</code> import, so
+      <code>WebAssembly.instantiate</code> fails — the module cannot even start, let
+      alone open a socket. With the grant, the page supplies a <code>Net</code> import
+      and the module runs through it (and only it).
+    </p>
+  </section>
+
+<script type="module">
+const $ = (id) => document.getElementById(id);
+
+// Fetch + compile a module, and render its import manifest (the capability list).
+async function loadModule(url, manifestEl) {
+  const bytes = await (await fetch(url)).arrayBuffer();
+  const module = await WebAssembly.compile(bytes);
+  const imports = WebAssembly.Module.imports(module);
+  if (imports.length === 0) {
+    manifestEl.innerHTML = `<strong class="ok">imports: none</strong> — this module can do nothing but compute.`;
+  } else {
+    const list = imports.map((i) => `<code>${i.module}::${i.name}</code>`).join(", ");
+    manifestEl.innerHTML = `<strong class="net">imports (capabilities required): ${list}</strong>`;
+  }
+  return module;
+}
+
+// ---- 1 · pure factorial ------------------------------------------------
+const facModule = await loadModule("./factorial.wasm", $("fac-manifest"));
+$("fac-run").onclick = async () => {
+  const instance = await WebAssembly.instantiate(facModule, {}); // no imports needed
+  const n = BigInt($("fac-n").value || "0");
+  const r = instance.exports["demo.factorial"](n); // i64 ⇒ BigInt
+  $("fac-out").innerHTML = `<span class="ok">✓ factorial(${n}) = ${r}</span>  (ran with zero host authority)`;
+};
+
+// ---- 2 · Net-gated fetch ----------------------------------------------
+const netModule = await loadModule("./fetcher.wasm", $("net-manifest"));
+$("net-run").onclick = async () => {
+  const out = $("net-out");
+  const granted = $("net-grant").checked;
+  if (!granted) {
+    // Provide NO Net import. Instantiation must fail: the capability is absent,
+    // so the code physically cannot run or reach the network.
+    try {
+      await WebAssembly.instantiate(netModule, {});
+      out.innerHTML = `<span class="blocked">unexpected: instantiated without Net?!</span>`;
+    } catch (e) {
+      out.innerHTML =
+        `<span class="blocked">⛔ BLOCKED — Net not granted.</span>\n` +
+        `Instantiation failed because the module's <code>Net::op0</code> import was not supplied:\n` +
+        `${e}\n` +
+        `The module never started; it cannot reach the network.`;
+    }
+    return;
+  }
+  // Grant Net: supply the import. This is the ONLY way the module gets network reach.
+  let reached = 0;
+  const importObject = {
+    Net: {
+      op0: () => {
+        reached++;
+        // A real host would open a connection here. We do a harmless no-cors
+        // request to demonstrate the boundary, ignoring the outcome.
+        try { fetch("https://example.com", { mode: "no-cors" }); } catch (_) {}
+      },
+    },
+  };
+  const instance = await WebAssembly.instantiate(netModule, importObject);
+  instance.exports["demo.fetch"](); // capability is the import, not an argument
+  out.innerHTML =
+    `<span class="net">🌐 GRANTED — fetch() ran and invoked Net::op0 ${reached} time(s).</span>\n` +
+    `The module reached the network boundary through the capability the host chose to provide.`;
+};
+</script>
+</body>
+</html>

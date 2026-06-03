@@ -7,3 +7,14 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
+marv-core = { path = "../marv-core" }
+marv-types = { path = "../marv-types" }
+wasm-encoder = "0.251"
+wasmparser = "0.251"
+
+[dev-dependencies]
+marv-syntax = { path = "../marv-syntax" }
+marv-interp = { path = "../marv-interp" }
+marv-db = { path = "../marv-db" }
+serde_json.workspace = true
+wasmtime = { version = "45", default-features = false, features = ["cranelift", "runtime"] }

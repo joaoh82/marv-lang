@@ -1,0 +1,35 @@
+{
+  "module": "demo",
+  "world": {
+    "caps": [
+      { "name": "Net", "ops": [ { "params": [], "ret": "Unit", "errors": [] } ] }
+    ]
+  },
+  "defs": [
+    {
+      "name": "fetch",
+      "params": ["net"],
+      "def": {
+        "kind": "Fn",
+        "ty": {
+          "Arrow": {
+            "param": { "Nominal": { "def": "b3:3113015ab972b498409a580120a5fd09ba522019c97c70b16ad2ffaac76d5365", "args": [] } },
+            "ret": "Unit",
+            "effects": { "caps": ["b3:3113015ab972b498409a580120a5fd09ba522019c97c70b16ad2ffaac76d5365"], "errors": [] }
+          }
+        },
+        "requires": [],
+        "ensures": [],
+        "body": {
+          "Lam": {
+            "param": { "Nominal": { "def": "b3:3113015ab972b498409a580120a5fd09ba522019c97c70b16ad2ffaac76d5365", "args": [] } },
+            "effects": { "caps": ["b3:3113015ab972b498409a580120a5fd09ba522019c97c70b16ad2ffaac76d5365"], "errors": [] },
+            "body": {
+              "Perform": { "cap": { "Var": 0 }, "op": 0, "args": [] }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

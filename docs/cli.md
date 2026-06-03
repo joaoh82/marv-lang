@@ -15,7 +15,7 @@ marv <command> [args]
 |---------|--------|-------------|
 | `fmt`    | **working** (M0, parse-and-reprint + whitespace fallback) | Canonicalize marv source. |
 | `check`  | **working** (M2) | Type / effect / capability / error-set / reference / linearity checking. |
-| `build`  | **working** (M4, `native-cranelift`) | Compile a target with the Cranelift backend; optionally JIT-run it. |
+| `build`  | **working** (M4 `native-cranelift`, M5 `wasm-component`) | Compile a target: Cranelift JIT or a WebAssembly module. |
 | `run`    | **working** (M4) | Interpret an entry point with an explicit capability grant set. |
 | `verify` | milestone M6 | Discharge contracts via SMT. |
 
@@ -116,28 +116,51 @@ marv run examples/arithmetic.mv                         # entry defaults to main
 ## `marv build`
 
 ```
-marv build [--target native-cranelift] [--run] [--entry NAME] <file> [args...]
+marv build [--target T] [--run] [--out PATH] [--entry NAME] <file> [args...]
 ```
 
-Compiles with the Cranelift backend (`marv-codegen-cl`). Like `run`, it first
-runs `check` and **refuses to compile** code with errors — this is where a
-program that uses a capability absent from its effect row fails to build
-(`spec/03` §5).
+Compiles with the selected backend. Like `run`, it first runs `check` and
+**refuses to compile** code with errors — this is where a program that uses a
+capability absent from its effect row fails to build (`spec/03` §5).
 
-- **`--target`** — only `native-cranelift` is implemented; the LLVM and WASM
-  backends are later milestones (M4/M5). Unknown targets are rejected.
-- **`--run`** — after compiling, JIT-executes the entry point and prints its
-  integer result. Without it, `build` reports success and the entry's arity.
+- **`--target`** — `native-cranelift` (default) or `wasm-component`. LLVM is a
+  later milestone. Unknown targets are rejected.
+- **`--run`** *(native only)* — after compiling, JIT-executes the entry point and
+  prints its integer result. Without it, `build` reports success and the arity.
+- **`--out PATH`** *(wasm only)* — where to write the `.wasm` module (default
+  `<file>.wasm`).
 - **`--entry`** / **`[args...]`** — as for `run` (integer arguments).
 
+### `--target native-cranelift`
+
+Cranelift JIT (`marv-codegen-cl`).
+
 ```sh
-marv build examples/factorial.mv                       # compiles, reports success
-marv build --run examples/factorial.mv --entry factorial 6   # prints 720
+marv build examples/factorial.mv                              # compiles, reports success
+marv build --run examples/factorial.mv --entry factorial 6    # prints 720
 ```
 
-The interpreter and the Cranelift backend are differentially tested for
-agreement on a corpus under [`../tests/run/`](../tests/run); see
-[`run-and-codegen.md`](run-and-codegen.md).
+### `--target wasm-component`
+
+Emits a WebAssembly module (`marv-codegen-wasm`) and reports its **capability
+manifest** — the host imports it requires. A pure module imports nothing; a
+module that `perform`s a capability imports one function per operation
+(`spec/01` §9). The host (a wasmtime embedding or a browser page) grants a
+capability by supplying that import, and withholds it by not.
+
+```sh
+marv build --target wasm-component examples/factorial.mv -o factorial.wasm
+#   → wrote factorial.wasm … capabilities required: none (pure — imports nothing)
+marv build --target wasm-component web/fetcher.core.json -o fetcher.wasm
+#   → capabilities required (host imports): Net::op0
+```
+
+(Today the artifact is a core wasm module — the component model's substrate —
+with capabilities as host imports; full component/WIT packaging is a later step.)
+
+All three backends — interpreter, Cranelift, and WASM — are differentially tested
+for agreement on a corpus under [`../tests/run/`](../tests/run); the WASM sandbox
+also ships a browser demo. See [`run-and-codegen.md`](run-and-codegen.md).
 
 ## Exit codes
 
