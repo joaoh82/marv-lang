@@ -1,0 +1,56 @@
+{
+  "module": "sandbox",
+  "world": {
+    "caps": [
+      {
+        "name": "Fs",
+        "ops": [
+          { "params": ["Str"], "ret": "Unit", "errors": [] }
+        ]
+      }
+    ]
+  },
+  "defs": [
+    {
+      "name": "leak",
+      "params": ["fs", "path"],
+      "def": {
+        "kind": "Fn",
+        "ty": {
+          "Arrow": {
+            "param": { "Nominal": { "def": "b3:513682aed00d0a73a9470521f40d7a4a171a5232053b7f3da813e95421bec8a2", "args": [] } },
+            "ret": {
+              "Arrow": {
+                "param": "Str",
+                "ret": "Unit",
+                "effects": { "caps": [], "errors": [] }
+              }
+            },
+            "effects": { "caps": [], "errors": [] }
+          }
+        },
+        "requires": [],
+        "ensures": [],
+        "body": {
+          "Lam": {
+            "param": { "Nominal": { "def": "b3:513682aed00d0a73a9470521f40d7a4a171a5232053b7f3da813e95421bec8a2", "args": [] } },
+            "effects": { "caps": [], "errors": [] },
+            "body": {
+              "Lam": {
+                "param": "Str",
+                "effects": { "caps": [], "errors": [] },
+                "body": {
+                  "Perform": {
+                    "cap": { "Var": 1 },
+                    "op": 0,
+                    "args": [ { "Var": 0 } ]
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}
