@@ -46,6 +46,14 @@ fixtures from this directory by relative path. `cargo test` exercises:
   the M6 acceptance gate. A correct `clamp` is proved via SMT; a buggy one yields
   a concrete counterexample; a division-using function reports `unsupported`
   (→ Tier-1 runtime fallback). These need a `z3` binary and skip when absent.
+- **`marv-store/tests/store.rs`** — the M7 store gate: the same source commits to
+  identical hashes (reproducibility), two libraries pinning different hashes of
+  the same-named function coexist, alpha-equivalent definitions dedup, and
+  renames — including through recursion and call edges — change no hash.
+- **`ported_eval_prim_matches_the_rust_oracle`** (`../crates/marv-interp/tests/selfhost.rs`)
+  — the M7 self-hosting gate: the primitive kernel ported to marv
+  ([`../selfhost/prim_eval.mv`](../selfhost/prim_eval.mv)) matches the Rust
+  Stage-0 kernel across every primitive and the M4 corpus's operations.
 
 Fixtures come in two flavors: **in-subset** cases (e.g. `fmt/decls.in.mv`) drive
 the real parse-and-reprint formatter (indentation, parenthesization, spacing),

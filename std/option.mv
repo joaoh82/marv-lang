@@ -1,0 +1,24 @@
+mod std.option
+
+/// The only way to express absence (`spec/01` §3.2). The surface sugar `?T` is
+/// `Option[T]`. Matched exhaustively; there is no `null`.
+enum Option[T] {
+    None,
+    Some(T),
+}
+
+/// `true` when the option holds a value.
+pure fn is_some[T](opt: &Option[T]) -> bool {
+    match opt {
+        Option.None => false,
+        Option.Some(_) => true,
+    }
+}
+
+/// The contained value, or `fallback` when absent.
+pure fn unwrap_or[T](opt: Option[T], fallback: T) -> T {
+    match opt {
+        Option.None => fallback,
+        Option.Some(x) => x,
+    }
+}

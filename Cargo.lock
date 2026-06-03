@@ -649,6 +649,7 @@ dependencies = [
  "marv-core",
  "marv-db",
  "marv-interp",
+ "marv-store",
  "marv-syntax",
  "marv-types",
  "marv-verify",
@@ -726,6 +727,7 @@ version = "0.0.0"
 dependencies = [
  "marv-core",
  "marv-db",
+ "marv-store",
  "marv-types",
  "marv-verify",
  "salsa",
@@ -736,6 +738,13 @@ dependencies = [
 [[package]]
 name = "marv-store"
 version = "0.0.0"
+dependencies = [
+ "blake3",
+ "marv-core",
+ "marv-syntax",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "marv-syntax"

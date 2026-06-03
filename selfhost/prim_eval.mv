@@ -1,0 +1,40 @@
+mod selfhost
+
+/// The interpreter's total-primitive kernel — `marv-interp`'s `eval_prim` —
+/// re-implemented **in marv**, as the first Stage-1 self-hosting step
+/// (`spec/01` host-language notes). `op` is the stable `PrimOp` tag from
+/// `marv-core`'s content encoding (Add=0, Sub=1, Mul=2, Div=3, Rem=4, Eq=5,
+/// Ne=6, Lt=7, Le=8, Gt=9, Ge=10, And=11, Or=12); comparisons yield 1/0, and
+/// And/Or take 0/1 operands (as the lowered boolean conditions do).
+///
+/// The Rust Stage-0 kernel remains the oracle: this definition is differentially
+/// tested against it (see `crates/marv-interp/tests/selfhost.rs`).
+pure fn eval_prim(op: i64, a: i64, b: i64) -> i64 {
+    if op == 0 {
+        a + b
+    } else if op == 1 {
+        a - b
+    } else if op == 2 {
+        a * b
+    } else if op == 3 {
+        a / b
+    } else if op == 4 {
+        a % b
+    } else if op == 5 {
+        if a == b { 1 } else { 0 }
+    } else if op == 6 {
+        if a == b { 0 } else { 1 }
+    } else if op == 7 {
+        if a < b { 1 } else { 0 }
+    } else if op == 8 {
+        if a <= b { 1 } else { 0 }
+    } else if op == 9 {
+        if a > b { 1 } else { 0 }
+    } else if op == 10 {
+        if a >= b { 1 } else { 0 }
+    } else if op == 11 {
+        a * b
+    } else {
+        a + b - a * b
+    }
+}

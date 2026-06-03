@@ -20,8 +20,9 @@
 //! Workspace: `openSnapshot`, `applyEdits`, `closeSnapshot`. Read-only queries:
 //! `check`, `typeAt`, `signature`, `errorSet`, `effects`, `callers`, `callees`,
 //! `canonical`, `core`, `hash`. Mutation: `applyFix`, `format`. Verification:
-//! `verify` (Tier-2 SMT discharge, M6). Build/run — `build`/`run`/`commit` —
-//! belong to later milestones and report method-not-found.
+//! `verify` (Tier-2 SMT discharge, M6). Reuse: `commit` (freeze into the
+//! content-addressed store, M7). Build/run — `build`/`run` — belong to the CLI
+//! today and report method-not-found here.
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, Write};
@@ -77,11 +78,14 @@ struct Snapshot {
     files: Vec<SnapFile>,
 }
 
-/// The protocol server: one incremental database, plus the live snapshots.
+/// The protocol server: one incremental database, the live snapshots, and the
+/// content-addressed store/lockfile that `commit` freezes into.
 pub struct Server {
     db: MarvDatabase,
     snapshots: BTreeMap<String, Snapshot>,
     next_id: u64,
+    store: marv_store::Store,
+    lock: marv_store::Lockfile,
 }
 
 impl Default for Server {
@@ -96,6 +100,8 @@ impl Server {
             db: MarvDatabase::default(),
             snapshots: BTreeMap::new(),
             next_id: 1,
+            store: marv_store::Store::new(),
+            lock: marv_store::Lockfile::new(),
         }
     }
 
@@ -222,6 +228,7 @@ impl Server {
             "core" => self.core(params),
             "hash" => self.hash(params),
             "verify" => self.verify(params),
+            "commit" => self.commit(params),
             "applyFix" => self.apply_fix(params),
             "format" => self.format(params),
             other => Err(RpcError::method_not_found(other)),
@@ -456,6 +463,52 @@ impl Server {
             }
         }
         Err(RpcError::app(format!("unknown definition `{name}`")))
+    }
+
+    /// `marv/commit` — freeze a snapshot's definitions into the content-addressed
+    /// store and return the lockfile delta (`spec/03` §3.4). Identity is the dag
+    /// hash, so re-committing is idempotent, renames are free, and the response
+    /// reports which hashes are new vs. already reviewed.
+    fn commit(&mut self, params: &Value) -> RpcResult {
+        let snap = self.snapshot(params)?.clone();
+        let mut entries: Vec<Value> = Vec::new();
+        let mut rebound: Vec<String> = Vec::new();
+        let (mut added, mut deduped) = (0u64, 0u64);
+
+        for f in &snap.files {
+            let Ok((module_path, defs)) = marv_db::verify_inputs(f.kind, &f.text) else {
+                continue;
+            };
+            let pairs: Vec<(String, marv_core::ir::Def)> =
+                defs.into_iter().map(|d| (d.name, d.def)).collect();
+            let report = marv_store::commit(&mut self.store, &mut self.lock, &module_path, &pairs);
+            for e in &report.entries {
+                let (status, reviewed) = match e.status {
+                    marv_store::CommitStatus::New => ("new", true),
+                    marv_store::CommitStatus::Existing { reviewed } => ("existing", reviewed),
+                };
+                if status == "new" {
+                    added += 1;
+                } else {
+                    deduped += 1;
+                }
+                entries.push(json!({
+                    "name": e.qualified,
+                    "hash": e.hash,
+                    "status": status,
+                    "reviewed": reviewed,
+                }));
+            }
+            rebound.extend(report.rebound.iter().cloned());
+        }
+
+        Ok(json!({
+            "committed": entries,
+            "added": added,
+            "alreadyReviewed": deduped,
+            "rebound": rebound,
+            "storeSize": self.store.len(),
+        }))
     }
 
     fn type_at(&mut self, params: &Value) -> RpcResult {

@@ -18,8 +18,9 @@ marv <command> [args]
 | `build`  | **working** (M4 `native-cranelift`, M5 `wasm-component`) | Compile a target: Cranelift JIT or a WebAssembly module. |
 | `run`    | **working** (M4) | Interpret an entry point with an explicit capability grant set. |
 | `verify` | **working** (M6, Tier 2) | Discharge `requires`/`ensures` contracts via SMT. |
+| `commit` | **working** (M7) | Freeze definitions into the content-addressed store; report the lockfile delta. |
 
-`check`, `build`, `run`, and `verify` accept either a `.mv` **source** file (parsed and
+`check`, `build`, `run`, `verify`, and `commit` accept either a `.mv` **source** file (parsed and
 lowered through the front end) or a `*.core.json` **Core-IR snapshot**
 (`marv_db::CoreModuleSpec`) — currently the only way to express a body that
 `perform`s a capability, since the surface has no `perform` form yet
@@ -180,6 +181,27 @@ marv verify examples/clamp.mv
 
 See [`verification.md`](verification.md) for the two tiers, the verified subset,
 and how a counterexample is produced.
+
+## `marv commit`
+
+```
+marv commit [--store DIR] <file>
+```
+
+Checks the file, then freezes its definitions into the content-addressed store
+(default `.marv/`), rebinds their names in the lockfile, and prints the delta —
+each definition marked **new** (frozen & reviewed) or **already in store /
+already reviewed**, plus any names **rebound** to a new hash. Identity is the
+content (dag) hash, so re-committing the same source is idempotent and renames
+change no hashes:
+
+```sh
+marv commit examples/clamp.mv          # + math.clamp  b3:d94f…  (new — frozen & reviewed)
+marv commit examples/clamp.mv          # = math.clamp  b3:d94f…  (already reviewed)
+```
+
+See [`store.md`](store.md) for the dag-hash / Merkle-DAG scheme, free renames,
+dedup, the lockfile, and how this underpins Stage-1 self-hosting.
 
 ## Exit codes
 

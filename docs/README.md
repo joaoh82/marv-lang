@@ -16,6 +16,7 @@ implementation, and are expected to grow with each milestone.
 | [`query-server.md`](query-server.md) | The incremental query engine (`salsa`) and the JSON-RPC agent protocol: snapshots, the method catalog, and the generate→check→repair loop (M3). |
 | [`run-and-codegen.md`](run-and-codegen.md) | Executing marv: the tree-walking interpreter (semantics oracle), the Cranelift backend, capability-gated `run`, and the differential gate (M4). |
 | [`verification.md`](verification.md) | Contracts and layered verification: Tier-1 runtime checks and Tier-2 SMT discharge (proofs and counterexamples), the verified subset, and `marv verify` / `marv/verify` (M6). |
+| [`store.md`](store.md) | Content-addressed store, lockfile, and reuse: the dag-hash Merkle DAG (free renames, transitive dedup), `marv commit` / `marv/commit`, and the Stage-1 self-hosting step (M7). |
 
 ## Relationship to the rest of the repo
 

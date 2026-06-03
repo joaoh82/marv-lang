@@ -7,7 +7,9 @@
 //! - `build`  — compile a target (`marv-codegen-cl`, M4).
 //! - `run`    — interpret an entry point with an explicit capability grant set
 //!   (`marv-interp`, M4; `spec/03` §4.5).
-//! - `verify` — discharge contracts via SMT (milestone M6).
+//! - `verify` — discharge contracts via SMT (`marv-verify`, M6).
+//! - `commit` — freeze definitions into the content-addressed store
+//!   (`marv-store`, M7; `spec/03` §3.4).
 //!
 //! Argument parsing is hand-rolled to keep the front end small.
 
@@ -19,6 +21,7 @@ use std::process::ExitCode;
 use marv_codegen_cl as codegen;
 use marv_codegen_wasm as wasm;
 use marv_interp::Program;
+use marv_store::{commit, CommitStatus, StoreDir};
 use marv_verify::{verify_def, VerifyOutcome};
 
 use pipeline::{any_errors, load, print_diags, Loaded};
@@ -51,7 +54,13 @@ COMMANDS:
                                Capabilities enter only through --grant; the
                                entry's value parameters are filled from [args...]
                                in order.
-    verify [files...]          Discharge contracts via SMT (milestone M6).
+    verify [--def NAME] <file> Discharge `requires`/`ensures` contracts via SMT.
+    commit [--store DIR] <file>
+                               Freeze a file's definitions into the content-
+                               addressed store (default .marv/), update the
+                               lockfile, and report the delta (new vs. already
+                               reviewed). Identity is the content (dag) hash, so
+                               re-committing is idempotent and renames are free.
 
     -h, --help                 Print this help.
 ";
@@ -76,6 +85,7 @@ fn main() -> ExitCode {
         "build" => cmd_build(rest),
         "run" => cmd_run(rest),
         "verify" => cmd_verify(rest),
+        "commit" => cmd_commit(rest),
         other => {
             eprintln!("marv: unknown command `{other}`\n");
             eprint!("{USAGE}");
@@ -193,6 +203,101 @@ fn print_verify(name: &str, outcome: &VerifyOutcome) {
             println!("    fallback: runtime-checked (Tier 1)");
         }
     }
+}
+
+// ---- commit -------------------------------------------------------------
+
+/// `marv commit [--store DIR] <file>` — freeze a file's definitions into the
+/// content-addressed store and report the lockfile delta (`spec/03` §3.4).
+fn cmd_commit(args: &[String]) -> ExitCode {
+    let mut store_dir = ".marv".to_string();
+    let mut file: Option<String> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--store" => {
+                i += 1;
+                match args.get(i) {
+                    Some(v) => store_dir = v.clone(),
+                    None => {
+                        eprintln!("marv commit: --store requires a value");
+                        return ExitCode::FAILURE;
+                    }
+                }
+            }
+            f if f.starts_with("--") => {
+                eprintln!("marv commit: unknown flag `{f}`");
+                return ExitCode::FAILURE;
+            }
+            _ if file.is_none() => file = Some(args[i].clone()),
+            _ => {}
+        }
+        i += 1;
+    }
+    let Some(file) = file else {
+        eprintln!("marv commit: expected a file");
+        return ExitCode::FAILURE;
+    };
+
+    let loaded = match load(&file) {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("marv commit: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    // A commit freezes checked code; refuse if it does not check.
+    let diags = loaded.check();
+    print_diags(&diags);
+    if any_errors(&diags) {
+        eprintln!("marv commit: {file}: refusing to commit (checker reported errors)");
+        return ExitCode::FAILURE;
+    }
+
+    let dir = StoreDir::new(&store_dir);
+    let (mut store, mut lock) = match dir.load() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("marv commit: {store_dir}: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let report = commit(&mut store, &mut lock, &loaded.module_path, &loaded.defs);
+
+    for e in &report.entries {
+        let short = &e.hash[..e.hash.len().min(15)];
+        match e.status {
+            CommitStatus::New => {
+                println!("  + {}  {}…  (new — frozen & reviewed)", e.qualified, short)
+            }
+            CommitStatus::Existing { reviewed } => {
+                let tag = if reviewed {
+                    "already in store — already reviewed"
+                } else {
+                    "already in store"
+                };
+                println!("  = {}  {}…  ({tag})", e.qualified, short);
+            }
+        }
+    }
+    for name in &report.rebound {
+        println!("  ~ {name}  (name rebound to a new hash)");
+    }
+
+    if let Err(e) = dir.save(&store, &lock) {
+        eprintln!("marv commit: {store_dir}: {e}");
+        return ExitCode::FAILURE;
+    }
+
+    eprintln!(
+        "marv commit: {file}: {} new, {} already in store ({} defs total in {store_dir})",
+        report.added(),
+        report.deduped(),
+        store.len()
+    );
+    ExitCode::SUCCESS
 }
 
 // ---- check --------------------------------------------------------------
