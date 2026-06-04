@@ -189,7 +189,7 @@ fn format_block(block: &Block, level: usize) -> String {
 
     for stmt in &block.stmts {
         s.push_str(&pad);
-        s.push_str(&format_stmt(stmt));
+        s.push_str(&format_stmt(stmt, inner));
         s.push('\n');
     }
     if let Some(tail) = &block.tail {
@@ -203,13 +203,23 @@ fn format_block(block: &Block, level: usize) -> String {
     s
 }
 
-fn format_stmt(stmt: &Stmt) -> String {
+/// Format a statement that begins at indentation `level` (the caller has already
+/// emitted the leading indent for its first line). `level` matters only for the
+/// multi-line loop statements, whose continuation lines and body indent relative
+/// to it.
+fn format_stmt(stmt: &Stmt, level: usize) -> String {
     let (kw, name, ty, value) = match stmt {
         Stmt::Let { name, ty, value } => ("let", name, ty, value),
         Stmt::Var { name, ty, value } => ("var", name, ty, value),
         Stmt::Assign { target, value } => {
             return format!("{} = {}", format_lvalue(target), format_expr(value));
         }
+        Stmt::While {
+            cond,
+            invariants,
+            body,
+        } => return format_while(cond, invariants, body, level),
+        Stmt::For { binder, iter, body } => return format_for(binder, iter, body, level),
     };
     let mut s = format!("{kw} {name}");
     if let Some(ty) = ty {
@@ -305,6 +315,41 @@ fn format_if(if_expr: &IfExpr, level: usize) -> String {
         }
     }
     s
+}
+
+/// Format a `while` loop. Without invariants the body brace shares the head line
+/// (`while <cond> { .. }`, like `if`). With invariants, each `invariant` clause
+/// goes on its own line at `level + 1` and the body brace then starts a fresh
+/// line at `level` — mirroring the canonical form for `fn` contract clauses.
+fn format_while(cond: &Expr, invariants: &[Expr], body: &Block, level: usize) -> String {
+    let mut s = String::from("while ");
+    s.push_str(&format_expr(cond));
+    if invariants.is_empty() {
+        s.push(' ');
+        s.push_str(&format_block(body, level));
+    } else {
+        let pad = indent(level + 1);
+        for inv in invariants {
+            s.push('\n');
+            s.push_str(&pad);
+            s.push_str("invariant ");
+            s.push_str(&format_expr(inv));
+        }
+        s.push('\n');
+        s.push_str(&indent(level));
+        s.push_str(&format_block(body, level));
+    }
+    s
+}
+
+/// Format a `for` loop: `for <binder> in <iter> { .. }`, the body brace sharing
+/// the head line.
+fn format_for(binder: &str, iter: &Expr, body: &Block, level: usize) -> String {
+    format!(
+        "for {binder} in {} {}",
+        format_expr(iter),
+        format_block(body, level)
+    )
 }
 
 fn format_expr(expr: &Expr) -> String {

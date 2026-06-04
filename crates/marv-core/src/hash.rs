@@ -393,11 +393,13 @@ fn encode_core(e: &mut Encoder, c: &Core) {
             encode_atoms(e, args);
         }
         Core::Loop {
+            state,
             invariant,
             cond,
             body,
         } => {
             e.u8(10);
+            encode_atoms(e, state);
             match invariant {
                 None => e.u8(0),
                 Some(p) => {

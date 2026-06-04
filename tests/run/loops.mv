@@ -1,0 +1,38 @@
+mod loops
+
+pure fn sum_to(n: i64) -> i64
+    requires (n >= 0)
+    ensures (result >= 0)
+{
+    var sum: i64 = 0
+    var i: i64 = n
+    while (i > 0)
+        invariant (i >= 0)
+    {
+        sum = (sum + i)
+        i = (i - 1)
+    }
+    sum
+}
+
+pure fn pow(base: i64, exp: i64) -> i64
+    requires (exp >= 0)
+{
+    var result: i64 = 1
+    var e: i64 = exp
+    while (e > 0)
+        invariant (e >= 0)
+    {
+        result = (result * base)
+        e = (e - 1)
+    }
+    result
+}
+
+pure fn count_down(n: i64) -> i64 {
+    var i: i64 = n
+    while (i > 0) {
+        i = (i - 1)
+    }
+    i
+}

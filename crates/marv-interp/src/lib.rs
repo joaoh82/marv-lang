@@ -96,6 +96,10 @@ pub enum RunError {
     PreconditionFailed(String),
     /// An `ensures` postcondition was violated at runtime (Tier 1).
     PostconditionFailed(String),
+    /// A loop `invariant` was violated at runtime (Tier 1, `spec/01` §7) — it did
+    /// not hold when the loop condition was about to be tested. Carries the
+    /// rendered clause with the offending concrete values substituted.
+    InvariantViolated(String),
 }
 
 /// Which contract a Tier-1 failure came from, for the error variant/message.
@@ -124,6 +128,7 @@ impl std::fmt::Display for RunError {
             RunError::UnknownGlobal(h) => write!(f, "unknown global {}", h.to_b3()),
             RunError::PreconditionFailed(p) => write!(f, "precondition violated: requires {p}"),
             RunError::PostconditionFailed(p) => write!(f, "postcondition violated: ensures {p}"),
+            RunError::InvariantViolated(p) => write!(f, "loop invariant violated: {p}"),
         }
     }
 }
@@ -176,25 +181,26 @@ fn eval_pred(p: &Pred, params: &[Value], result: Option<&Value>) -> Option<bool>
             let x = pred_atom(a, params, result)?;
             let y = pred_atom(b, params, result)?;
             let ord = compare(&x, &y).ok()?;
-            Some(match op {
-                CmpOp::Eq => ord == Some(std::cmp::Ordering::Equal),
-                CmpOp::Ne => ord != Some(std::cmp::Ordering::Equal),
-                CmpOp::Lt => ord == Some(std::cmp::Ordering::Less),
-                CmpOp::Le => matches!(
-                    ord,
-                    Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)
-                ),
-                CmpOp::Gt => ord == Some(std::cmp::Ordering::Greater),
-                CmpOp::Ge => matches!(
-                    ord,
-                    Some(std::cmp::Ordering::Greater | std::cmp::Ordering::Equal)
-                ),
-            })
+            Some(cmp_matches(*op, ord))
         }
         Pred::And(l, r) => Some(eval_pred(l, params, result)? && eval_pred(r, params, result)?),
         Pred::Or(l, r) => Some(eval_pred(l, params, result)? || eval_pred(r, params, result)?),
         Pred::Not(inner) => Some(!eval_pred(inner, params, result)?),
         Pred::Forall { .. } | Pred::Exists { .. } => None,
+    }
+}
+
+/// Whether a comparison `op` holds for an ordering result (`None` means the two
+/// values are incomparable, so every comparison is false).
+fn cmp_matches(op: CmpOp, ord: Option<std::cmp::Ordering>) -> bool {
+    use std::cmp::Ordering::{Equal, Greater, Less};
+    match op {
+        CmpOp::Eq => ord == Some(Equal),
+        CmpOp::Ne => ord != Some(Equal),
+        CmpOp::Lt => ord == Some(Less),
+        CmpOp::Le => matches!(ord, Some(Less | Equal)),
+        CmpOp::Gt => ord == Some(Greater),
+        CmpOp::Ge => matches!(ord, Some(Greater | Equal)),
     }
 }
 
@@ -472,11 +478,36 @@ impl Program {
 
             Core::Raise { error, .. } => Err(RunError::Uncaught(self.world.error_name(error))),
 
-            Core::Loop { cond, body, .. } => {
-                // Not produced by the current front end (surface `while` is not
-                // lowered yet), but evaluated faithfully if hand-written Core
-                // carries one: run the body while the condition holds.
+            Core::Loop {
+                state,
+                invariant,
+                cond,
+                body,
+            } => {
+                // Loop-carried state, threaded functionally (`spec/02` §C `Loop`).
+                // The carried variables become the innermost `k` env slots, which
+                // `invariant`/`cond`/`body` read; the body evaluates to their next
+                // values (a tuple) which we write back; the loop evaluates to their
+                // final values (a tuple) so the enclosing scope can project them.
+                let k = state.len();
+                // Evaluate every initial value against the *enclosing* environment
+                // before pushing any — a later state atom must not resolve against
+                // an already-pushed earlier carried slot.
+                let mut inits = Vec::with_capacity(k);
+                for a in state {
+                    inits.push(self.eval_atom(a, env)?);
+                }
+                env.extend(inits);
                 loop {
+                    // Tier-1 invariant check (`spec/01` §7): the invariant must hold
+                    // each time the condition is about to be tested — loop entry and
+                    // every re-entry.
+                    if let Some(inv) = invariant {
+                        if let Some(false) = self.eval_loop_invariant(inv, env) {
+                            let report = self.render_loop_invariant(inv, env);
+                            return Err(RunError::InvariantViolated(report));
+                        }
+                    }
                     let c = self.eval(cond, env, eff)?;
                     match c.as_bool() {
                         Some(true) => {}
@@ -487,11 +518,67 @@ impl Program {
                             ))
                         }
                     }
-                    self.eval(body, env, eff)?;
+                    let next = self.eval(body, env, eff)?;
+                    let new_fields = match next {
+                        Value::Agg { fields, .. } => fields,
+                        Value::Unit if k == 0 => Vec::new(),
+                        other => {
+                            return Err(RunError::Unsupported(format!(
+                                "loop body did not produce its carried state (got `{}`)",
+                                other.render()
+                            )))
+                        }
+                    };
+                    let base = env.len() - k;
+                    for (j, v) in new_fields.into_iter().take(k).enumerate() {
+                        env[base + j] = v;
+                    }
                 }
-                Ok(Value::Unit)
+                // Pop the carried slots and return their final values as a tuple.
+                let base = env.len() - k;
+                let final_state = env.split_off(base);
+                Ok(Value::Agg {
+                    tag: 0,
+                    fields: final_state,
+                })
             }
         }
+    }
+
+    /// Evaluate a loop invariant against the live environment, resolving its atoms
+    /// as de Bruijn indices into `env` (unlike contract `Pred`s, whose atoms use
+    /// the flat parameter convention). Returns `None` for a clause the runtime
+    /// does not evaluate (bounded quantifiers) — treated as "not violated".
+    fn eval_loop_invariant(&self, p: &Pred, env: &[Value]) -> Option<bool> {
+        match p {
+            Pred::True => Some(true),
+            Pred::False => Some(false),
+            Pred::Cmp(op, a, b) => {
+                let x = self.eval_atom(a, env).ok()?;
+                let y = self.eval_atom(b, env).ok()?;
+                let ord = compare(&x, &y).ok()?;
+                Some(cmp_matches(*op, ord))
+            }
+            Pred::And(l, r) => {
+                Some(self.eval_loop_invariant(l, env)? && self.eval_loop_invariant(r, env)?)
+            }
+            Pred::Or(l, r) => {
+                Some(self.eval_loop_invariant(l, env)? || self.eval_loop_invariant(r, env)?)
+            }
+            Pred::Not(inner) => Some(!self.eval_loop_invariant(inner, env)?),
+            Pred::Forall { .. } | Pred::Exists { .. } => None,
+        }
+    }
+
+    /// Render a violated loop invariant with its atoms' concrete runtime values
+    /// substituted (e.g. `5 <= 3`), for a structured Tier-1 failure report.
+    fn render_loop_invariant(&self, p: &Pred, env: &[Value]) -> String {
+        let label = |idx: u32| -> String {
+            self.eval_atom(&Atom::Var(idx), env)
+                .map(|v| v.render())
+                .unwrap_or_else(|_| format!("v{idx}"))
+        };
+        marv_core::render_pred(p, &label)
     }
 
     fn eval_match(

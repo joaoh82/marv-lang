@@ -378,10 +378,12 @@ fn subst_core(c: &Core, subst: &dyn Fn(Hash) -> Option<Hash>) -> Core {
             args: args.iter().map(|a| subst_atom(a, subst)).collect(),
         },
         Core::Loop {
+            state,
             invariant,
             cond,
             body,
         } => Core::Loop {
+            state: state.iter().map(|a| subst_atom(a, subst)).collect(),
             invariant: invariant.clone(),
             cond: Box::new(subst_core(cond, subst)),
             body: Box::new(subst_core(body, subst)),

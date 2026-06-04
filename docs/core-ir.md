@@ -74,6 +74,11 @@ is how `std/result.mv` resolves the `Option` it imports. The variant *names* the
 checker needs for exhaustiveness travel as non-hashed `DefEntry::enum_variants`
 metadata, since the names-erased `Def` cannot carry them.
 
-Other `spec/02` §D desugarings (`?`, `while`, `for`, optional/error sugar)
-concern surface forms the parser does not yet produce; they slot into the same
-lowering machinery as the grammar grows.
+`while`/`for` lower to `Core::Loop { state, invariant, cond, body }` (`spec/02`
+§D): the loop-carried `var`s become the node's `state`, the body evaluates to
+their next values as a tuple `Ctor`, and the loop evaluates to their final values
+(the enclosing scope rebinds each by projection) — the functional encoding of
+cross-iteration mutable value semantics. `for` desugars to an index-driven loop.
+The remaining `spec/02` §D desugarings (`?`, optional/error sugar) concern surface
+forms the parser does not yet produce; they slot into the same lowering machinery
+as the grammar grows.
