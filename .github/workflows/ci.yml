@@ -23,7 +23,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       # The toolchain (incl. rustfmt + clippy) is pinned in rust-toolchain.toml,
       # so fmt/clippy are deterministic across machines.
