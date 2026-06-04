@@ -1,0 +1,19 @@
+mod demo
+
+struct Point { x: i64, y: i64 }
+
+pure fn moved_right(p: Point, dx: i64) -> Point {
+    var q = p
+    q.x = (q.x + dx)
+    q
+}
+
+pure fn main() -> i64 {
+    let start = Point { x: 10, y: 20 }
+    let moved = moved_right(start, 5)
+    var total = 0
+    total = (total + moved.x)
+    total = (total + moved.y)
+    total = (total + start.x)
+    total
+}
