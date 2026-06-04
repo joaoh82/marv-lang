@@ -80,13 +80,48 @@ owned values. This is **[impl]** through the front end: a `var x = e` reassignme
 ANF *rebinding* (a fresh binding shadows the old — Core has no mutable cell), and a field
 update `p.x = e` rebuilds the aggregate from the other fields' projections, so mutating a copy
 never affects the original (`examples/mutation.mv`). Because `if`/`match` are terminal block
-*tails*, branch-local mutation needs no join lowering; cross-*iteration* mutation arrives with
-loops (MARV-2). **References are second-class** (`&T`/`&mut T`): they may be passed *down* into
+*tails*, branch-local mutation needs no join lowering; cross-*iteration* mutation is handled by
+loops (§4.1). **References are second-class** (`&T`/`&mut T`): they may be passed *down* into
 a call but never stored in a field, returned, or captured — so a reference can never outlive
 its call and all aliasing reasoning is local. The checker enforces this (escaping-reference
 diagnostics). **`linear`** types must be consumed exactly once (forgetting to `close` a
 `File` is a compile error). Allocation is explicit via an `Alloc` capability — a function
 with no `Alloc` parameter provably performs no heap allocation.
+
+### 4.1 Loops **[impl]**
+
+`while` and `for` are **statements** (they have no value), so ordinary code follows them in the
+same block. Both lower to the Core `Loop { state, invariant, cond, body }` node and run across
+the interpreter, Cranelift, and WASM backends (`examples/loops.mv`).
+
+```marv
+pure fn sum_to(n: i64) -> i64
+    ensures (result >= 0)
+{
+    var sum: i64 = 0
+    var i: i64 = n
+    while (i > 0)
+        invariant (i >= 0)   // a Tier-1/Tier-2 proof obligation (§7)
+    {
+        sum = (sum + i)
+        i = (i - 1)
+    }
+    sum
+}
+```
+
+The loop-carried `var`s (the mutable bindings the body reassigns — here `sum` and `i`) are
+threaded functionally: they enter the loop as its `state`, the body computes their next values,
+and the loop evaluates to their final values, which the enclosing scope rebinds. There are no
+mutable cells in Core; this is the cross-iteration form of mutable value semantics (§4).
+
+A `while` head carries zero or more `invariant` clauses. `for x in xs { … }` desugars to an
+index-driven loop (`spec/02` §D); iterating a real slice needs `len`/element indexing
+(collections, roadmap), so `for` parses and lowers today but awaits collection support to run.
+
+Today's loop lowering covers **straight-line** bodies (assignments and nested loops). A body
+whose tail is an `if`/`match`/`return` — which would need to thread carried `var`s through a
+branch join — is rejected for now; lift the branch out or restructure as straight-line updates.
 
 ## 5. Effects & capabilities **[core]** (surface: **[design]**)
 
@@ -137,7 +172,8 @@ Three tiers, and the toolchain is honest about which gave an answer:
 
 - **Tier 0** — types/effects/capabilities/error-sets/linearity. Always statically guaranteed.
 - **Tier 1** — runtime contracts. `marv run` checks every `requires`/`ensures` against actual
-  values; violations abort with a structured report.
+  values, and every loop `invariant` each time the condition is tested (loop entry and every
+  re-entry); violations abort with a structured report showing the offending concrete values.
 - **Tier 2** — SMT proof for the verified subset (pure functions over ints/bools today; ADTs,
   arrays, bounded quantifiers, loop invariants are roadmap). `marv verify` returns `proved`,
   `failed` with a **counterexample**, or `unsupported` (→ falls back to Tier 1). See
@@ -179,10 +215,11 @@ is visible in the signature, requires a `SAFETY:` justification comment, and is 
 The parser accepts: `mod`/`import`, `struct`/`enum`/`fn` (incl. `pure fn`, generic parameter
 lists), `let`/`var` bindings, assignment (`x = e`, `p.x = e`), `if`/`else(-if)`, `match`
 (constructor + `_` patterns, payload binding), enum constructor application, struct literals
-(`Name { f: e, … }`), index reads (`a[i]`), generic type arguments (`Option[T]`), the binary
+(`Name { f: e, … }`), index reads (`a[i]`), `while`/`for` loops with `invariant` clauses,
+generic type arguments (`Option[T]`), the binary
 operators (`+ - * / % == != < <= > >= and or`), function calls and recursion, field
 projection, and `requires`/`ensures` contracts. That is enough for the
 [`examples/`](../examples) that run end to end (`factorial`, `arithmetic`, `clamp`, `color`,
-`mutation`, …), the `std/` prelude (`option`, `result`), and the M4/M6 gates. Everything still
-marked **[core]**/**[design]** above is the surface roadmap — tracked in the project tracker,
-ordered loops → errors → generics (checking) → capabilities → collections.
+`mutation`, `loops`, …), the `std/` prelude (`option`, `result`), and the M4/M6 gates. Everything
+still marked **[core]**/**[design]** above is the surface roadmap — tracked in the project
+tracker, ordered errors → generics (checking) → capabilities → collections.

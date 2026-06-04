@@ -465,7 +465,25 @@ impl<'a> Checker<'a> {
                 }
             }
 
-            Core::Loop { cond, body, .. } => {
+            Core::Loop {
+                state, cond, body, ..
+            } => {
+                // The loop-carried variables enter scope as the innermost binders
+                // for `cond`/`body` (`spec/02` §C `Loop`). Synthesize each initial
+                // value's type, then push it as a carried binder.
+                let mut state_uses = Uses::new();
+                let mut carried_tys: Vec<Ty> = Vec::with_capacity(state.len());
+                for a in state {
+                    let t = self.atom_ty(a, env);
+                    state_uses = seq(&state_uses, &atom_uses(a, env));
+                    carried_tys.push(t.clone());
+                    env.push(Binder {
+                        ty: t,
+                        linear: false,
+                        prov: Prov::Other,
+                    });
+                }
+
                 let cout = self.synth(cond, env);
                 if !compatible(&Ty::Known(Type::Bool), &cout.ty) {
                     self.emit(Diagnostic::error(
@@ -477,19 +495,43 @@ impl<'a> Checker<'a> {
                     ));
                 }
                 let bout = self.synth(body, env);
+
+                for _ in state {
+                    env.pop();
+                }
+
                 // A loop body runs zero-or-more times: a linear value consumed
                 // inside it is consumed an unknown number of times. Model that as
                 // "0 on some path, ≥2 on another" so both the not-all-paths and
-                // duplicated checks fire for any linear use in a loop body.
+                // duplicated checks fire for any linear use in a loop body. Uses of
+                // the carried binders themselves are loop-local — drop them.
+                let env_depth = env.len() as u32;
                 let body_uses: Uses = bout
                     .uses
                     .into_iter()
+                    .filter(|(l, _)| *l < env_depth)
                     .map(|(l, (_, mx))| (l, if mx >= 1 { (0, 2) } else { (0, 0) }))
                     .collect();
+                let cond_uses: Uses = cout
+                    .uses
+                    .into_iter()
+                    .filter(|(l, _)| *l < env_depth)
+                    .collect();
+                // The loop evaluates to the final values of its carried variables,
+                // a tuple the enclosing scope projects. Give it a precise `Tuple`
+                // type only when every carried element is concretely known; an
+                // unconstrained integer literal (e.g. `var sum = 0`) loses its
+                // width through the state atom, so fall back to `Unknown` rather
+                // than guessing a width and reporting a spurious mismatch.
+                let result_ty = if carried_tys.iter().all(|t| matches!(t, Ty::Known(_))) {
+                    Ty::Known(Type::Tuple(carried_tys.iter().map(ty_to_type).collect()))
+                } else {
+                    Ty::Unknown
+                };
                 Out {
-                    ty: Ty::Known(Type::Unit),
+                    ty: result_ty,
                     eff: union(cout.eff, &bout.eff),
-                    uses: seq(&cout.uses, &body_uses),
+                    uses: seq(&state_uses, &seq(&cond_uses, &body_uses)),
                 }
             }
         }

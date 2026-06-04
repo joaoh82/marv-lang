@@ -35,7 +35,12 @@ The integer/boolean core the M0/M1 front end can express and lower:
 
 - arithmetic (`+ - * / %`), comparisons (`== != < <= > >=`), boolean `and`/`or`;
 - `if`/`else` (a two-arm `bool` `Match`, `spec/02` §D) and `let` bindings;
-- curried calls between top-level functions, including recursion.
+- curried calls between top-level functions, including recursion;
+- `while` loops over scalar loop-carried state (`Core::Loop`): a header/body/exit
+  block with the carried `var`s as SSA block parameters in Cranelift, and as
+  mutable locals under a `block { loop { … } }` in WASM. The carried-state tuple
+  the body/loop produce is a compile-time register/local bundle (no heap), so
+  multi-variable loops work without aggregate layout.
 
 Every scalar lives in a 64-bit register in *both* backends, so their wrapping
 arithmetic matches — the property that makes the differential test meaningful.
@@ -69,6 +74,7 @@ the results are equal to each other and to a hand-computed golden value:
 | `clamp.mv`      | nested `if`/`else if`/`else` |
 | `classify.mv`   | boolean `and`, comparisons |
 | `ops.mv`        | every arithmetic prim + comparisons in one body |
+| `loops.mv`      | `while` loops + `invariant` (`sum_to`, `pow`, `count_down`) — `Core::Loop` |
 
 The negative case is `uses_ungranted_cap.core.json`: a Core-IR snapshot whose
 `leak(fs: Fs, path: str)` body `perform`s `Fs` while declaring the empty

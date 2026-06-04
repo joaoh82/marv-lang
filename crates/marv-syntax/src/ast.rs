@@ -158,6 +158,24 @@ pub enum Stmt {
     /// binding, a field of one (`p.x = e`), or an element (`a[i] = e`), under the
     /// mutable-value-semantics model (`spec/01` §4).
     Assign { target: LValue, value: Expr },
+    /// `while cond { invariant e }* block` (`spec/02` §B `while_stmt`). A loop is
+    /// a statement — it has no value — so it sits in [`Stmt`], never a [`Tail`].
+    /// Each `invariant` clause is a boolean expression that must hold whenever the
+    /// condition is tested (a Tier-1/Tier-2 proof obligation, `spec/01` §7); they
+    /// are kept in source order and lowered to a `Pred` carried on `Core::Loop`.
+    While {
+        cond: Expr,
+        invariants: Vec<Expr>,
+        body: Block,
+    },
+    /// `for binder in iter block` (`spec/02` §B `for_stmt`). Desugars to an
+    /// index-driven loop over `iter` (`spec/02` §D); the binder is immutable
+    /// within the body.
+    For {
+        binder: String,
+        iter: Expr,
+        body: Block,
+    },
 }
 
 /// An assignment target (`spec/02` §B `lvalue`): a root binding name, optionally

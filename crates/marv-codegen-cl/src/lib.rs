@@ -10,15 +10,19 @@
 //!
 //! The integer/boolean core that the M0/M1 front end can express and lower:
 //! arithmetic and comparison [`PrimOp`]s, `if`/`else` (a two-branch `bool`
-//! [`Core::Match`]), `let` bindings, and curried calls between top-level
-//! functions (recursion included). Every scalar lives in a 64-bit register, so
-//! the backend's wrapping arithmetic matches the oracle's `i64` semantics — the
-//! property that keeps the differential test meaningful.
+//! [`Core::Match`]), `let` bindings, curried calls between top-level functions
+//! (recursion included), and `while`/`for` loops ([`Core::Loop`], lowered to an
+//! SSA header/body/exit with the loop-carried state as block parameters). Every
+//! scalar lives in a 64-bit register, so the backend's wrapping arithmetic
+//! matches the oracle's `i64` semantics — the property that keeps the
+//! differential test meaningful.
 //!
-//! Constructs with no surface form yet (aggregates with runtime layout,
-//! capability `perform`, first-class closures, floats) return
-//! [`CodegenError::Unsupported`] rather than emitting wrong code. They are added
-//! to *both* backends together so agreement is preserved by construction.
+//! A product `Ctor` and its `Proj` are handled as a compile-time [`Slot::Tuple`]
+//! (register-resident, never crossing a function boundary), which is what loop
+//! state needs; full *heap*-laid-out aggregates, capability `perform`,
+//! first-class closures, and floats still return [`CodegenError::Unsupported`]
+//! rather than emitting wrong code. Such constructs are added to *both* backends
+//! together so agreement is preserved by construction.
 //!
 //! ## Currying without heap closures
 //!
@@ -31,7 +35,7 @@
 
 use std::collections::HashMap;
 
-use cranelift::codegen::ir::Type as ClType;
+use cranelift::codegen::ir::{BlockArg, Type as ClType};
 use cranelift::codegen::settings::{self, Configurable};
 // Explicit imports (not a glob) so cranelift's `Type` does not collide with
 // `marv_core::ir::Type`, which we glob-import below as the Core type model.
@@ -348,7 +352,15 @@ fn compile_fn(
 enum Slot {
     Val(Value),
     Unit,
-    Partial { func: Hash, got: Vec<Slot> },
+    Partial {
+        func: Hash,
+        got: Vec<Slot>,
+    },
+    /// A compile-time aggregate: the fields of a product `Ctor` (and the
+    /// loop-carried-state tuple a `Loop` evaluates to). Its leaves live in
+    /// registers; it never crosses a function boundary, so no heap layout is
+    /// needed (full aggregate codegen is MARV-9). A `Proj` selects a field.
+    Tuple(Vec<Slot>),
 }
 
 /// The per-function translation state.
@@ -386,15 +398,123 @@ impl Trans<'_, '_> {
                 branches,
             } => self.eval_match(scrutinee, branches),
 
+            Core::Ctor { fields, .. } => {
+                // A product/aggregate as a compile-time register tuple (no heap
+                // layout yet; see `Slot::Tuple`). Fields are atomic in ANF.
+                let mut slots = Vec::with_capacity(fields.len());
+                for a in fields {
+                    slots.push(self.eval_atom(a)?);
+                }
+                Ok(Slot::Tuple(slots))
+            }
+
+            Core::Proj { base, idx } => {
+                let b = self.eval_atom(base)?;
+                match b {
+                    Slot::Tuple(mut slots) => {
+                        let i = *idx as usize;
+                        if i < slots.len() {
+                            Ok(slots.swap_remove(i))
+                        } else {
+                            Err(CodegenError::Unsupported("projection out of range".into()))
+                        }
+                    }
+                    _ => Err(CodegenError::Unsupported(
+                        "projection of a non-aggregate".into(),
+                    )),
+                }
+            }
+
+            Core::Loop {
+                state, cond, body, ..
+            } => self.eval_loop(state, cond, body),
+
             Core::Lam { .. } => Err(CodegenError::Unsupported("first-class lambda".into())),
-            Core::Ctor { .. } => Err(CodegenError::Unsupported("aggregate construction".into())),
-            Core::Proj { .. } => Err(CodegenError::Unsupported("field projection".into())),
             Core::Perform { .. } => Err(CodegenError::Unsupported(
                 "capability perform (use the interpreter)".into(),
             )),
             Core::Raise { .. } => Err(CodegenError::Unsupported("raise".into())),
-            Core::Loop { .. } => Err(CodegenError::Unsupported("loop".into())),
         }
+    }
+
+    /// Lower a [`Core::Loop`] to SSA control flow: a `header` block carrying the
+    /// loop-carried state as block parameters, a `body` block that computes the
+    /// next state and jumps back, and an `exit` block carrying the final state
+    /// (`spec/02` §C `Loop`). The loop evaluates to the final state as a
+    /// [`Slot::Tuple`] for the enclosing scope to project. Invariants are Tier-1/
+    /// Tier-2 proof obligations checked elsewhere (the interpreter / `marv-verify`),
+    /// so they are not emitted here.
+    fn eval_loop(
+        &mut self,
+        state: &[Atom],
+        cond: &Core,
+        body: &Core,
+    ) -> Result<Slot, CodegenError> {
+        let k = state.len();
+        // Initial carried values (loop-carried state must be scalar words).
+        let mut init: Vec<BlockArg> = Vec::with_capacity(k);
+        for a in state {
+            let s = self.eval_atom(a)?;
+            init.push(self.as_word(s)?.into());
+        }
+
+        let header = self.builder.create_block();
+        let body_block = self.builder.create_block();
+        let exit = self.builder.create_block();
+        for _ in 0..k {
+            self.builder.append_block_param(header, WORD);
+            self.builder.append_block_param(exit, WORD);
+        }
+
+        self.builder.ins().jump(header, &init);
+
+        // Header: bind the carried params as the innermost env slots, test the
+        // condition, and branch to the body (continue) or the exit (with the
+        // current carried values as the loop's result).
+        self.builder.switch_to_block(header);
+        let carried: Vec<Value> = self.builder.block_params(header).to_vec();
+        for v in &carried {
+            self.env.push(Slot::Val(*v));
+        }
+        let c = self.eval(cond)?;
+        let c = self.as_word(c)?;
+        let exit_args: Vec<BlockArg> = carried.iter().map(|v| (*v).into()).collect();
+        self.builder
+            .ins()
+            .brif(c, body_block, &[], exit, &exit_args);
+
+        // Body: compute the next state, pop the carried slots, jump back.
+        self.builder.switch_to_block(body_block);
+        self.builder.seal_block(body_block);
+        let next = self.eval(body)?;
+        let next_args: Vec<BlockArg> = match next {
+            Slot::Tuple(slots) => slots
+                .into_iter()
+                .map(|s| self.as_word(s).map(BlockArg::from))
+                .collect::<Result<_, _>>()?,
+            other => {
+                let _ = other;
+                return Err(CodegenError::Unsupported(
+                    "loop body did not produce its carried state".into(),
+                ));
+            }
+        };
+        for _ in 0..k {
+            self.env.pop();
+        }
+        self.builder.ins().jump(header, &next_args);
+        self.builder.seal_block(header);
+
+        // Exit: the loop's result is the final carried state.
+        self.builder.switch_to_block(exit);
+        self.builder.seal_block(exit);
+        let finals: Vec<Slot> = self
+            .builder
+            .block_params(exit)
+            .iter()
+            .map(|v| Slot::Val(*v))
+            .collect();
+        Ok(Slot::Tuple(finals))
     }
 
     fn eval_atom(&mut self, a: &Atom) -> Result<Slot, CodegenError> {
@@ -559,6 +679,9 @@ impl Trans<'_, '_> {
             Slot::Unit => Ok(self.builder.ins().iconst(WORD, 0)),
             Slot::Partial { .. } => Err(CodegenError::Unsupported(
                 "a partially-applied function used as a value".into(),
+            )),
+            Slot::Tuple(_) => Err(CodegenError::Unsupported(
+                "an aggregate used where a single word is required".into(),
             )),
         }
     }

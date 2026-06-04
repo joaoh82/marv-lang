@@ -200,8 +200,13 @@ pub enum Core {
     Perform { cap: Atom, op: OpId, args: Vec<Atom> },
     /// raise into the error union.
     Raise { error: Hash, args: Vec<Atom> },
-    /// loop with a recorded invariant (proof obligation); desugars from while.
-    Loop { invariant: Option<Box<Pred>>, cond: Box<Core>, body: Box<Core> },
+    /// loop with explicit loop-carried state and a recorded invariant (proof obligation);
+    /// desugars from while/for. `state` = initial values of the carried variables (evaluated
+    /// in the enclosing scope); within `invariant`/`cond`/`body` they are the innermost
+    /// `state.len()` de Bruijn slots; `body` evaluates to their next values (a tuple) and the
+    /// `Loop` to their final values (the same tuple). Mutable value semantics has no cells, so
+    /// cross-iteration mutation is this functional state-threading (§D, `spec/01` §4).
+    Loop { state: Vec<Atom>, invariant: Option<Box<Pred>>, cond: Box<Core>, body: Box<Core> },
 }
 
 pub struct Branch { pub binds: u32, pub body: Core }   // `binds` = ctor arity introduced
@@ -240,8 +245,12 @@ Deterministic and total. Key rules:
 - `e?` → `Match` on the `Result`/`Option`, returning early on the error/none branch.
 - `a.method(x)` where `method` resolves to a free function → `App(App(method, a), x)`,
   curried; multi-arg functions are curried in Core.
-- `while c invariant I { body }` → `Loop { invariant: Some(I), cond: c, body }`.
-- `for x in xs { body }` → desugars to a `Loop` over an index with the iterator protocol.
+- `while c { invariant I }* { body }` → `Loop { state, invariant, cond: c, body' }`, where
+  `state` is the initial values of the loop-carried `var`s (those the body reassigns),
+  `invariant` conjoins the clauses, and `body'` evaluates to the carried vars' next values (a
+  tuple); the enclosing scope rebinds each carried var from a projection of the loop's result.
+- `for x in xs { body }` → an index-driven `Loop`: `var i = 0; while i < len(xs) { let x = xs[i];
+  body; i = i + 1 }` (the iterator protocol generalizes this later).
 - Every non-atomic subexpression is hoisted into a `Let` (ANF normalization) in
   left-to-right evaluation order, making evaluation order explicit and total.
 - Names are replaced by de Bruijn indices; doc comments and formatting are dropped (they are

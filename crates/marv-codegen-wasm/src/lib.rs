@@ -332,9 +332,20 @@ fn walk_caps(
                 }
             }
         }
-        Core::Loop { cond, body, .. } => {
+        Core::Loop {
+            state, cond, body, ..
+        } => {
+            // The carried vars are the innermost binders inside `cond`/`body`;
+            // push a placeholder type per carried slot so de Bruijn cap resolution
+            // inside the loop stays aligned. (`state` atoms carry no `perform`.)
+            for _ in state {
+                tys.push(None);
+            }
             walk_caps(cond, tys, world, f)?;
             walk_caps(body, tys, world, f)?;
+            for _ in state {
+                tys.pop();
+            }
         }
         Core::Perform { cap, op, .. } => {
             let def = resolve_cap_def(cap, tys, world).ok_or(WasmError::UnresolvedCapability)?;
@@ -371,6 +382,10 @@ enum Out {
     Unit,
     /// A partially-applied function (compile-time only): nothing pushed.
     Partial { func: Hash, args: Vec<ArgVal> },
+    /// A compile-time aggregate (a product `Ctor`, or a `Loop`'s final carried
+    /// state): its fields live in locals; nothing is pushed. A `Proj` selects one.
+    /// No heap layout yet (full aggregate codegen is MARV-9).
+    Tuple(Vec<Slot>),
 }
 
 /// An argument resolved to something re-emittable at the saturating call site,
@@ -382,12 +397,14 @@ enum ArgVal {
     Unit,
 }
 
-/// A binding in scope: an absolute local, a unit, or a pending partial call.
+/// A binding in scope: an absolute local, a unit, a pending partial call, or a
+/// compile-time aggregate whose fields are themselves slots.
 #[derive(Clone)]
 enum Slot {
     Local(u32),
     Unit,
     Partial { func: Hash, args: Vec<ArgVal> },
+    Tuple(Vec<Slot>),
 }
 
 fn compile_fn(
@@ -484,6 +501,7 @@ impl Trans<'_> {
                     }
                     Out::Unit => Slot::Unit,
                     Out::Partial { func, args } => Slot::Partial { func, args },
+                    Out::Tuple(slots) => Slot::Tuple(slots),
                 };
                 self.env.push(slot);
                 self.tys.push(None);
@@ -504,11 +522,142 @@ impl Trans<'_> {
 
             Core::Perform { cap, op, args } => self.eval_perform(cap, *op, args),
 
+            Core::Ctor { fields, .. } => {
+                // A product/aggregate as a compile-time tuple of slots. Each field
+                // is materialized into its own local so the bundle is stable
+                // regardless of later stores (e.g. a loop's carried-state copy).
+                let mut slots = Vec::with_capacity(fields.len());
+                for a in fields {
+                    slots.push(self.atom_to_local_slot(a)?);
+                }
+                Ok(Out::Tuple(slots))
+            }
+
+            Core::Proj { base, idx } => {
+                let s = match base {
+                    Atom::Var(i) => self.slot(*i)?,
+                    _ => {
+                        return Err(WasmError::Unsupported(
+                            "projection of a non-aggregate base".into(),
+                        ))
+                    }
+                };
+                match s {
+                    Slot::Tuple(slots) => {
+                        let field = slots.into_iter().nth(*idx as usize).ok_or_else(|| {
+                            WasmError::Unsupported("projection out of range".into())
+                        })?;
+                        Ok(self.slot_to_out(field))
+                    }
+                    _ => Err(WasmError::Unsupported(
+                        "projection of a non-aggregate".into(),
+                    )),
+                }
+            }
+
+            Core::Loop {
+                state, cond, body, ..
+            } => self.eval_loop(state, cond, body),
+
             Core::Lam { .. } => Err(WasmError::Unsupported("first-class lambda".into())),
-            Core::Ctor { .. } => Err(WasmError::Unsupported("aggregate construction".into())),
-            Core::Proj { .. } => Err(WasmError::Unsupported("field projection".into())),
             Core::Raise { .. } => Err(WasmError::Unsupported("raise".into())),
-            Core::Loop { .. } => Err(WasmError::Unsupported("loop".into())),
+        }
+    }
+
+    /// Lower a [`Core::Loop`] (`spec/02` §C `Loop`). The loop-carried state lives
+    /// in mutable wasm locals (mutable value semantics has no cells in Core, so
+    /// cross-iteration state is realized as locals here). The shape is
+    /// `block { loop { <cond>; i64.eqz; br_if 1; <body → store carried>; br 0 } }`.
+    /// Invariants are Tier-1/Tier-2 obligations checked elsewhere, not emitted.
+    fn eval_loop(&mut self, state: &[Atom], cond: &Core, body: &Core) -> Result<Out, WasmError> {
+        let k = state.len();
+        // Resolve the initial carried values against the enclosing scope first,
+        // then allocate the carried locals and store into them.
+        let inits: Vec<ArgVal> = state
+            .iter()
+            .map(|a| self.resolve_arg(a))
+            .collect::<Result<_, _>>()?;
+        let carried: Vec<u32> = (0..k).map(|_| self.alloc_local()).collect();
+        for (l, av) in carried.iter().zip(&inits) {
+            self.push_argval(av);
+            self.emit(Instruction::LocalSet(*l));
+        }
+        // The carried vars are the innermost env slots for `cond`/`body`.
+        for l in &carried {
+            self.env.push(Slot::Local(*l));
+            self.tys.push(None);
+        }
+
+        self.emit(Instruction::Block(BlockType::Empty));
+        self.emit(Instruction::Loop(BlockType::Empty));
+        // Test the condition; break out of the block when it is false.
+        let c = self.eval(cond)?;
+        self.coerce_to_word(c)?;
+        self.emit(Instruction::I64Eqz);
+        self.emit(Instruction::BrIf(1));
+        // Body computes the next state (its fields already materialized into
+        // locals); copy them into the carried locals, then iterate.
+        let next = self.eval(body)?;
+        let next_slots = match next {
+            Out::Tuple(slots) => slots,
+            Out::Unit if k == 0 => Vec::new(),
+            _ => {
+                return Err(WasmError::Unsupported(
+                    "loop body did not produce its carried state".into(),
+                ))
+            }
+        };
+        for (l, s) in carried.iter().zip(&next_slots) {
+            match s {
+                Slot::Local(src) => {
+                    self.emit(Instruction::LocalGet(*src));
+                    self.emit(Instruction::LocalSet(*l));
+                }
+                Slot::Unit => {}
+                Slot::Partial { .. } | Slot::Tuple(_) => {
+                    return Err(WasmError::Unsupported(
+                        "non-scalar loop-carried value".into(),
+                    ))
+                }
+            }
+        }
+        self.emit(Instruction::Br(0));
+        self.emit(Instruction::End); // loop
+        self.emit(Instruction::End); // block
+
+        for _ in 0..k {
+            self.env.pop();
+            self.tys.pop();
+        }
+        // The loop evaluates to its final carried state.
+        Ok(Out::Tuple(carried.into_iter().map(Slot::Local).collect()))
+    }
+
+    /// Materialize an atom's value into a fresh local and return it as a slot —
+    /// used to bundle `Ctor` fields so the aggregate is stable under later stores.
+    fn atom_to_local_slot(&mut self, a: &Atom) -> Result<Slot, WasmError> {
+        match self.eval_atom(a)? {
+            Out::Stack => {
+                let l = self.alloc_local();
+                self.emit(Instruction::LocalSet(l));
+                Ok(Slot::Local(l))
+            }
+            Out::Unit => Ok(Slot::Unit),
+            Out::Partial { func, args } => Ok(Slot::Partial { func, args }),
+            Out::Tuple(slots) => Ok(Slot::Tuple(slots)),
+        }
+    }
+
+    /// Re-materialize a slot as an [`Out`] (the dual of the `Let` binding step).
+    fn slot_to_out(&mut self, s: Slot) -> Out {
+        match s {
+            Slot::Local(l) => {
+                self.emit(Instruction::LocalGet(l));
+                Out::Stack
+            }
+            Slot::Unit => Out::Unit,
+            Slot::Partial { func, args } => Out::Partial { func, args },
+            Slot::Tuple(slots) => Out::Tuple(slots),
         }
     }
 
@@ -526,14 +675,7 @@ impl Trans<'_> {
             Atom::Lit(Literal::Float(_)) => Err(WasmError::Unsupported("float literal".into())),
             Atom::Lit(Literal::Str(_)) => Err(WasmError::Unsupported("string literal".into())),
             Atom::Lit(Literal::Char(_)) => Err(WasmError::Unsupported("char literal".into())),
-            Atom::Var(idx) => match self.slot(*idx)? {
-                Slot::Local(l) => {
-                    self.emit(Instruction::LocalGet(l));
-                    Ok(Out::Stack)
-                }
-                Slot::Unit => Ok(Out::Unit),
-                Slot::Partial { func, args } => Ok(Out::Partial { func, args }),
-            },
+            Atom::Var(idx) => Ok(self.slot_to_out(self.slot(*idx)?)),
             Atom::Global(h) => {
                 if self.fn_index.contains_key(h) {
                     Ok(Out::Partial {
@@ -599,6 +741,9 @@ impl Trans<'_> {
                 Slot::Unit => Ok(ArgVal::Unit),
                 Slot::Partial { .. } => Err(WasmError::Unsupported(
                     "passing a partially-applied function as an argument".into(),
+                )),
+                Slot::Tuple(_) => Err(WasmError::Unsupported(
+                    "passing an aggregate where a single word is required".into(),
                 )),
             },
             Atom::Lit(_) => Err(WasmError::Unsupported("non-scalar literal argument".into())),
@@ -729,6 +874,9 @@ impl Trans<'_> {
             }
             Out::Partial { .. } => Err(WasmError::Unsupported(
                 "a partially-applied function used as a value".into(),
+            )),
+            Out::Tuple(_) => Err(WasmError::Unsupported(
+                "an aggregate used where a single word is required".into(),
             )),
         }
     }

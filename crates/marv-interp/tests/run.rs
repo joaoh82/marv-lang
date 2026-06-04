@@ -84,6 +84,53 @@ fn mutation_has_value_semantics_no_aliasing() {
     assert_eq!(out.value, Value::Int(100));
 }
 
+#[test]
+fn interprets_while_loop_carrying_two_vars() {
+    // A `while` carrying `sum` and `i` across iterations (MARV-2): the running
+    // sum and the countdown index both update each pass and survive to the next.
+    let src = "mod demo\n\npure fn sum_to(n: i64) -> i64 {\n    var sum: i64 = 0\n    var i: i64 = n\n    while (i > 0) {\n        sum = (sum + i)\n        i = (i - 1)\n    }\n    sum\n}\n";
+    let prog = program_from_source(src);
+    // 5 + 4 + 3 + 2 + 1 = 15.
+    let out = prog.run("sum_to", &[], &["5".to_string()]).expect("run");
+    assert_eq!(out.value, Value::Int(15));
+    assert!(out.effects.is_empty(), "a pure loop performs no effects");
+}
+
+#[test]
+fn while_loop_runs_zero_times_when_condition_is_initially_false() {
+    let src = "mod demo\n\npure fn sum_to(n: i64) -> i64 {\n    var sum: i64 = 0\n    var i: i64 = n\n    while (i > 0) {\n        sum = (sum + i)\n        i = (i - 1)\n    }\n    sum\n}\n";
+    let prog = program_from_source(src);
+    let out = prog.run("sum_to", &[], &["0".to_string()]).expect("run");
+    assert_eq!(out.value, Value::Int(0));
+}
+
+#[test]
+fn satisfied_loop_invariant_does_not_abort() {
+    // `i >= 0` holds at every loop header for a non-negative countdown.
+    let src = "mod demo\n\npure fn run(n: i64) -> i64 {\n    var i: i64 = n\n    while (i > 0)\n        invariant (i >= 0)\n    {\n        i = (i - 1)\n    }\n    i\n}\n";
+    let prog = program_from_source(src);
+    let out = prog.run("run", &[], &["4".to_string()]).expect("run");
+    assert_eq!(out.value, Value::Int(0));
+}
+
+#[test]
+fn violated_loop_invariant_aborts_with_a_structured_report() {
+    // `invariant (i > 5)` fails the moment the countdown reaches 5: a Tier-1
+    // violation that aborts the run with the offending concrete values rendered.
+    let src = "mod demo\n\npure fn run(n: i64) -> i64 {\n    var i: i64 = n\n    while (i > 0)\n        invariant (i > 5)\n    {\n        i = (i - 1)\n    }\n    i\n}\n";
+    let prog = program_from_source(src);
+    let err = prog
+        .run("run", &[], &["10".to_string()])
+        .expect_err("the invariant is violated when i reaches 5");
+    match err {
+        RunError::InvariantViolated(report) => {
+            // Concrete values are substituted: at the failing header, i == 5.
+            assert_eq!(report, "5 > 5");
+        }
+        other => panic!("expected an invariant violation, got {other:?}"),
+    }
+}
+
 /// A `touch(fs: Fs)` whose body performs `Fs` op 0. Hand-built because the
 /// surface has no `perform` form yet.
 fn touch_program() -> Program {

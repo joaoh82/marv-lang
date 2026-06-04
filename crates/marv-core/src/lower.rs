@@ -82,6 +82,10 @@ pub enum LowerError {
     /// Index assignment `a[i] = e`. Functional element update needs an
     /// array/slice store, which arrives with aggregate codegen (MARV-9).
     IndexAssignUnsupported,
+    /// A loop body ends in a `return`, `if`, or `match` tail. Threading
+    /// loop-carried `var`s through a branch join is deferred (MARV-2 lowers
+    /// straight-line loop bodies; branch-join lowering is follow-up work).
+    LoopBodyControlFlow,
 }
 
 impl std::fmt::Display for LowerError {
@@ -146,6 +150,12 @@ impl std::fmt::Display for LowerError {
                 f,
                 "index assignment `a[i] = e` is not supported yet (it needs an array/slice store, \
                  which arrives with aggregate codegen, MARV-9)"
+            ),
+            LowerError::LoopBodyControlFlow => write!(
+                f,
+                "a loop body cannot yet end in a `return`, `if`, or `match` (threading \
+                 loop-carried `var`s through a branch join is not lowered yet); use straight-line \
+                 assignments in the loop body"
             ),
         }
     }
@@ -626,15 +636,28 @@ impl Lowerer {
     ) -> Result<Core, LowerError> {
         let mut env = env_in.to_vec();
         let mut b = Builder::new(base_depth);
+        self.lower_stmts(&block.stmts, &mut env, &mut b)?;
+        let tail = self.lower_tail(&block.tail, &env, &mut b)?;
+        Ok(fold_lets(b.lets, tail))
+    }
 
-        for stmt in &block.stmts {
+    /// Lower a sequence of statements into `b`, threading bindings through `env`.
+    /// Shared by [`Self::lower_block`] and the loop-body lowering (a loop body is a
+    /// statement sequence whose tail value is discarded).
+    fn lower_stmts(
+        &self,
+        stmts: &[Stmt],
+        env: &mut Vec<Binding>,
+        b: &mut Builder,
+    ) -> Result<(), LowerError> {
+        for stmt in stmts {
             match stmt {
                 Stmt::Let { name, ty, value } | Stmt::Var { name, ty, value } => {
                     let mutable = matches!(stmt, Stmt::Var { .. });
                     // Best-effort surface type for the bound name (annotation
                     // first, else inferred from the value where M1 can).
-                    let vty = ty.clone().or_else(|| self.type_of_expr(value, &env));
-                    let atom = self.emit_atom(value, &env, &mut b)?;
+                    let vty = ty.clone().or_else(|| self.type_of_expr(value, env));
+                    let atom = self.emit_atom(value, env, b)?;
                     env.push(Binding {
                         name: name.clone(),
                         atom,
@@ -643,13 +666,21 @@ impl Lowerer {
                     });
                 }
                 Stmt::Assign { target, value } => {
-                    self.lower_assign(target, value, &mut env, &mut b)?;
+                    self.lower_assign(target, value, env, b)?;
+                }
+                Stmt::While {
+                    cond,
+                    invariants,
+                    body,
+                } => {
+                    self.lower_while(cond, invariants, body, env, b)?;
+                }
+                Stmt::For { binder, iter, body } => {
+                    self.lower_for(binder, iter, body, env, b)?;
                 }
             }
         }
-
-        let tail = self.lower_tail(&block.tail, &env, &mut b)?;
-        Ok(fold_lets(b.lets, tail))
+        Ok(())
     }
 
     fn lower_tail(
@@ -1156,6 +1187,260 @@ impl Lowerer {
         }
     }
 
+    // ---- loops (MARV-2) -------------------------------------------------
+
+    /// Lower a `while cond { invariant e }* body` statement to a [`Core::Loop`]
+    /// (`spec/02` §D). The loop-carried variables are the in-scope mutable `var`s
+    /// the body reassigns; they are threaded as the loop's `state`, rebound at the
+    /// loop header for `cond`/`body`/`invariant`, updated by the body, and rebound
+    /// in the enclosing scope from the loop's final-state result. Mutable value
+    /// semantics has no cells in Core (`spec/01` §4), so cross-iteration mutation
+    /// is this functional state-threading.
+    fn lower_while(
+        &self,
+        cond: &Expr,
+        invariants: &[Expr],
+        body: &Block,
+        env: &mut Vec<Binding>,
+        b: &mut Builder,
+    ) -> Result<(), LowerError> {
+        let carried = self.carried_vars(body, env);
+        let k = carried.len() as u32;
+
+        // Initial state: the current atom of each carried var, in the enclosing
+        // scope. Their declared types travel along to rebind the finals.
+        let state: Vec<Atom> = carried
+            .iter()
+            .map(|name| {
+                self.resolve_local(name, env)
+                    .expect("carried var resolved from env")
+            })
+            .collect();
+        let carried_tys: Vec<Option<SType>> = carried
+            .iter()
+            .map(|name| {
+                env.iter()
+                    .rev()
+                    .find(|x| &x.name == name)
+                    .and_then(|x| x.ty.clone())
+            })
+            .collect();
+
+        // The carried vars occupy de Bruijn levels [header_depth, header_depth+k)
+        // inside `cond`/`body`/`invariant`. Build the loop-header environment that
+        // rebinds them there (shadowing their enclosing bindings).
+        let header_depth = b.depth();
+        let mut loop_env = env.clone();
+        for (j, name) in carried.iter().enumerate() {
+            loop_env.push(Binding {
+                name: name.clone(),
+                atom: Atom::Var(header_depth + j as u32),
+                ty: carried_tys[j].clone(),
+                mutable: true,
+            });
+        }
+
+        // Condition: its own spine opened just above the carried vars.
+        let mut cb = Builder::new(header_depth + k);
+        let cond_tail = self.emit_tail(cond, &loop_env, &mut cb)?;
+        let cond_core = fold_lets(cb.lets, cond_tail);
+
+        // Invariants → a conjoined `Pred` over the header environment (level atoms).
+        let invariant = self.lower_loop_invariants(invariants, &loop_env)?;
+
+        // Body: lower its statements (mutating a body-local environment), then
+        // bundle the carried vars' updated atoms into the next-state tuple.
+        let mut body_env = loop_env.clone();
+        let mut bb = Builder::new(header_depth + k);
+        self.lower_stmts(&body.stmts, &mut body_env, &mut bb)?;
+        match &body.tail {
+            None => {}
+            Some(Tail::Expr(e)) => {
+                // A loop body's tail value is discarded; emit it for its effects.
+                self.emit_atom(e, &body_env, &mut bb)?;
+            }
+            Some(_) => return Err(LowerError::LoopBodyControlFlow),
+        }
+        let next: Vec<Atom> = carried
+            .iter()
+            .map(|name| {
+                self.resolve_local(name, &body_env)
+                    .expect("carried var resolved after body")
+            })
+            .collect();
+        let body_core = fold_lets(
+            bb.lets,
+            Core::Ctor {
+                ty: loop_tuple_hash(),
+                tag: 0,
+                fields: next,
+            },
+        );
+
+        // Emit the loop; its result is the final-state tuple. Rebind each carried
+        // var in the enclosing scope from a projection of that tuple, so code after
+        // the loop sees the final values.
+        let loop_atom = b.push(Core::Loop {
+            state,
+            invariant: invariant.map(Box::new),
+            cond: Box::new(cond_core),
+            body: Box::new(body_core),
+        });
+        for (j, name) in carried.iter().enumerate() {
+            let proj = b.push(Core::Proj {
+                base: loop_atom.clone(),
+                idx: j as u32,
+            });
+            env.push(Binding {
+                name: name.clone(),
+                atom: proj,
+                ty: carried_tys[j].clone(),
+                mutable: true,
+            });
+        }
+        Ok(())
+    }
+
+    /// Lower a `for binder in iter body` statement (`spec/02` §D) by desugaring it
+    /// to an index-driven `while` over `iter`:
+    ///
+    /// ```text
+    /// var #for<d> = 0
+    /// while #for<d> < len(iter) {
+    ///     let binder = iter[#for<d>]
+    ///     <body>
+    ///     #for<d> = #for<d> + 1
+    /// }
+    /// ```
+    ///
+    /// The index name carries the builder depth so nested `for`s never collide,
+    /// and `#` cannot start a source identifier, so it never shadows user names.
+    /// Execution awaits slice/`len` support (MARV-7) and element indexing
+    /// (MARV-9); the desugaring produces valid Core today (`len`/index lower to
+    /// the corresponding `Prim`s) so the grammar is real and round-trips.
+    fn lower_for(
+        &self,
+        binder: &str,
+        iter: &Expr,
+        body: &Block,
+        env: &mut Vec<Binding>,
+        b: &mut Builder,
+    ) -> Result<(), LowerError> {
+        let idx_name = format!("#for{}", b.depth());
+        let idx_var = Expr::Var(idx_name.clone());
+        let len_call = Expr::Call(Box::new(Expr::Var("len".into())), vec![iter.clone()]);
+        let cond = Expr::Binary(Box::new(idx_var.clone()), BinOp::Lt, Box::new(len_call));
+        let elem = Expr::Index(Box::new(iter.clone()), Box::new(idx_var.clone()));
+
+        let mut stmts = Vec::with_capacity(body.stmts.len() + 2);
+        stmts.push(Stmt::Let {
+            name: binder.to_string(),
+            ty: None,
+            value: elem,
+        });
+        stmts.extend(body.stmts.iter().cloned());
+        stmts.push(Stmt::Assign {
+            target: LValue::Var(idx_name.clone()),
+            value: Expr::Binary(Box::new(idx_var), BinOp::Add, Box::new(Expr::Int(1))),
+        });
+        let while_body = Block {
+            stmts,
+            tail: body.tail.clone(),
+        };
+
+        // Declare the index var in the enclosing scope, then lower the `while`.
+        let zero = self.emit_atom(&Expr::Int(0), env, b)?;
+        env.push(Binding {
+            name: idx_name,
+            atom: zero,
+            ty: Some(SType::Named(vec!["usize".to_string()])),
+            mutable: true,
+        });
+        self.lower_while(&cond, &[], &while_body, env, b)
+    }
+
+    /// The in-scope mutable `var`s a loop body reassigns — its loop-carried state,
+    /// in enclosing declaration order. A name re-declared (`let`/`var`) inside the
+    /// body is body-local and excluded.
+    fn carried_vars(&self, body: &Block, env: &[Binding]) -> Vec<String> {
+        let mut assigned: Vec<String> = Vec::new();
+        let mut declared: HashSet<String> = HashSet::new();
+        collect_assigned_roots(&body.stmts, &mut assigned, &mut declared);
+        let mut result: Vec<String> = Vec::new();
+        for binding in env {
+            if binding.mutable
+                && assigned.contains(&binding.name)
+                && !declared.contains(&binding.name)
+                && !result.contains(&binding.name)
+            {
+                result.push(binding.name.clone());
+            }
+        }
+        result
+    }
+
+    /// Lower a loop's `invariant` clauses to a single conjoined [`Pred`] over the
+    /// loop-header environment (or `None` when there are none).
+    fn lower_loop_invariants(
+        &self,
+        invariants: &[Expr],
+        loop_env: &[Binding],
+    ) -> Result<Option<Pred>, LowerError> {
+        let mut acc: Option<Pred> = None;
+        for e in invariants {
+            let p = self.lower_loop_pred(e, loop_env)?;
+            acc = Some(match acc {
+                None => p,
+                Some(prev) => Pred::And(Box::new(prev), Box::new(p)),
+            });
+        }
+        Ok(acc)
+    }
+
+    /// Lower a loop invariant expression to a [`Pred`]. Unlike a `requires`/
+    /// `ensures` contract (which uses a flat parameter convention,
+    /// [`Self::lower_pred`]), an invariant's atoms are resolved against the loop
+    /// environment as de Bruijn *levels*, so a comparison can mention both
+    /// parameters and the loop-carried variables.
+    fn lower_loop_pred(&self, e: &Expr, env: &[Binding]) -> Result<Pred, LowerError> {
+        match e {
+            Expr::Bool(true) => Ok(Pred::True),
+            Expr::Bool(false) => Ok(Pred::False),
+            Expr::Binary(l, op, r) => match op {
+                BinOp::And => Ok(Pred::And(
+                    Box::new(self.lower_loop_pred(l, env)?),
+                    Box::new(self.lower_loop_pred(r, env)?),
+                )),
+                BinOp::Or => Ok(Pred::Or(
+                    Box::new(self.lower_loop_pred(l, env)?),
+                    Box::new(self.lower_loop_pred(r, env)?),
+                )),
+                BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
+                    let cmp = cmp_op(*op).ok_or(LowerError::ContractNotPredicate)?;
+                    let la = self.lower_loop_pred_atom(l, env)?;
+                    let ra = self.lower_loop_pred_atom(r, env)?;
+                    Ok(Pred::Cmp(cmp, la, ra))
+                }
+                _ => Err(LowerError::ContractNotPredicate),
+            },
+            _ => Err(LowerError::ContractNotPredicate),
+        }
+    }
+
+    /// Lower a loop-invariant comparison operand to an [`Atom`] resolved against
+    /// the loop environment. Only atomic operands (a variable, the loop-carried
+    /// vars, or a literal) are expressible — `Pred::Cmp` compares atoms.
+    fn lower_loop_pred_atom(&self, e: &Expr, env: &[Binding]) -> Result<Atom, LowerError> {
+        match e {
+            Expr::Int(n) => Ok(Atom::Lit(Literal::Int(*n))),
+            Expr::Bool(b) => Ok(Atom::Lit(Literal::Bool(*b))),
+            Expr::Var(name) => self
+                .resolve_local(name, env)
+                .ok_or_else(|| LowerError::UnknownContractVar { name: name.clone() }),
+            _ => Err(LowerError::ContractOperandNotAtomic),
+        }
+    }
+
     /// The nominal content hash of an in-module struct by source name — the same
     /// hash [`Self::lower_named`] commits to, so a literal/field-rebuild `Ctor`
     /// and a type reference to the struct agree.
@@ -1343,6 +1628,51 @@ fn lvalue_to_expr(lv: &LValue) -> Expr {
     }
 }
 
+/// A synthetic, deterministic content hash for an anonymous loop-state tuple (the
+/// bundle of a loop's carried variables). `@loop-state` cannot be a real
+/// qualified name (identifiers never start with `@`), so it never collides with a
+/// struct/enum hash; the interpreter and backends treat the loop tuple
+/// structurally and ignore this hash, while the checker leaves an unresolved
+/// nominal as `Unknown` (it gives the loop an exact `Tuple` type itself).
+fn loop_tuple_hash() -> Hash {
+    symbol_hash("@loop-state")
+}
+
+/// Collect the root binding names assigned anywhere in `stmts` (recursing into
+/// nested loop bodies) into `assigned`, and the names *declared* by a `let`/`var`
+/// into `declared`. Used to compute a loop's carried-variable set.
+fn collect_assigned_roots(
+    stmts: &[Stmt],
+    assigned: &mut Vec<String>,
+    declared: &mut HashSet<String>,
+) {
+    for s in stmts {
+        match s {
+            Stmt::Let { name, .. } | Stmt::Var { name, .. } => {
+                declared.insert(name.clone());
+            }
+            Stmt::Assign { target, .. } => {
+                let root = lvalue_root(target);
+                if !assigned.contains(&root) {
+                    assigned.push(root);
+                }
+            }
+            Stmt::While { body, .. } | Stmt::For { body, .. } => {
+                collect_assigned_roots(&body.stmts, assigned, declared);
+            }
+        }
+    }
+}
+
+/// The root binding name of an l-value (`a`, `a.x`, `a[i]` all have root `a`).
+fn lvalue_root(lv: &LValue) -> String {
+    match lv {
+        LValue::Var(name) => name.clone(),
+        LValue::Field(base, _) => lvalue_root(base),
+        LValue::Index(base, _) => lvalue_root(base),
+    }
+}
+
 /// Build a [`Core::Ctor`] for constructor reference `c` with already-lowered
 /// payload `fields`. The variant's enum is committed by the *same* symbol hash a
 /// nominal type reference to that enum uses, so the checker links them.
@@ -1489,13 +1819,59 @@ fn to_indices(c: &Core, depth: u32) -> Core {
             args: args.iter().map(|a| atom_to_index(a, depth)).collect(),
         },
         Core::Loop {
+            state,
             invariant,
             cond,
             body,
-        } => Core::Loop {
-            invariant: invariant.clone(),
-            cond: Box::new(to_indices(cond, depth)),
-            body: Box::new(to_indices(body, depth)),
+        } => {
+            // The loop binds `state.len()` carried variables as the innermost
+            // slots of `invariant`/`cond`/`body`; `state` itself is evaluated in
+            // the enclosing scope (at `depth`).
+            let k = state.len() as u32;
+            Core::Loop {
+                state: state.iter().map(|a| atom_to_index(a, depth)).collect(),
+                invariant: invariant
+                    .as_ref()
+                    .map(|p| Box::new(pred_to_index(p, depth + k))),
+                cond: Box::new(to_indices(cond, depth + k)),
+                body: Box::new(to_indices(body, depth + k)),
+            }
+        }
+    }
+}
+
+/// Rewrite a [`Pred`]'s de Bruijn *level* atoms into *indices* at binder depth
+/// `depth`, mirroring [`to_indices`] for the contract/invariant predicate
+/// language. Loop invariants are built with level atoms (resolved from the
+/// lowering environment); other predicates already use a flat convention and pass
+/// through unchanged because their atoms are not `Var` levels into this scope.
+fn pred_to_index(p: &Pred, depth: u32) -> Pred {
+    match p {
+        Pred::True => Pred::True,
+        Pred::False => Pred::False,
+        Pred::Cmp(op, l, r) => Pred::Cmp(*op, atom_to_index(l, depth), atom_to_index(r, depth)),
+        Pred::And(l, r) => Pred::And(
+            Box::new(pred_to_index(l, depth)),
+            Box::new(pred_to_index(r, depth)),
+        ),
+        Pred::Or(l, r) => Pred::Or(
+            Box::new(pred_to_index(l, depth)),
+            Box::new(pred_to_index(r, depth)),
+        ),
+        Pred::Not(inner) => Pred::Not(Box::new(pred_to_index(inner, depth))),
+        Pred::Forall { domain, body } => Pred::Forall {
+            domain: (
+                atom_to_index(&domain.0, depth),
+                atom_to_index(&domain.1, depth),
+            ),
+            body: Box::new(pred_to_index(body, depth)),
+        },
+        Pred::Exists { domain, body } => Pred::Exists {
+            domain: (
+                atom_to_index(&domain.0, depth),
+                atom_to_index(&domain.1, depth),
+            ),
+            body: Box::new(pred_to_index(body, depth)),
         },
     }
 }

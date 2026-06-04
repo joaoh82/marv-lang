@@ -93,6 +93,18 @@ fn corpus_cases() -> Vec<(&'static str, &'static str, Vec<i64>, i64)> {
         ("classify.mv", "classify", vec![10], 0),
         ("ops.mv", "ops", vec![20, 6], 165),
         ("ops.mv", "ops", vec![3, 8], 16),
+        // `while` loops carrying two `var`s (sum, i) → `Core::Loop` (MARV-2)
+        ("loops.mv", "sum_to", vec![0], 0),
+        ("loops.mv", "sum_to", vec![1], 1),
+        ("loops.mv", "sum_to", vec![5], 15),
+        ("loops.mv", "sum_to", vec![10], 55),
+        ("loops.mv", "sum_to", vec![100], 5050),
+        ("loops.mv", "pow", vec![2, 10], 1024),
+        ("loops.mv", "pow", vec![3, 4], 81),
+        ("loops.mv", "pow", vec![5, 0], 1),
+        // single-carried-variable loop with no invariant (the `k == 1` path)
+        ("loops.mv", "count_down", vec![7], 0),
+        ("loops.mv", "count_down", vec![0], 0),
     ]
 }
 

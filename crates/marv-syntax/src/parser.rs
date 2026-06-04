@@ -450,6 +450,10 @@ impl Parser {
                 Tok::RBrace => break,
                 Tok::Let => stmts.push(self.parse_let(false)?),
                 Tok::Var => stmts.push(self.parse_let(true)?),
+                // A loop is a statement (it has no value), so it does not end the
+                // block: parsing continues with whatever follows it.
+                Tok::While => stmts.push(self.parse_while()?),
+                Tok::For => stmts.push(self.parse_for()?),
                 Tok::Return => {
                     tail = Some(self.parse_return_tail()?);
                     break;
@@ -530,6 +534,54 @@ impl Parser {
             None
         };
         Ok(IfExpr { cond, then, els })
+    }
+
+    /// Parse `while cond { invariant expr }* block` (`spec/02` §B `while_stmt`).
+    /// The condition and every `invariant` clause are head expressions followed by
+    /// a `{` (another clause's expr, or the body brace), so — like an `if` head —
+    /// a bare `Name {` in them is not a struct literal. `invariant` is a
+    /// contextual keyword (an ordinary identifier elsewhere), recognized only at
+    /// the start of a clause line here.
+    fn parse_while(&mut self) -> PResult<Stmt> {
+        self.expect(Tok::While)?;
+        let cond = self.parse_expr_no_struct()?;
+        let mut invariants = Vec::new();
+        loop {
+            // A clause sits on the next line; peek past the newline without
+            // committing unless the line actually opens with `invariant`.
+            let save = self.pos;
+            self.skip_nl();
+            if matches!(self.peek(), Tok::Ident(k) if k == "invariant") {
+                self.bump();
+                invariants.push(self.parse_expr_no_struct()?);
+            } else {
+                self.pos = save;
+                break;
+            }
+        }
+        // With invariants present the body's `{` is on its own next line; consume
+        // the separating newline so `parse_block` sees the brace.
+        if !invariants.is_empty() {
+            self.skip_nl();
+        }
+        let body = self.parse_block()?;
+        Ok(Stmt::While {
+            cond,
+            invariants,
+            body,
+        })
+    }
+
+    /// Parse `for binder in iter block` (`spec/02` §B `for_stmt`). The iterator
+    /// expression is a head expression (the body brace follows it), so struct
+    /// literals are suppressed in it like an `if` condition.
+    fn parse_for(&mut self) -> PResult<Stmt> {
+        self.expect(Tok::For)?;
+        let binder = self.ident()?;
+        self.expect(Tok::In)?;
+        let iter = self.parse_expr_no_struct()?;
+        let body = self.parse_block()?;
+        Ok(Stmt::For { binder, iter, body })
     }
 
     fn parse_match(&mut self) -> PResult<MatchExpr> {

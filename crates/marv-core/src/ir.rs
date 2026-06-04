@@ -294,8 +294,19 @@ pub enum Core {
         error: Hash,
         args: Vec<Atom>,
     },
-    /// loop with a recorded invariant (proof obligation); desugars from `while`.
+    /// Loop with explicit loop-carried state and a recorded invariant (a proof
+    /// obligation); desugars from `while`/`for` (`spec/02` §D).
+    ///
+    /// `state` holds the initial values of the loop-carried variables (the `var`s
+    /// the body reassigns), evaluated in the enclosing scope. Within `invariant`,
+    /// `cond`, and `body` those variables are bound as the innermost `state.len()`
+    /// de Bruijn slots; `body` evaluates to their *next* values (a tuple `Ctor`
+    /// over them), and the `Loop` itself evaluates to their *final* values (the
+    /// same tuple), so the enclosing scope can rebind each one by projection. This
+    /// is the functional/SSA encoding of mutable value semantics across iterations
+    /// (`spec/01` §4) — there are no mutable cells in Core.
     Loop {
+        state: Vec<Atom>,
         invariant: Option<Box<Pred>>,
         cond: Box<Core>,
         body: Box<Core>,

@@ -20,9 +20,10 @@ an answer:
   guaranteed for *all* code (the M2 checker). This is not about contracts.
 - **Tier 1 — runtime contracts.** In the debug runner (`marv run`, the
   interpreter), every `requires` is checked before the body executes and every
-  `ensures` after, against the actual argument and result values. A violation
-  aborts with a structured report. This holds for *all* contracts, regardless of
-  whether Tier 2 can reason about them.
+  `ensures` after, against the actual argument and result values; every loop
+  `invariant` is checked at the loop header (entry and each re-entry). A violation
+  aborts with a structured report (showing the offending concrete values). This
+  holds for *all* contracts, regardless of whether Tier 2 can reason about them.
 - **Tier 2 — static proof (verified subset).** `marv verify` (`marv-verify`)
   discharges contracts with an SMT solver (z3, over SMT-LIB via `easy-smt`) for a
   decidable-ish subset, returning a **proof** or a **counterexample**.
