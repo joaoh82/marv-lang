@@ -164,6 +164,7 @@ fn gen_struct(rng: &mut Rng) -> StructDecl {
 fn gen_fn(rng: &mut Rng) -> FnDecl {
     let is_pure = rng.chance(1, 3);
     let name = rng.pick(FN_NAMES).to_string();
+    let generics = gen_generics(rng);
     let params = (0..rng.below(4))
         .map(|_| Param {
             name: rng.pick(IDENTS).to_string(),
@@ -181,6 +182,7 @@ fn gen_fn(rng: &mut Rng) -> FnDecl {
     FnDecl {
         is_pure,
         name,
+        generics,
         params,
         ret,
         requires: Vec::new(),
@@ -189,16 +191,30 @@ fn gen_fn(rng: &mut Rng) -> FnDecl {
     }
 }
 
+/// A 0–2 element generic parameter list, drawn from a small single-letter pool.
+fn gen_generics(rng: &mut Rng) -> Vec<String> {
+    const GENERIC_NAMES: &[&str] = &["T", "E", "K", "V"];
+    (0..rng.below(3))
+        .map(|i| GENERIC_NAMES[i as usize % GENERIC_NAMES.len()].to_string())
+        .collect()
+}
+
 fn gen_type(rng: &mut Rng, depth: u32) -> Type {
     if depth == 0 {
         return gen_atom_type(rng);
     }
-    match rng.below(5) {
+    match rng.below(6) {
         0 => Type::Slice(Box::new(gen_type(rng, depth - 1))),
         1 => Type::Ref {
             mutable: rng.chance(1, 2),
             // References wrap a base type (`spec/02` §B `ref_type`); no `&&T`.
             inner: Box::new(gen_atom_type(rng)),
+        },
+        2 => Type::Generic {
+            path: gen_path(rng, TYPE_NAMES, 1, 1),
+            args: (0..(1 + rng.below(2)))
+                .map(|_| gen_atom_type(rng))
+                .collect(),
         },
         _ => gen_atom_type(rng),
     }

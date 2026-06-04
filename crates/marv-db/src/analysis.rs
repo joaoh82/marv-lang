@@ -349,6 +349,10 @@ fn surface_ty(t: &ast::Type) -> String {
     match t {
         ast::Type::Unit => "()".into(),
         ast::Type::Named(path) => path.join("."),
+        ast::Type::Generic { path, args } => {
+            let args: Vec<String> = args.iter().map(surface_ty).collect();
+            format!("{}[{}]", path.join("."), args.join(", "))
+        }
         ast::Type::Slice(inner) => format!("[]{}", surface_ty(inner)),
         ast::Type::Ref { mutable, inner } => {
             format!(

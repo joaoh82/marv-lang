@@ -185,10 +185,74 @@ impl Parser {
                 Ok(Item::Struct(self.parse_struct(true)?))
             }
             Tok::Struct => Ok(Item::Struct(self.parse_struct(false)?)),
+            Tok::Enum => Ok(Item::Enum(self.parse_enum()?)),
             other => Err(ParseError::new(format!(
-                "expected an item (`fn`, `pure fn`, `struct`, `linear struct`), found {other:?}"
+                "expected an item (`fn`, `pure fn`, `struct`, `linear struct`, `enum`), found \
+                 {other:?}"
             ))),
         }
+    }
+
+    /// Parse a generic parameter list `[A, B, ...]`, or `Vec::new()` when none is
+    /// present. The opening `[` must be the very next token. Bounds
+    /// (`generic = ident , [ ":" , bound ]`) are not yet modeled — only the
+    /// parameter names are kept.
+    fn parse_generics(&mut self) -> PResult<Vec<String>> {
+        if !self.eat(&Tok::LBracket) {
+            return Ok(Vec::new());
+        }
+        let mut names = vec![self.ident()?];
+        while self.eat(&Tok::Comma) {
+            if self.peek() == &Tok::RBracket {
+                break; // tolerate a trailing comma
+            }
+            names.push(self.ident()?);
+        }
+        self.expect(Tok::RBracket)?;
+        Ok(names)
+    }
+
+    fn parse_enum(&mut self) -> PResult<EnumDecl> {
+        self.expect(Tok::Enum)?;
+        let name = self.ident()?;
+        let generics = self.parse_generics()?;
+        self.expect(Tok::LBrace)?;
+        self.skip_nl();
+
+        let mut variants = Vec::new();
+        if self.peek() != &Tok::RBrace {
+            variants.push(self.parse_variant()?);
+            while self.eat(&Tok::Comma) {
+                self.skip_nl();
+                if self.peek() == &Tok::RBrace {
+                    break; // trailing comma
+                }
+                variants.push(self.parse_variant()?);
+            }
+        }
+        self.skip_nl();
+        self.expect(Tok::RBrace)?;
+        Ok(EnumDecl {
+            name,
+            generics,
+            variants,
+        })
+    }
+
+    fn parse_variant(&mut self) -> PResult<Variant> {
+        let name = self.ident()?;
+        let mut fields = Vec::new();
+        if self.eat(&Tok::LParen) {
+            fields.push(self.parse_type()?);
+            while self.eat(&Tok::Comma) {
+                if self.peek() == &Tok::RParen {
+                    break; // trailing comma
+                }
+                fields.push(self.parse_type()?);
+            }
+            self.expect(Tok::RParen)?;
+        }
+        Ok(Variant { name, fields })
     }
 
     fn parse_struct(&mut self, linear: bool) -> PResult<StructDecl> {
@@ -227,6 +291,7 @@ impl Parser {
     fn parse_fn(&mut self, is_pure: bool) -> PResult<FnDecl> {
         self.expect(Tok::Fn)?;
         let name = self.ident()?;
+        let generics = self.parse_generics()?;
         self.expect(Tok::LParen)?;
 
         let mut params = Vec::new();
@@ -253,6 +318,7 @@ impl Parser {
         Ok(FnDecl {
             is_pure,
             name,
+            generics,
             params,
             ret,
             requires,
@@ -329,7 +395,23 @@ impl Parser {
                 let elem = self.parse_type()?;
                 Ok(Type::Slice(Box::new(elem)))
             }
-            Tok::Ident(_) => Ok(Type::Named(self.parse_path()?)),
+            Tok::Ident(_) => {
+                let path = self.parse_path()?;
+                // An optional `[T, ...]` makes this a generic application.
+                if self.eat(&Tok::LBracket) {
+                    let mut args = vec![self.parse_type()?];
+                    while self.eat(&Tok::Comma) {
+                        if self.peek() == &Tok::RBracket {
+                            break; // trailing comma
+                        }
+                        args.push(self.parse_type()?);
+                    }
+                    self.expect(Tok::RBracket)?;
+                    Ok(Type::Generic { path, args })
+                } else {
+                    Ok(Type::Named(path))
+                }
+            }
             other => Err(ParseError::new(format!("expected a type, found {other:?}"))),
         }
     }
@@ -353,6 +435,10 @@ impl Parser {
                 }
                 Tok::If => {
                     tail = Some(Tail::If(Box::new(self.parse_if()?)));
+                    break;
+                }
+                Tok::Match => {
+                    tail = Some(Tail::Match(Box::new(self.parse_match()?)));
                     break;
                 }
                 _ => {
@@ -410,6 +496,71 @@ impl Parser {
             None
         };
         Ok(IfExpr { cond, then, els })
+    }
+
+    fn parse_match(&mut self) -> PResult<MatchExpr> {
+        self.expect(Tok::Match)?;
+        let scrutinee = self.parse_expr()?;
+        self.expect(Tok::LBrace)?;
+
+        let mut arms = Vec::new();
+        loop {
+            self.skip_nl();
+            if self.peek() == &Tok::RBrace {
+                break;
+            }
+            arms.push(self.parse_arm()?);
+        }
+        self.skip_nl();
+        self.expect(Tok::RBrace)?;
+        Ok(MatchExpr { scrutinee, arms })
+    }
+
+    /// Parse one `pattern => (expr | block) ,` arm. The trailing comma is
+    /// mandatory in canonical form (`spec/02` §B `arm`), but tolerated absent
+    /// before the closing brace so agent drafts still parse.
+    fn parse_arm(&mut self) -> PResult<Arm> {
+        let pat = self.parse_pattern()?;
+        self.expect(Tok::FatArrow)?;
+        let body = if self.peek() == &Tok::LBrace {
+            ArmBody::Block(self.parse_block()?)
+        } else {
+            ArmBody::Expr(self.parse_expr()?)
+        };
+        // Consume the arm separator if present (a `Nl` may sit before it).
+        self.skip_nl();
+        self.eat(&Tok::Comma);
+        Ok(Arm { pat, body })
+    }
+
+    fn parse_pattern(&mut self) -> PResult<Pattern> {
+        // `_` is a wildcard (it lexes as an ordinary identifier).
+        if matches!(self.peek(), Tok::Ident(name) if name == "_") {
+            self.bump();
+            return Ok(Pattern::Wildcard);
+        }
+        let path = self.parse_path()?;
+        let mut fields = Vec::new();
+        if self.eat(&Tok::LParen) {
+            fields.push(self.parse_field_pat()?);
+            while self.eat(&Tok::Comma) {
+                if self.peek() == &Tok::RParen {
+                    break; // trailing comma
+                }
+                fields.push(self.parse_field_pat()?);
+            }
+            self.expect(Tok::RParen)?;
+        }
+        Ok(Pattern::Ctor { path, fields })
+    }
+
+    fn parse_field_pat(&mut self) -> PResult<FieldPat> {
+        let name = self.ident()?;
+        if name == "_" {
+            Ok(FieldPat::Wildcard)
+        } else {
+            Ok(FieldPat::Bind(name))
+        }
     }
 
     // ---- expressions (precedence climbing) -----------------------------

@@ -96,14 +96,14 @@ Two boundaries are worth stating plainly, in the spirit of the M1 scope note:
    byte-precise location fills in once the front end threads spans through
    lowering. This is a wiring task, not a checker change.
 
-2. **Which rules the front end can reach.** The M0/M1 front end emits only
-   `fn`/`struct` over arithmetic, `if`, calls, and field access — no `perform`,
-   `raise`, enum constructors, or `linear` consumption, and every lowered arrow
-   currently carries the empty effect row. So from real `.mv` source the
-   reachable diagnostics today are the type (`E0101`/`E0102`/`E0103`), returned-
-   reference, and struct-field-reference ones. The capability, error-set,
-   exhaustiveness, and linear-consumption rules are exercised over hand-written
-   Core IR (see `tests/rules.rs`). **The checker itself is complete over the
-   whole Core IR**, independent of which surface forms the parser accepts yet;
-   those rules light up automatically as later milestones widen the grammar
-   (effect rows, `error`/`!T`, `match`, `?`, `linear` consumers).
+2. **Which rules the front end can reach.** The front end now emits `fn`/`struct`/`enum`
+   over arithmetic, `if`, `match`, calls, enum constructors, and field access — but no
+   `perform`, `raise`, or `linear` consumption yet, and every lowered arrow currently carries
+   the empty effect row. So from real `.mv` source the reachable diagnostics today are the
+   type (`E0101`/`E0102`/`E0103`), returned-reference, struct-field-reference, and **`match`
+   exhaustiveness (`E0130`)** ones — the last reachable since MARV-1 landed surface enums
+   (see `tests/enum_source.rs`). The capability, error-set, and linear-consumption rules are
+   still exercised over hand-written Core IR (see `tests/rules.rs`). **The checker itself is
+   complete over the whole Core IR**, independent of which surface forms the parser accepts
+   yet; the remaining rules light up automatically as later milestones widen the grammar
+   (effect rows, `error`/`!T`, `?`, `linear` consumers).

@@ -41,10 +41,11 @@ pub struct Import {
     pub names: Option<Vec<String>>,
 }
 
-/// A top-level declaration. M0 covers `struct` and `fn`.
+/// A top-level declaration. Covers `struct`, `enum`, and `fn`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Item {
     Struct(StructDecl),
+    Enum(EnumDecl),
     Fn(FnDecl),
 }
 
@@ -63,6 +64,26 @@ pub struct Field {
     pub ty: Type,
 }
 
+/// `enum Name[generics] { Variant, Variant(T, ...), ... }` (`spec/02` §B
+/// `enum_decl`). Variants are kept in declaration order, which fixes their Core
+/// tag (`spec/02` §C — `Match` branches are ordered by variant tag).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnumDecl {
+    pub name: String,
+    /// Generic type parameter names, e.g. `["T"]` for `enum Option[T]`. Empty
+    /// when the enum is monomorphic.
+    pub generics: Vec<String>,
+    pub variants: Vec<Variant>,
+}
+
+/// One variant of an enum: a name and zero or more positional payload types. A
+/// nullary variant (`None`) has an empty `fields`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Variant {
+    pub name: String,
+    pub fields: Vec<Type>,
+}
+
 /// `[pure] fn name(params) [-> ret] [requires e]* [ensures e]* { body }`.
 ///
 /// Contract clauses (`spec/01` §7) sit between the signature and the body, each
@@ -73,6 +94,9 @@ pub struct Field {
 pub struct FnDecl {
     pub is_pure: bool,
     pub name: String,
+    /// Generic type parameter names, e.g. `["T"]` for `fn is_some[T](...)`.
+    /// Empty for a non-generic function.
+    pub generics: Vec<String>,
     pub params: Vec<Param>,
     pub ret: Option<Type>,
     /// Preconditions, in source order (`requires` clauses).
@@ -97,6 +121,10 @@ pub enum Type {
     Unit,
     /// A named type, possibly dotted: `i32`, `Sale`, `std.io.Io`.
     Named(Path),
+    /// A generic application `Name[T, ...]`, e.g. `Option[T]`, `Result[T, E]`
+    /// (`spec/02` §B `base_type` with type arguments). `args` is non-empty; the
+    /// no-argument form is [`Type::Named`].
+    Generic { path: Path, args: Vec<Type> },
     /// `[]T` — a slice of `T`.
     Slice(Box<Type>),
     /// `&T` / `&mut T` — a second-class reference.
@@ -136,6 +164,10 @@ pub enum Tail {
     Return(Option<Expr>),
     /// An `if`/`else` chain producing the block's result.
     If(Box<IfExpr>),
+    /// A `match` expression producing the block's result. Like [`Tail::If`],
+    /// `match` appears only at a block tail, which keeps formatting
+    /// line-oriented and the grammar unambiguous.
+    Match(Box<MatchExpr>),
 }
 
 /// `if cond { .. } [else (if .. | { .. })]`.
@@ -151,6 +183,51 @@ pub struct IfExpr {
 pub enum Else {
     If(Box<IfExpr>),
     Block(Block),
+}
+
+/// `match scrutinee { arm, ... }` (`spec/02` §B `match_expr`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MatchExpr {
+    pub scrutinee: Expr,
+    pub arms: Vec<Arm>,
+}
+
+/// One `pattern => body,` arm of a `match`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Arm {
+    pub pat: Pattern,
+    pub body: ArmBody,
+}
+
+/// The right-hand side of a `match` arm: either a single expression
+/// (`pat => expr,`) or a block (`pat => { .. },`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ArmBody {
+    Expr(Expr),
+    Block(Block),
+}
+
+/// A match pattern. The supported subset (`spec/02` §B `pattern`) is the
+/// wildcard `_` and constructor patterns `Path[(field, ...)]` whose fields are
+/// themselves a binder or `_` — enough for exhaustive matches over enums (and
+/// `bool`, whose variants are `false`/`true`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Pattern {
+    /// `_` — matches anything, binds nothing.
+    Wildcard,
+    /// `Enum.Variant`, bare `Variant`, or `Variant(p, ...)`. `path` is the
+    /// (possibly dotted) constructor name; `fields` are its sub-patterns
+    /// (empty for a nullary variant).
+    Ctor { path: Path, fields: Vec<FieldPat> },
+}
+
+/// A constructor pattern's field sub-pattern: a fresh binder or `_`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FieldPat {
+    /// Binds the field to a name in the arm body.
+    Bind(String),
+    /// `_` — ignores the field.
+    Wildcard,
 }
 
 /// A value expression. `if`/`else` is intentionally *not* here — it only occurs

@@ -45,18 +45,24 @@ per-width semantics are roadmap.)*
 ### Aggregates
 - **struct** (product): `struct Point { x: f64, y: f64 }`. Value semantics. Declarations and
   field projection are **[impl]**; struct *literals* are **[design]** (mutation/construction task).
-- **enum** (sum): `enum Shape { Circle(f64), Rect(f64, f64) }`, matched exhaustively. The Core
-  IR, checker (exhaustiveness), and interpreter handle enums/`match` **[core]**; surface
-  `enum`/`match` is the next surface task.
+- **enum** (sum): `enum Shape { Circle(f64), Rect(f64, f64) }`, matched exhaustively with
+  `match`. Declarations, constructor application (`Shape.Circle(r)`), and `match` — with
+  payload-binding constructor patterns and the `_` wildcard — are **[impl]** end to end:
+  parsed, lowered to `Ctor`/`Match`, exhaustiveness-checked, and run by the interpreter. See
+  `examples/color.mv` and the `std/` prelude.
 - **array** `[N]T`, **slice** `[]T`, **tuple** `(A, B)`. Types parse **[impl]**; literals and
   indexing are **[design]**.
-- **optional** `?T` = `Option[T]` — the only way to express absence. **[design]** surface (`Option` in `std/`).
+- **optional** `?T` = `Option[T]` — the only way to express absence. `Option`/`Result` are
+  written in marv (`std/`) and now parse + lower **[impl]**; the `?T`/`!T` *sugar* and `?`
+  propagation are still **[design]**.
 - **function type** `fn(A) -> C`, optionally with an effect row `fn(A) -{Io}-> C`.
 
 ### Aliases, constants, generics
 `type Meters = f64`, `const MAX: u32 = 5`, `fn map[T, U](xs: []T, f: fn(T) -> U) -> []U`
-(explicit, monomorphized). Generics + bounds (`[T: Ord]`) are **[design]** (generics task);
-`Type::Var` exists in Core.
+(explicit, monomorphized). Generic **parameter lists** on `fn`/`enum` and generic type
+**arguments** (`Option[T]`, `Result[T, E]`) now parse and lower — a bare parameter becomes a
+`Type::Var` de Bruijn index. Generic *checking* (instantiation, equality) and bounds
+(`[T: Ord]`) remain **[design]** (generics task).
 
 ### Interfaces **[design]**
 Bounded, coherent (one impl per type per interface), deterministically resolved. `interface
@@ -161,10 +167,12 @@ is visible in the signature, requires a `SAFETY:` justification comment, and is 
 
 ## What you can actually write today
 
-The parser accepts: `mod`/`import`, `struct`/`fn` (incl. `pure fn`), `let`/`var` bindings,
-`if`/`else(-if)`, the binary operators (`+ - * / % == != < <= > >= and or`), function calls
-and recursion, field projection, and `requires`/`ensures` contracts. That is enough for the
-[`examples/`](../examples) that run end to end (`factorial`, `arithmetic`, `clamp`, …) and for
-the M4/M6 gates. Everything marked **[core]**/**[design]** above is the surface roadmap —
-tracked in the project tracker, ordered enums → construction/mutation → loops → errors →
-generics → capabilities → collections.
+The parser accepts: `mod`/`import`, `struct`/`enum`/`fn` (incl. `pure fn`, generic parameter
+lists), `let`/`var` bindings, `if`/`else(-if)`, `match` (constructor + `_` patterns, payload
+binding), enum constructor application, generic type arguments (`Option[T]`), the binary
+operators (`+ - * / % == != < <= > >= and or`), function calls and recursion, field
+projection, and `requires`/`ensures` contracts. That is enough for the
+[`examples/`](../examples) that run end to end (`factorial`, `arithmetic`, `clamp`, `color`,
+…), the `std/` prelude (`option`, `result`), and the M4/M6 gates. Everything still marked
+**[core]**/**[design]** above is the surface roadmap — tracked in the project tracker, ordered
+construction/mutation → loops → errors → generics (checking) → capabilities → collections.

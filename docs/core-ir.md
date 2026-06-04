@@ -31,7 +31,7 @@ each definition.
 
 | Step | Effect |
 |------|--------|
-| Desugaring (`spec/02` §D) | `if`/`else` → `Match` on a `bool` (branches ordered false-then-true); method call `a.m(x)` → curried `App(App(m, a), x)`; multi-argument calls curried; nullary call/`fn` over a synthesized `()`. |
+| Desugaring (`spec/02` §D) | `if`/`else` → `Match` on a `bool` (branches ordered false-then-true); `enum` → `DefKind::Enum`; constructor application → `Ctor { ty, tag, fields }`; `match` → `Match` with branches ordered by variant tag and `binds` = the pattern's bound arity; method call `a.m(x)` → curried `App(App(m, a), x)`; multi-argument calls curried; nullary call/`fn` over a synthesized `()`. |
 | ANF normalization | every non-atomic subexpression is hoisted into a `let`, left-to-right, so all operands are atomic and evaluation order is explicit. |
 | de Bruijn conversion | variable names are erased; bound variables become indices. Built with stable de Bruijn *levels*, then finalized to indices in one pass. |
 | Content hashing (`spec/02` §F) | `blake3`-256 over a canonical, version-prefixed binary encoding: no names, set-like effect/error rows sorted, positional aggregates kept in order, `Global`/`Nominal` children carried by their 32-byte hash. |
@@ -66,6 +66,14 @@ sites in the source:
   deduplicates transitively) is content-store work (M7). Both honour the §F
   encoding rules as written.
 
+Constructors and `match` resolve against an enum registry built from the modules
+being lowered: `lower_module` sees the current module's enums, while
+`lower_modules` shares one registry across a set (a prelude plus its dependents)
+so a `match`/constructor can reference an enum imported from another file — which
+is how `std/result.mv` resolves the `Option` it imports. The variant *names* the
+checker needs for exhaustiveness travel as non-hashed `DefEntry::enum_variants`
+metadata, since the names-erased `Def` cannot carry them.
+
 Other `spec/02` §D desugarings (`?`, `while`, `for`, optional/error sugar)
-concern surface forms the M0 parser does not yet produce; they slot into the same
+concern surface forms the parser does not yet produce; they slot into the same
 lowering machinery as the grammar grows.

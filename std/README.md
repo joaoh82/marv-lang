@@ -11,10 +11,16 @@ links against once a build references them by content hash (`spec/01` §8).
 
 ## Status
 
-These use post-M0 surface — `enum`, `interface`, generics, `match`, `?`/`!`
-sugar — that the M0 parser does not yet accept (like `examples/hello.mv` and
-`examples/report.mv`). They are the **reference prelude declarations**: faithful
-to the grammar (`spec/02` §B) and the design (`spec/01` §§3, 5, 6), consumed as
-the front end's surface grows toward full coverage. The content-addressed store
-(`marv-store`) and the capability-as-host-import model (`marv-codegen-wasm`) are
-already in place to link and sandbox them.
+`option.mv` and `result.mv` are now **real parsed source**, not reference-only:
+they use `enum`, generics, and `match`, all of which the front end accepts. They
+parse, are canonical (`marv fmt` reprints them unchanged), and lower to Core —
+lower the two together (they share the `Option` constructor namespace; `result`
+imports it) via `marv_core::lower_modules`, since single-file lowering resolves
+only the enums declared in that file. Doc comments were dropped to keep them
+canonical (the formatter does not yet preserve `///` — see the roadmap), so each
+declaration's intent is summarized in the table above.
+
+`capabilities.mv` still uses `interface`, which has no surface form yet, so it
+remains a **reference declaration** consumed as the front end grows. The
+content-addressed store (`marv-store`) and the capability-as-host-import model
+(`marv-codegen-wasm`) are already in place to link and sandbox the prelude.
