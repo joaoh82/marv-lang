@@ -1,0 +1,17 @@
+mod errors
+
+error ParseError { Empty, Overflow }
+
+fn digit(b: i64) -> !i64 {
+    if (b < 0) {
+        ParseError.Empty
+    } else {
+        b
+    }
+}
+
+fn sum_two(x: i64, y: i64) -> !i64 {
+    let a = digit(x)?
+    let b = digit(y)?
+    (a + b)
+}

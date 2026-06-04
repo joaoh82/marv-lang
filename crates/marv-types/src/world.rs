@@ -163,6 +163,39 @@ impl World {
                             },
                         );
                     }
+                    DefKind::Error => {
+                        // An `error` decl is registered twice under its hash: as an
+                        // `ErrorDecl` (so `error_name`/error-set reporting resolve
+                        // it) and as an enum-like sum (so an exhaustive `match`
+                        // over a caught error value is checked). Its variants are
+                        // nullary, so the payload is empty.
+                        let variants: Vec<VariantDecl> = entry
+                            .enum_variants
+                            .as_ref()
+                            .map(|vs| {
+                                vs.iter()
+                                    .map(|v| VariantDecl {
+                                        name: v.name.clone(),
+                                        fields: v.fields.clone(),
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        w.errors.insert(
+                            h,
+                            ErrorDecl {
+                                name: entry.name.clone(),
+                                payload: Vec::new(),
+                            },
+                        );
+                        w.enums.insert(
+                            h,
+                            EnumDecl {
+                                name: entry.name.clone(),
+                                variants,
+                            },
+                        );
+                    }
                     _ => {
                         w.globals.insert(h, entry.def.ty.clone());
                     }
