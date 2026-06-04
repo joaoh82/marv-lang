@@ -22,6 +22,7 @@ pub enum Tok {
     Linear,
     Struct,
     Enum,
+    Error,
     Match,
     Let,
     Var,
@@ -68,7 +69,8 @@ pub enum Tok {
     Le,
     Gt,
     Ge,
-    Bang, // lone `!` — not used in the M0 subset, surfaces as a parse error
+    Bang,     // `!` — error-union type prefix (`!T`)
+    Question, // `?` — postfix error-propagation operator and optional-type prefix (`?T`)
 
     /// A collapsed run of one or more line breaks (significant separator).
     Nl,
@@ -100,6 +102,7 @@ fn keyword(word: &str) -> Option<Tok> {
         "linear" => Tok::Linear,
         "struct" => Tok::Struct,
         "enum" => Tok::Enum,
+        "error" => Tok::Error,
         "match" => Tok::Match,
         "let" => Tok::Let,
         "var" => Tok::Var,
@@ -289,6 +292,7 @@ fn lex_punct(chars: &[char], i: usize) -> Result<(Tok, usize), LexError> {
         '<' => Tok::Lt,
         '>' => Tok::Gt,
         '!' => Tok::Bang,
+        '?' => Tok::Question,
         other => return Err(LexError::new(format!("unexpected character `{other}`"))),
     };
     Ok((tok, i + 1))

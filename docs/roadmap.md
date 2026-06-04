@@ -19,7 +19,7 @@ where each one sits and what must land first. Each task references back here.
 | ~~**MARV-1** enums + `match` (payloads)~~ ✅ done | 1 · Surface (spine) | — | 3, 5, 9, `std` | high |
 | ~~**MARV-4** construction/mutation (struct literals, indexing, assignment, `var`)~~ ✅ done | 1 · Surface (spine) | — | 2, 9 | high |
 | ~~**MARV-2** `while`/`for` loops → `Core::Loop`~~ ✅ done | 1 · Surface (spine) | ~~MARV-4~~ ✅ | 11 | high |
-| **MARV-3** error handling (`error`, `!T`, `?`, error-set inference) | 1 · Surface (spine) | MARV-1 | 6 | high |
+| ~~**MARV-3** error handling (`error`, `!T`, `?`, error-set inference)~~ ✅ done | 1 · Surface (spine) | ~~MARV-1~~ ✅ | 6 | high |
 | **MARV-5** generics + interfaces/impl (monomorphization) | 1 · Surface | MARV-1 | 6 | medium |
 | **MARV-6** capabilities/`perform` from source | 1 · Surface | MARV-5, MARV-3 | — | medium |
 | **MARV-7** scalars & collections (str/char, slices/arrays, `as`) | 1 · Surface | — (pairs w/ 4) | — | medium |
@@ -44,14 +44,21 @@ node's `state`, body yields the next-state tuple, the loop yields the final tupl
 `invariant` checking in the interpreter; SSA loop blocks in Cranelift + WASM via compile-time
 register/local tuples; `examples/loops.mv` runs and agrees across all three backends). `for`
 parses + desugars to an index loop but awaits slice/`len` (MARV-7) to execute; loop bodies that
-end in an `if`/`match`/`return` await branch-join lowering; Tier-2 SMT for invariants is MARV-11.
+end in an `if`/`match`/`return` await branch-join lowering; Tier-2 SMT for invariants is MARV-11
+· **MARV-3** error handling (`error E { … }` decls, `!T`/bare-`!` error unions → `Result[T,
+error-union]`, `E.Variant` → `Core::Raise`, postfix `?`; **full cross-call error-set inference**
+via a fixpoint over the call graph in `marv-db`, surfaced through `marv/errorSet`; exhaustive
+`match` over a caught error value; `examples/errors.mv` checks clean). `?` is a success-value
+pass-through (errors propagate by unwinding, so error programs run on the interpreter);
+capability-op error sets are MARV-6, cross-*module* propagation is MARV-14, and `Result`-value
+codegen is MARV-9.
 
 ## Recommended order
 
 **The spine** — the critical path to "you can write non-trivial programs in marv," in order:
 
 ```
-MARV-1 enums+match ✅  →  MARV-4 construction/mutation ✅  →  MARV-2 loops ✅  →  MARV-3 error handling
+MARV-1 enums+match ✅  →  MARV-4 construction/mutation ✅  →  MARV-2 loops ✅  →  MARV-3 error handling ✅
 ```
 
 Each turns the language from "integer functions" into something progressively more real, and

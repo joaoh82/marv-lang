@@ -46,7 +46,10 @@
 
 use std::collections::BTreeMap;
 
+use std::sync::OnceLock;
+
 use marv_core::ir::*;
+use marv_core::symbol_hash;
 
 use crate::diagnostic::{Code, Diagnostic, Edit, Fix};
 use crate::world::World;
@@ -246,8 +249,13 @@ impl<'a> Checker<'a> {
             self.emit(escaping_ref_diag(EscapeSite::Return));
         }
 
-        // Effect & error subsumption (§E): declared row ⊇ inferred row.
-        self.check_subsumption(&declared_eff, &out.eff);
+        // Effect & error subsumption (§E): declared row ⊇ inferred row. A `!T`
+        // (error-union) return type means the error set is *inferred*, not
+        // listed in the signature (`spec/01` §6), so it accepts any inferred
+        // error — no `MissingError`. A plain return type does not, so raising
+        // without declaring `!` is still reported.
+        let errors_open = error_union_success(declared_ret).is_some();
+        self.check_subsumption(&declared_eff, &out.eff, errors_open);
 
         // Linearity of parameters: each `linear` parameter must be consumed
         // exactly once on every path through the body.
@@ -262,7 +270,7 @@ impl<'a> Checker<'a> {
 
     /// Report each capability and error the body infers but the signature does
     /// not declare, with the mechanical fix (`spec/03` §2).
-    fn check_subsumption(&mut self, declared: &EffectRow, inferred: &EffectRow) {
+    fn check_subsumption(&mut self, declared: &EffectRow, inferred: &EffectRow, errors_open: bool) {
         for cap in &inferred.caps {
             if !declared.caps.contains(cap) {
                 let name = self.world.cap_name(cap);
@@ -287,7 +295,7 @@ impl<'a> Checker<'a> {
             }
         }
         for err in &inferred.errors {
-            if !declared.errors.contains(err) {
+            if !errors_open && !declared.errors.contains(err) {
                 let name = self.world.error_name(err);
                 self.emit(
                     Diagnostic::error(
@@ -358,7 +366,10 @@ impl<'a> Checker<'a> {
                 });
                 let level = env.len() as u32 - 1;
                 let mut bout = self.synth(body, env);
-                self.check_subsumption(effects, &bout.eff);
+                // A value lambda carries no `!T` return annotation, so its error
+                // set is closed (declared by `effects`); a raise it does not
+                // declare is still reported.
+                self.check_subsumption(effects, &bout.eff, false);
                 if linear {
                     let profile = bout.uses.get(&level).copied().unwrap_or((0, 0));
                     self.check_linear(profile);
@@ -1083,6 +1094,46 @@ fn is_ref(t: &Ty) -> bool {
     matches!(t, Ty::Known(ty) if matches!(peel_ref_target(ty), Type::Ref { .. }))
 }
 
+/// The content hash of the synthetic `Result` nominal a lowered `!T` error
+/// union uses, and of its `@error-union` set marker (`marv_core::lower`,
+/// `spec/02` §D). Computed once.
+fn result_hash() -> Hash {
+    static H: OnceLock<Hash> = OnceLock::new();
+    *H.get_or_init(|| symbol_hash("Result"))
+}
+
+fn error_union_marker_hash() -> Hash {
+    static H: OnceLock<Hash> = OnceLock::new();
+    *H.get_or_init(|| symbol_hash("@error-union"))
+}
+
+/// If `t` is a lowered `!T` error union (`Result[T, @error-union]`), the success
+/// type `T`; otherwise `None`. The `@error-union` marker in the second argument
+/// distinguishes it from a user-written `Result[T, E]`.
+fn error_union_success(t: &Type) -> Option<&Type> {
+    if let Type::Nominal { def, args } = t {
+        if *def == result_hash() && args.len() == 2 {
+            if let Type::Nominal { def: e, .. } = &args[1] {
+                if *e == error_union_marker_hash() {
+                    return Some(&args[0]);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Peel an error union to its success type (recursively), so a value of type
+/// `!T` behaves as its success `T` wherever a concrete type is required — the
+/// effect of the `?` operator, which propagates the error and yields the success
+/// value (`spec/01` §6). A non-union type is returned unchanged.
+fn peel_eu(t: &Type) -> &Type {
+    match error_union_success(t) {
+        Some(succ) => peel_eu(succ),
+        None => t,
+    }
+}
+
 /// Peel `Linear` wrappers to reach the underlying type (for ref/struct checks).
 fn peel_ref_target(t: &Type) -> &Type {
     match t {
@@ -1118,12 +1169,26 @@ fn peel_struct(t: &Type) -> (Vec<Type>, bool) {
 /// is compatible with anything, an integer literal with any integer type. Arrow
 /// effect rows are ignored (subsumption is checked separately).
 fn compatible(a: &Ty, b: &Ty) -> bool {
-    match (a, b) {
+    // An error-union value (`!T`) is compatible with its success type `T` — the
+    // `?` operator yields the success value (`spec/01` §6). Peel both sides first
+    // so `!i64` and `i64` (and an integer literal) compare equal.
+    let pa = peel_ty(a);
+    let pb = peel_ty(b);
+    match (&pa, &pb) {
         (Ty::Unknown, _) | (_, Ty::Unknown) => true,
         (Ty::IntLit, Ty::IntLit) => true,
         (Ty::IntLit, Ty::Known(Type::Int(_))) | (Ty::Known(Type::Int(_)), Ty::IntLit) => true,
         (Ty::IntLit, _) | (_, Ty::IntLit) => false,
         (Ty::Known(x), Ty::Known(y)) => type_eq(x, y),
+    }
+}
+
+/// Peel an error union out of a checker [`Ty`] (a no-op for `IntLit`/`Unknown`
+/// and non-union known types).
+fn peel_ty(t: &Ty) -> Ty {
+    match t {
+        Ty::Known(ty) => Ty::Known(peel_eu(ty).clone()),
+        other => other.clone(),
     }
 }
 
@@ -1169,7 +1234,7 @@ fn type_eq(a: &Type, b: &Type) -> bool {
 
 fn numeric(t: &Ty) -> bool {
     matches!(
-        t,
+        peel_ty(t),
         Ty::IntLit | Ty::Unknown | Ty::Known(Type::Int(_)) | Ty::Known(Type::Float(_))
     )
 }
@@ -1177,8 +1242,8 @@ fn numeric(t: &Ty) -> bool {
 /// The result type of an arithmetic op given two numeric operands: prefer a
 /// concrete width over an integer literal.
 fn join_numeric(l: &Ty, r: &Ty) -> Ty {
-    match (l, r) {
-        (Ty::Known(t), _) | (_, Ty::Known(t)) => Ty::Known(t.clone()),
+    match (peel_ty(l), peel_ty(r)) {
+        (Ty::Known(t), _) | (_, Ty::Known(t)) => Ty::Known(t),
         _ => Ty::IntLit,
     }
 }

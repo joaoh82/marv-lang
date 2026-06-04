@@ -53,8 +53,16 @@ fn format_item(item: &Item) -> String {
     match item {
         Item::Struct(decl) => format_struct(decl),
         Item::Enum(decl) => format_enum(decl),
+        Item::Error(decl) => format_error(decl),
         Item::Fn(decl) => format_fn(decl),
     }
+}
+
+/// Format an `error` declaration inline: `error Name { V1, V2 }`. Variants are
+/// bare names, so (like a one-line struct) they stay on the signature line; an
+/// empty variant list cannot occur (the grammar requires at least one).
+fn format_error(decl: &ErrorDecl) -> String {
+    format!("error {} {{ {} }}", decl.name, decl.variants.join(", "))
 }
 
 /// Format a generic parameter / argument list: `""` when empty, else
@@ -173,6 +181,9 @@ fn format_type(ty: &Type) -> String {
             let kw = if *mutable { "&mut " } else { "&" };
             format!("{}{}", kw, format_type(inner))
         }
+        Type::ErrorUnion(Some(inner)) => format!("!{}", format_type(inner)),
+        Type::ErrorUnion(None) => "!".to_string(),
+        Type::Optional(inner) => format!("?{}", format_type(inner)),
     }
 }
 
@@ -367,6 +378,7 @@ fn format_expr(expr: &Expr) -> String {
         Expr::Index(base, index) => {
             format!("{}[{}]", format_expr(base), format_expr(index))
         }
+        Expr::Try(inner) => format!("{}?", format_expr(inner)),
         Expr::Struct { path, fields } => {
             if fields.is_empty() {
                 format!("{} {{}}", path.join("."))

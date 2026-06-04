@@ -1,9 +1,7 @@
 mod hello
 import std.io (Io)
 
-/// Entry point. Power enters only through the `Io` capability parameter; the
-/// signature alone proves this program can do nothing but I/O.
-fn main(io: Io) -> ! () {
+fn main(io: Io) -> ! {
     let out = io.stdout()
     out.write("hello, marv\n")
 }

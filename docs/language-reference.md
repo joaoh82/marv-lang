@@ -57,8 +57,9 @@ per-width semantics are roadmap.)*
   reads** `a[i]` parse and lower to `Prim{Index}` **[impl]**. Array/slice *literals* and index
   *stores* (`a[i] = e`) are **[design]** — the store awaits aggregate codegen (MARV-9).
 - **optional** `?T` = `Option[T]` — the only way to express absence. `Option`/`Result` are
-  written in marv (`std/`) and now parse + lower **[impl]**; the `?T`/`!T` *sugar* and `?`
-  propagation are still **[design]**.
+  written in marv (`std/`) and parse + lower **[impl]**; the `?T`/`!T` *sugar* and the postfix
+  `?` propagation operator now parse and lower too **[impl]** (`!T` → `Result[T, error-union]`;
+  see §6).
 - **function type** `fn(A) -> C`, optionally with an effect row `fn(A) -{Io}-> C`.
 
 ### Aliases, constants, generics
@@ -141,19 +142,39 @@ over Core; performing a capability lowers to `Core::Perform`, which surface synt
 yet emit (you can express it via `*.core.json`). On WebAssembly a capability is a host import
 the page chooses to provide — see [platform support](platform-support.md).
 
-## 6. Errors: inferred sets **[core]** (surface: **[design]**)
+## 6. Errors: inferred sets **[impl]**
 
-Errors are values. `!T` is an error union whose set is **inferred** from the body; `e?`
-propagates upward; `match` on errors is exhaustive. No exceptions, no panics-as-control-flow.
-The checker infers and checks error sets (and `marv/errorSet` reports them); the `error`/`!T`/`?`
-surface is the error-handling task.
+Errors are values. You declare an error type with `error E { Variant, ... }`; referencing a
+variant (`E.Variant`) **raises** it (lowers to `Core::Raise`). A function returns an error
+union `!T` (success type `T`; bare `!` is `!()`), whose error *set* is **inferred** from the
+body — never written in the signature. The postfix `e?` propagates: it yields `e`'s success
+value and lets its errors flow into the enclosing function. `match` over a caught error value
+is exhaustive. No exceptions, no panics-as-control-flow.
+
+The error set is inferred with **full cross-call propagation**: a caller that uses `?` on a
+fallible function inherits that function's entire inferred set, computed to a fixpoint over the
+call graph. `marv/errorSet` reports the result (see `docs/query-server.md`).
 
 ```marv
-fn load(fs: Fs, path: str) -> !Config {
-    let bytes = fs.read(path)?    // FileError flows in
-    parse_config(bytes)?          // ParseError flows in  →  inferred set = FileError ∪ ParseError
+error ParseError { Empty, Overflow }
+
+fn digit(b: i64) -> !i64 {
+    if (b < 0) { ParseError.Empty } else { b }   // raises ParseError → inferred set {ParseError}
+}
+
+fn sum_two(x: i64, y: i64) -> !i64 {
+    let a = digit(x)?                              // ParseError flows in
+    let b = digit(y)?                              // (already present)
+    (a + b)                                        // sum_two's inferred set = {ParseError}
 }
 ```
+
+See `examples/errors.mv`. Status notes: the error union's value type lowers faithfully to
+`Result[T, error-union]`, but the inferred set is carried as the function's effect row (the
+`error-union` type slot is a fixed marker), so `?` is a success-value pass-through and a `!T`
+value behaves as its success `T`. Errors propagate at runtime by unwinding (a `Raise` aborts),
+so error programs run on the interpreter; aggregate/`Result` codegen is MARV-9. Capability-op
+error sets and cross-*module* propagation arrive with MARV-6 / MARV-14.
 
 ## 7. Contracts & layered verification **[impl]**
 

@@ -224,6 +224,10 @@ fn lower_with_registry(m: &Module, reg: &EnumReg) -> Result<LoweredModule, Lower
                 let (def, variants) = lw.lower_enum(e);
                 (e.name.clone(), def, Some(variants))
             }
+            Item::Error(e) => {
+                let (def, variants) = lw.lower_error(e);
+                (e.name.clone(), def, Some(variants))
+            }
         };
         let hash = def.content_hash();
         defs.push(DefEntry {
@@ -247,6 +251,10 @@ struct CtorRef {
     enum_qual: String,
     tag: u32,
     arity: usize,
+    /// `true` when this "constructor" names a variant of an `error` declaration:
+    /// referencing it raises (`Core::Raise`) rather than constructing a value
+    /// (`Core::Ctor`). See [`ctor_node`].
+    is_error: bool,
 }
 
 /// The constructor/enum registry, built once from a set of modules so both
@@ -274,32 +282,51 @@ impl EnumReg {
         for m in ms {
             let mp = m.name.join(".");
             for item in &m.items {
-                let Item::Enum(e) = item else { continue };
-                let qual = if mp.is_empty() {
-                    e.name.clone()
-                } else {
-                    format!("{mp}.{}", e.name)
+                // Both `enum` and `error` declarations contribute tag-indexed
+                // variants to the registry; an `error`'s variants raise rather
+                // than construct (`is_error`). Normalize each into `(name,
+                // variant_names, arities, is_error)`.
+                let (name, variants, is_error): (&str, Vec<(&str, usize)>, bool) = match item {
+                    Item::Enum(e) => (
+                        &e.name,
+                        e.variants
+                            .iter()
+                            .map(|v| (v.name.as_str(), v.fields.len()))
+                            .collect(),
+                        false,
+                    ),
+                    Item::Error(e) => (
+                        &e.name,
+                        e.variants.iter().map(|v| (v.as_str(), 0)).collect(),
+                        true,
+                    ),
+                    _ => continue,
                 };
-                reg.enum_qual.insert(e.name.clone(), qual.clone());
+                let qual = if mp.is_empty() {
+                    name.to_string()
+                } else {
+                    format!("{mp}.{name}")
+                };
+                reg.enum_qual.insert(name.to_string(), qual.clone());
                 reg.enum_qual.insert(qual.clone(), qual.clone());
-                reg.variant_count.insert(qual.clone(), e.variants.len());
-                for (tag, v) in e.variants.iter().enumerate() {
+                reg.variant_count.insert(qual.clone(), variants.len());
+                for (tag, (vname, arity)) in variants.iter().enumerate() {
                     let cref = CtorRef {
                         enum_qual: qual.clone(),
                         tag: tag as u32,
-                        arity: v.fields.len(),
+                        arity: *arity,
+                        is_error,
                     };
-                    reg.ctors
-                        .insert(format!("{}.{}", e.name, v.name), cref.clone());
-                    reg.ctors.insert(format!("{qual}.{}", v.name), cref.clone());
+                    reg.ctors.insert(format!("{name}.{vname}"), cref.clone());
+                    reg.ctors.insert(format!("{qual}.{vname}"), cref.clone());
                     // The bare form is registered only while it stays unambiguous.
-                    if reg.ambiguous_bare.contains(&v.name) {
+                    if reg.ambiguous_bare.contains(*vname) {
                         // already known-ambiguous
-                    } else if reg.ctors.contains_key(&v.name) {
-                        reg.ambiguous_bare.insert(v.name.clone());
-                        reg.ctors.remove(&v.name);
+                    } else if reg.ctors.contains_key(*vname) {
+                        reg.ambiguous_bare.insert(vname.to_string());
+                        reg.ctors.remove(*vname);
                     } else {
-                        reg.ctors.insert(v.name.clone(), cref);
+                        reg.ctors.insert(vname.to_string(), cref);
                     }
                 }
             }
@@ -394,7 +421,7 @@ impl Lowerer {
                     local_items.insert(f.name.clone());
                     fn_rets.insert(f.name.clone(), f.ret.clone());
                 }
-                Item::Enum(_) => {}
+                Item::Enum(_) | Item::Error(_) => {}
             }
         }
         Lowerer {
@@ -465,6 +492,32 @@ impl Lowerer {
         }
         let def = Def {
             kind: DefKind::Enum,
+            ty: Type::Tuple(variant_tys),
+            requires: Vec::new(),
+            ensures: Vec::new(),
+            body: None,
+        };
+        (def, info)
+    }
+
+    /// Lower an `error` declaration to a [`DefKind::Error`] [`Def`] plus its
+    /// variant metadata (`spec/01` §6). An error type is an enum-like sum of
+    /// nullary variants; its identity is the ordered tuple of (empty) per-variant
+    /// payload tuples, with the variant *names* travelling alongside as
+    /// non-hashed [`VariantInfo`] so the checker can resolve and exhaustively
+    /// match a caught error value and recover its display name.
+    fn lower_error(&self, e: &marv_syntax::ErrorDecl) -> (Def, Vec<VariantInfo>) {
+        let mut variant_tys: Vec<Type> = Vec::with_capacity(e.variants.len());
+        let mut info: Vec<VariantInfo> = Vec::with_capacity(e.variants.len());
+        for v in &e.variants {
+            variant_tys.push(Type::Tuple(Vec::new()));
+            info.push(VariantInfo {
+                name: v.clone(),
+                fields: Vec::new(),
+            });
+        }
+        let def = Def {
+            kind: DefKind::Error,
             ty: Type::Tuple(variant_tys),
             requires: Vec::new(),
             ensures: Vec::new(),
@@ -869,6 +922,13 @@ impl Lowerer {
             Expr::Int(n) => Ok(Atom::Lit(Literal::Int(*n))),
             Expr::Bool(v) => Ok(Atom::Lit(Literal::Bool(*v))),
             Expr::Str(s) => Ok(Atom::Lit(Literal::Str(s.clone()))),
+            // `e?` (`spec/02` §D): with errors modeled as an effect that
+            // propagates by unwinding (a `Raise` aborts the computation), the
+            // success value of a non-raising `e` *is* its value, so `?` lowers to
+            // the operand's value. The propagated error joins the enclosing
+            // function's inferred set through the callee's effect row (`App`), and
+            // the checker types `e?` as the operand's success type.
+            Expr::Try(inner) => self.emit_atom(inner, env, b),
             Expr::Var(name) => {
                 // A local binding wins over a same-named constructor; otherwise a
                 // bare nullary variant (`None`) is a `Ctor`.
@@ -934,6 +994,8 @@ impl Lowerer {
             Expr::Unit | Expr::Int(_) | Expr::Bool(_) | Expr::Str(_) | Expr::Var(_) => {
                 Ok(Core::Atom(self.emit_atom(e, env, b)?))
             }
+            // `e?` at a tail position: lower the operand (see `emit_atom`).
+            Expr::Try(inner) => self.emit_tail(inner, env, b),
             Expr::Binary(l, op, r) => {
                 let al = self.emit_atom(l, env, b)?;
                 let ar = self.emit_atom(r, env, b)?;
@@ -1518,6 +1580,26 @@ impl Lowerer {
                 mutable: *mutable,
                 of: Box::new(self.lower_type(inner, generics)),
             },
+            // `!T` → `Result[T, error-union(E)]` (`spec/02` §D). The error set `E`
+            // is inferred from the body and reported via `marv/errorSet`, not
+            // embedded in the type, so the second argument is a fixed
+            // `@error-union` marker; the success type is the first argument. Bare
+            // `!` is the union over `()`.
+            SType::ErrorUnion(payload) => {
+                let success = payload
+                    .as_ref()
+                    .map(|t| self.lower_type(t, generics))
+                    .unwrap_or(Type::Unit);
+                Type::Nominal {
+                    def: symbol_hash("Result"),
+                    args: vec![success, error_union_marker()],
+                }
+            }
+            // `?T` → `Option[T]` (`spec/02` §D).
+            SType::Optional(inner) => Type::Nominal {
+                def: symbol_hash("Option"),
+                args: vec![self.lower_type(inner, generics)],
+            },
         }
     }
 
@@ -1673,14 +1755,35 @@ fn lvalue_root(lv: &LValue) -> String {
     }
 }
 
-/// Build a [`Core::Ctor`] for constructor reference `c` with already-lowered
-/// payload `fields`. The variant's enum is committed by the *same* symbol hash a
-/// nominal type reference to that enum uses, so the checker links them.
+/// Build the Core node for a resolved constructor reference `c` with
+/// already-lowered payload `fields`. A regular enum variant becomes a
+/// [`Core::Ctor`]; an `error` variant becomes a [`Core::Raise`] (`spec/01` §6,
+/// `spec/02` §D — referencing an error variant raises it into the error union).
+/// In both cases the enum/error type is committed by the *same* symbol hash a
+/// nominal type reference to it uses, so the checker links them.
 fn ctor_node(c: &CtorRef, fields: Vec<Atom>) -> Core {
-    Core::Ctor {
-        ty: symbol_hash(&c.enum_qual),
-        tag: c.tag,
-        fields,
+    if c.is_error {
+        Core::Raise {
+            error: symbol_hash(&c.enum_qual),
+            args: fields,
+        }
+    } else {
+        Core::Ctor {
+            ty: symbol_hash(&c.enum_qual),
+            tag: c.tag,
+            fields,
+        }
+    }
+}
+
+/// The fixed nominal marker used for the inferred-error-set slot of a lowered
+/// `!T` error union (`spec/02` §D `Result[T, error-union(E)]`). The concrete set
+/// `E` is inferred and surfaced via `marv/errorSet` rather than embedded in the
+/// type; `@error-union` cannot be a real qualified name, so it never collides.
+fn error_union_marker() -> Type {
+    Type::Nominal {
+        def: symbol_hash("@error-union"),
+        args: Vec::new(),
     }
 }
 

@@ -84,12 +84,15 @@ Mirror that — don't claim a check passed that you didn't run.
 
 ## What's real today (so you don't generate what won't parse)
 
-The parser currently accepts: `mod`/`import`, `struct`/`fn` (incl. `pure fn`), `let`/`var`,
-`if`/`else`, the binary operators, calls/recursion, field projection, and
-`requires`/`ensures` contracts. Enums/`match`, loops, `?` error handling, generics,
-capabilities-from-source, and collection literals are on the surface roadmap — to use those
-features today, construct a `*.core.json` snapshot (see [`docs/store.md`](docs/store.md) and
-the `tests/run/*.core.json` fixtures) or check the roadmap in the project tracker.
+The parser currently accepts: `mod`/`import`, `struct`/`fn` (incl. `pure fn`),
+`enum`/`match` (payload-binding patterns + `_`), `error`/`!T`/`?` error handling, struct
+literals + index reads + assignment (`lvalue = e`, `var`), `while`/`for` loops with
+`invariant`, `let`/`var`, `if`/`else`, the binary operators, calls/recursion, field
+projection, generic parameter lists + type arguments, and `requires`/`ensures` contracts.
+Generics monomorphization, capabilities-from-source, and collection literals are on the
+surface roadmap — to use those features today, construct a `*.core.json` snapshot (see
+[`docs/store.md`](docs/store.md) and the `tests/run/*.core.json` fixtures) or check the
+roadmap in the project tracker.
 
 See [`docs/agents.md`](docs/agents.md) for the MCP server and harness wiring, and `spec/03`
 for the full protocol method catalog and worked examples.

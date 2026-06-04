@@ -41,12 +41,26 @@ pub struct Import {
     pub names: Option<Vec<String>>,
 }
 
-/// A top-level declaration. Covers `struct`, `enum`, and `fn`.
+/// A top-level declaration. Covers `struct`, `enum`, `error`, and `fn`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Item {
     Struct(StructDecl),
     Enum(EnumDecl),
+    Error(ErrorDecl),
     Fn(FnDecl),
+}
+
+/// `error Name { Variant, Variant, ... }` (`spec/02` §B `error_decl`,
+/// `spec/01` §6). An error type is an enum-like sum whose variants are bare
+/// (payload-free) names; a function's *error set* is inferred from the errors
+/// its body can raise (`!T` return type) and surfaced via `marv/errorSet`.
+/// Variants are kept in declaration order, which fixes their tag.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ErrorDecl {
+    pub name: String,
+    /// Variant names in declaration order; always non-empty (the grammar
+    /// requires at least one).
+    pub variants: Vec<String>,
 }
 
 /// `[linear] struct Name { field: Type, ... }`.
@@ -129,6 +143,13 @@ pub enum Type {
     Slice(Box<Type>),
     /// `&T` / `&mut T` — a second-class reference.
     Ref { mutable: bool, inner: Box<Type> },
+    /// `!T` (or bare `!`, i.e. `!()`) — an error union over success type `T`
+    /// whose error *set* is inferred from the body (`spec/02` §B `base_type`,
+    /// `spec/01` §6). `None` is the bare `!` form, a union over `()`.
+    ErrorUnion(Option<Box<Type>>),
+    /// `?T` — the optional sugar, desugaring to `Option[T]` (`spec/02` §B,
+    /// §D).
+    Optional(Box<Type>),
 }
 
 /// A brace-delimited block: zero or more statements, then an optional tail.
@@ -293,6 +314,10 @@ pub enum Expr {
         path: Path,
         fields: Vec<FieldInit>,
     },
+    /// `expr?` — postfix error propagation (`spec/02` §B `postfix`, §D). On a
+    /// value of error-union/optional type it yields the success value and
+    /// propagates the error/none case to the enclosing function.
+    Try(Box<Expr>),
     /// `(lhs op rhs)` — always fully parenthesized in canonical form.
     Binary(Box<Expr>, BinOp, Box<Expr>),
 }

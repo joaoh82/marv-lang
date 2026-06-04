@@ -17,7 +17,7 @@
 //! recompute only it" property.
 
 use marv_core::ir::*;
-use marv_core::lower_module;
+use marv_core::{lower_module, DefEntry, LoweredModule};
 use marv_syntax::{ast, format_module, parse, Item, Module};
 use marv_types::{check_def, effect_row, World};
 
@@ -223,7 +223,11 @@ fn analyze_source(text: &str) -> FileAnalysis {
         Ok(l) => l,
         Err(e) => return parse_failed(canonical, format!("lower error: {e}")),
     };
-    let world = World::from_module(&lowered);
+    // Build the declaration world with each function's *inferred* effect/error
+    // row baked into its arrow, so a caller picks up its callees' errors through
+    // `App` — full cross-call error-set inference (`spec/01` §6). The fixpoint
+    // converges because rows only grow and are bounded by the program's errors.
+    let world = world_with_propagated_effects(&lowered);
 
     let mut defs = Vec::with_capacity(lowered.defs.len());
     let mut diagnostics = Vec::new();
@@ -361,6 +365,9 @@ fn surface_ty(t: &ast::Type) -> String {
                 surface_ty(inner)
             )
         }
+        ast::Type::ErrorUnion(Some(inner)) => format!("!{}", surface_ty(inner)),
+        ast::Type::ErrorUnion(None) => "!".into(),
+        ast::Type::Optional(inner) => format!("?{}", surface_ty(inner)),
     }
 }
 
@@ -594,6 +601,63 @@ pub fn repair_core_text(text: &str, target: Option<&str>) -> Option<String> {
         }
     }
     serde_json::to_string_pretty(&spec).ok()
+}
+
+/// Build the declaration [`World`] for a lowered source module with cross-call
+/// effect/error rows propagated to a fixpoint (`spec/01` §6 — error sets are
+/// inferred, and a caller's set includes its callees').
+///
+/// The front end lowers every arrow with the empty row (inference is the
+/// checker's job), so a freshly built world would let `App` propagate nothing.
+/// Here each function's body is re-inferred ([`effect_row`]) and its arrow row
+/// updated to include what it raises/performs *and* what its callees do; the
+/// world is rebuilt and the pass repeats until no row grows. Rows only ever grow
+/// and are bounded by the program's finite error/capability set, so this
+/// terminates (recursion included).
+fn world_with_propagated_effects(lowered: &LoweredModule) -> World {
+    let mut work: Vec<DefEntry> = lowered.defs.clone();
+    loop {
+        let module = LoweredModule {
+            module: lowered.module.clone(),
+            defs: work.clone(),
+        };
+        let world = World::from_module(&module);
+        let mut changed = false;
+        for entry in &mut work {
+            if entry.def.kind != DefKind::Fn {
+                continue;
+            }
+            let row = effect_row(&world, &entry.def);
+            if row.is_empty() {
+                continue;
+            }
+            let before = innermost_arrow_eff(&entry.def.ty)
+                .cloned()
+                .unwrap_or_default();
+            repair_effect_row(&mut entry.def, &row);
+            let after = innermost_arrow_eff(&entry.def.ty)
+                .cloned()
+                .unwrap_or_default();
+            if before != after {
+                changed = true;
+            }
+        }
+        if !changed {
+            return world;
+        }
+    }
+}
+
+/// The innermost arrow's effect row of a (possibly curried) function type — the
+/// row a call to the fully-applied function exercises. `None` for a non-arrow.
+fn innermost_arrow_eff(t: &Type) -> Option<&EffectRow> {
+    match t {
+        Type::Arrow { ret, effects, .. } if matches!(**ret, Type::Arrow { .. }) => {
+            innermost_arrow_eff(ret)
+        }
+        Type::Arrow { effects, .. } => Some(effects),
+        _ => None,
+    }
 }
 
 /// Set a definition's *declared* effect row (the innermost arrow's, and its

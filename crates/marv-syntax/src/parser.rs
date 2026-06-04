@@ -197,9 +197,10 @@ impl Parser {
             }
             Tok::Struct => Ok(Item::Struct(self.parse_struct(false)?)),
             Tok::Enum => Ok(Item::Enum(self.parse_enum()?)),
+            Tok::Error => Ok(Item::Error(self.parse_error_decl()?)),
             other => Err(ParseError::new(format!(
-                "expected an item (`fn`, `pure fn`, `struct`, `linear struct`, `enum`), found \
-                 {other:?}"
+                "expected an item (`fn`, `pure fn`, `struct`, `linear struct`, `enum`, `error`), \
+                 found {other:?}"
             ))),
         }
     }
@@ -248,6 +249,30 @@ impl Parser {
             generics,
             variants,
         })
+    }
+
+    /// Parse `error Name { Variant, Variant, ... }` (`spec/02` §B `error_decl`).
+    /// Variants are bare identifiers (no payload); a trailing comma is tolerated.
+    fn parse_error_decl(&mut self) -> PResult<ErrorDecl> {
+        self.expect(Tok::Error)?;
+        let name = self.ident()?;
+        self.expect(Tok::LBrace)?;
+        self.skip_nl();
+
+        let mut variants = Vec::new();
+        if self.peek() != &Tok::RBrace {
+            variants.push(self.ident()?);
+            while self.eat(&Tok::Comma) {
+                self.skip_nl();
+                if self.peek() == &Tok::RBrace {
+                    break; // trailing comma
+                }
+                variants.push(self.ident()?);
+            }
+        }
+        self.skip_nl();
+        self.expect(Tok::RBrace)?;
+        Ok(ErrorDecl { name, variants })
     }
 
     fn parse_variant(&mut self) -> PResult<Variant> {
@@ -384,6 +409,15 @@ impl Parser {
 
     // ---- types ----------------------------------------------------------
 
+    /// Whether the next token can begin a `type` (`spec/02` §B). Used to decide
+    /// whether a `!` is `!T` (payload follows) or the bare `!` (`!()`) form.
+    fn starts_type(&self) -> bool {
+        matches!(
+            self.peek(),
+            Tok::Amp | Tok::Bang | Tok::Question | Tok::LParen | Tok::LBracket | Tok::Ident(_)
+        )
+    }
+
     fn parse_type(&mut self) -> PResult<Type> {
         if self.eat(&Tok::Amp) {
             let mutable = self.eat(&Tok::Mut);
@@ -398,6 +432,28 @@ impl Parser {
 
     fn parse_type_base(&mut self) -> PResult<Type> {
         match self.peek() {
+            // `!T` / bare `!` — error union (`spec/02` §B `base_type`). The
+            // payload is optional; a `!` with no following type is `!()`.
+            Tok::Bang => {
+                self.bump();
+                let payload = if self.starts_type() {
+                    Some(self.parse_type_base()?)
+                } else {
+                    None
+                };
+                // `!()` and bare `!` denote the same union-over-unit; canonicalize
+                // the explicit-unit spelling to the bare form.
+                let payload = match payload {
+                    Some(Type::Unit) | None => None,
+                    Some(t) => Some(Box::new(t)),
+                };
+                Ok(Type::ErrorUnion(payload))
+            }
+            // `?T` — optional sugar (`spec/02` §B `base_type`).
+            Tok::Question => {
+                self.bump();
+                Ok(Type::Optional(Box::new(self.parse_type_base()?)))
+            }
             Tok::LParen => {
                 self.bump();
                 self.expect(Tok::RParen)?;
@@ -733,6 +789,11 @@ impl Parser {
                     let index = self.parse_expr_allow_struct()?;
                     self.expect(Tok::RBracket)?;
                     expr = Expr::Index(Box::new(expr), Box::new(index));
+                }
+                // Postfix `?` — error propagation (`spec/02` §B `postfix`).
+                Tok::Question => {
+                    self.bump();
+                    expr = Expr::Try(Box::new(expr));
                 }
                 _ => break,
             }
