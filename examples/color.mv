@@ -1,0 +1,19 @@
+mod demo
+
+enum Color {
+    Red,
+    Green,
+    Blue,
+}
+
+pure fn rank(c: Color) -> i64 {
+    match c {
+        Color.Red => 1,
+        Color.Green => 2,
+        Color.Blue => 3,
+    }
+}
+
+pure fn main() -> i64 {
+    rank(Color.Green)
+}

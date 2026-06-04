@@ -52,8 +52,45 @@ fn format_import(import: &Import) -> String {
 fn format_item(item: &Item) -> String {
     match item {
         Item::Struct(decl) => format_struct(decl),
+        Item::Enum(decl) => format_enum(decl),
         Item::Fn(decl) => format_fn(decl),
     }
+}
+
+/// Format a generic parameter / argument list: `""` when empty, else
+/// `[A, B, ...]`.
+fn format_generics(names: &[String]) -> String {
+    if names.is_empty() {
+        String::new()
+    } else {
+        format!("[{}]", names.join(", "))
+    }
+}
+
+/// Format an `enum` declaration in canonical form: one variant per line, each
+/// terminated by a comma (including the last), at 4-space indentation. An
+/// empty enum is `{}` on the signature line.
+fn format_enum(decl: &EnumDecl) -> String {
+    let mut s = format!("enum {}{}", decl.name, format_generics(&decl.generics));
+    if decl.variants.is_empty() {
+        s.push_str(" {}");
+        return s;
+    }
+    s.push_str(" {\n");
+    let pad = indent(1);
+    for v in &decl.variants {
+        s.push_str(&pad);
+        s.push_str(&v.name);
+        if !v.fields.is_empty() {
+            let tys: Vec<String> = v.fields.iter().map(format_type).collect();
+            s.push('(');
+            s.push_str(&tys.join(", "));
+            s.push(')');
+        }
+        s.push_str(",\n");
+    }
+    s.push('}');
+    s
 }
 
 fn format_struct(decl: &StructDecl) -> String {
@@ -85,6 +122,7 @@ fn format_fn(decl: &FnDecl) -> String {
     }
     s.push_str("fn ");
     s.push_str(&decl.name);
+    s.push_str(&format_generics(&decl.generics));
     s.push('(');
     let params: Vec<String> = decl
         .params
@@ -126,6 +164,10 @@ fn format_type(ty: &Type) -> String {
     match ty {
         Type::Unit => "()".to_string(),
         Type::Named(path) => path.join("."),
+        Type::Generic { path, args } => {
+            let args: Vec<String> = args.iter().map(format_type).collect();
+            format!("{}[{}]", path.join("."), args.join(", "))
+        }
         Type::Slice(inner) => format!("[]{}", format_type(inner)),
         Type::Ref { mutable, inner } => {
             let kw = if *mutable { "&mut " } else { "&" };
@@ -184,6 +226,54 @@ fn format_tail(tail: &Tail, level: usize) -> String {
         Tail::Return(None) => "return".to_string(),
         Tail::Return(Some(e)) => format!("return {}", format_expr(e)),
         Tail::If(if_expr) => format_if(if_expr, level),
+        Tail::Match(m) => format_match(m, level),
+    }
+}
+
+/// Format a `match`. The `match` keyword and the closing brace sit at `level`;
+/// arms are at `level + 1`. The first line carries no leading indent (the caller
+/// supplied it).
+fn format_match(m: &MatchExpr, level: usize) -> String {
+    let mut s = String::from("match ");
+    s.push_str(&format_expr(&m.scrutinee));
+    s.push_str(" {\n");
+    let arm_level = level + 1;
+    let pad = indent(arm_level);
+    for arm in &m.arms {
+        s.push_str(&pad);
+        s.push_str(&format_pattern(&arm.pat));
+        s.push_str(" => ");
+        match &arm.body {
+            ArmBody::Expr(e) => s.push_str(&format_expr(e)),
+            ArmBody::Block(b) => s.push_str(&format_block(b, arm_level)),
+        }
+        s.push_str(",\n");
+    }
+    s.push_str(&indent(level));
+    s.push('}');
+    s
+}
+
+fn format_pattern(pat: &Pattern) -> String {
+    match pat {
+        Pattern::Wildcard => "_".to_string(),
+        Pattern::Ctor { path, fields } => {
+            let mut s = path.join(".");
+            if !fields.is_empty() {
+                let fs: Vec<String> = fields.iter().map(format_field_pat).collect();
+                s.push('(');
+                s.push_str(&fs.join(", "));
+                s.push(')');
+            }
+            s
+        }
+    }
+}
+
+fn format_field_pat(fp: &FieldPat) -> String {
+    match fp {
+        FieldPat::Bind(name) => name.clone(),
+        FieldPat::Wildcard => "_".to_string(),
     }
 }
 

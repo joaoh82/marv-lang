@@ -21,6 +21,8 @@ pub enum Tok {
     Pure,
     Linear,
     Struct,
+    Enum,
+    Match,
     Let,
     Var,
     Return,
@@ -46,9 +48,10 @@ pub enum Tok {
     Comma,
     Colon,
     Dot,
-    Arrow, // ->
-    Eq,    // =
-    Amp,   // &
+    Arrow,    // ->
+    FatArrow, // =>
+    Eq,       // =
+    Amp,      // &
 
     // Binary operators.
     Plus,
@@ -93,6 +96,8 @@ fn keyword(word: &str) -> Option<Tok> {
         "pure" => Tok::Pure,
         "linear" => Tok::Linear,
         "struct" => Tok::Struct,
+        "enum" => Tok::Enum,
+        "match" => Tok::Match,
         "let" => Tok::Let,
         "var" => Tok::Var,
         "return" => Tok::Return,
@@ -241,6 +246,9 @@ fn lex_punct(chars: &[char], i: usize) -> Result<(Tok, usize), LexError> {
 
     if two('-', '>') {
         return Ok((Tok::Arrow, i + 2));
+    }
+    if two('=', '>') {
+        return Ok((Tok::FatArrow, i + 2));
     }
     if two('=', '=') {
         return Ok((Tok::EqEq, i + 2));

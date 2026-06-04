@@ -1,16 +1,11 @@
 mod std.result
-
 import std.option (Option)
 
-/// A success (`Ok`) or a typed failure (`Err`). The surface sugar `!T` with an
-/// inferred error set `E` is `Result[T, E]` (`spec/01` §6, `spec/02` §D); `?`
-/// propagates the `Err` branch.
 enum Result[T, E] {
     Ok(T),
     Err(E),
 }
 
-/// `true` when the result is `Ok`.
 pure fn is_ok[T, E](res: &Result[T, E]) -> bool {
     match res {
         Result.Ok(_) => true,
@@ -18,7 +13,6 @@ pure fn is_ok[T, E](res: &Result[T, E]) -> bool {
     }
 }
 
-/// Drop the error, yielding `Some` on success and `None` on failure.
 pure fn ok[T, E](res: Result[T, E]) -> Option[T] {
     match res {
         Result.Ok(x) => Option.Some(x),

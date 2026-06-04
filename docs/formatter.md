@@ -65,8 +65,11 @@ format(x)`), enforced by tests.
 
 1. **M0 (done)** — lexer + recursive-descent parser + AST + parse-and-reprint
    formatter over a bounded subset; `parse ∘ format == id` proven by a property
-   test. Widen the parsed grammar (contracts, `while`/`for`, `match`, `enum`,
-   `?`, error unions) toward full coverage so the whitespace fallback fades out.
+   test. The subset has since grown to include `requires`/`ensures` contracts and
+   (MARV-1) `enum` declarations, `match` expressions, and generic parameter
+   lists/arguments. Continue widening the parsed grammar (`while`/`for`, `?`,
+   error unions, struct/collection literals) toward full coverage so the
+   whitespace fallback fades out.
 2. Expose the formatter as the `marv/canonical` and `marv/format` protocol
    methods (`spec/03`, milestone M3).
 

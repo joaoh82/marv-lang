@@ -14,18 +14,20 @@ fixture source for the test suite. As of M4 the integer/boolean subset is
 | [`geometry.mv`](geometry.mv) | The **M0 parsed subset** end to end: `struct`/`linear struct`, `pure fn`, `&`/`&mut` params, `if`/`else`, fully-parenthesized binary operators. Round-trips through the real parser. |
 | [`factorial.mv`](factorial.mv) | **Runnable (M4):** recursion + an `if`. `marv run --entry factorial 6` and `marv build --run …` both yield `720`. |
 | [`arithmetic.mv`](arithmetic.mv) | **Runnable (M4):** a nullary `main` that calls two other functions — curried cross-function calls lowered to direct native calls. |
+| [`color.mv`](color.mv) | **Runnable:** an `enum` + an exhaustive `match`. `main` constructs `Color.Green` and `rank` matches it; `marv run --entry main examples/color.mv` yields `2`. Drop an arm and `marv check` fires E0130 (non-exhaustive). |
 
-`hello` and `report` use features still beyond the M0 parser, so `marv fmt`
+`hello` and `report` use features still beyond the parser, so `marv fmt`
 normalizes them with its whitespace fallback for now. `geometry.mv`, `clamp.mv`,
-`factorial.mv`, and `arithmetic.mv` are inside the parsed subset, so `marv fmt`
-reprints them from the AST and the `examples_are_canonical` test exercises the
-parser itself (`clamp.mv` joined this set in M6, when `requires`/`ensures`
-clauses became parseable — note the formatter does not yet preserve `///` doc
-comments, so contract examples carry none). `factorial.mv` and `arithmetic.mv` additionally lie inside the
-*executable* subset, so all three backends run them — the interpreter
-(`marv run`), the Cranelift JIT (`marv build --run`), and WebAssembly
-(`marv build --target wasm-component`, then via wasmtime or the browser demo in
-[`../web/`](../web)).
+`factorial.mv`, `arithmetic.mv`, and `color.mv` are inside the parsed subset, so
+`marv fmt` reprints them from the AST and the `examples_are_canonical` test
+exercises the parser itself (`clamp.mv` joined this set in M6, when
+`requires`/`ensures` clauses became parseable; `color.mv` joined when surface
+`enum`/`match` landed — note the formatter does not yet preserve `///` doc
+comments, so these carry none). `factorial.mv`, `arithmetic.mv`, and `color.mv`
+additionally lie inside the *executable* subset, so the interpreter runs them
+(`marv run`); the integer ones (`factorial`, `arithmetic`) also run on the
+Cranelift JIT (`marv build --run`) and WebAssembly (`marv build --target
+wasm-component`, then via wasmtime or the browser demo in [`../web/`](../web)).
 
 ## Invariant: examples stay canonical
 

@@ -105,34 +105,67 @@ impl World {
         World::default()
     }
 
-    /// Build a world from a lowered module: register every `fn`/`const` under
-    /// its symbol hash and every `struct` as a nominal declaration. See the
-    /// module docs for why this is keyed on `symbol_hash`, and why caps/errors/
-    /// enums are absent (no M0 surface syntax produces them).
+    /// Build a world from one lowered module (see [`World::from_modules`] for the
+    /// cross-module form). Equivalent to `from_modules(std::slice::from_ref(m))`.
     pub fn from_module(m: &LoweredModule) -> Self {
+        World::from_modules(std::slice::from_ref(m))
+    }
+
+    /// Build a world from several lowered modules that share a namespace (a
+    /// prelude plus its dependents): register every `fn`/`const` under its symbol
+    /// hash, every `struct` and `enum` as a nominal declaration. Keyed on
+    /// `symbol_hash` (see the module docs).
+    ///
+    /// Enum variants are recovered from the [`enum_variants`](marv_core::DefEntry::enum_variants)
+    /// metadata the lowerer carries alongside the names-erased [`Def`] — the only
+    /// place variant *names* survive.
+    pub fn from_modules(ms: &[LoweredModule]) -> Self {
         let mut w = World::new();
-        let prefix = m.module.join(".");
-        for entry in &m.defs {
-            let qualified = if prefix.is_empty() {
-                entry.name.clone()
-            } else {
-                format!("{prefix}.{}", entry.name)
-            };
-            let h = symbol_hash(&qualified);
-            match entry.def.kind {
-                DefKind::Struct => {
-                    let (fields, linear) = struct_fields(&entry.def.ty);
-                    w.structs.insert(
-                        h,
-                        StructDecl {
-                            name: entry.name.clone(),
-                            fields,
-                            linear,
-                        },
-                    );
-                }
-                _ => {
-                    w.globals.insert(h, entry.def.ty.clone());
+        for m in ms {
+            let prefix = m.module.join(".");
+            for entry in &m.defs {
+                let qualified = if prefix.is_empty() {
+                    entry.name.clone()
+                } else {
+                    format!("{prefix}.{}", entry.name)
+                };
+                let h = symbol_hash(&qualified);
+                match entry.def.kind {
+                    DefKind::Struct => {
+                        let (fields, linear) = struct_fields(&entry.def.ty);
+                        w.structs.insert(
+                            h,
+                            StructDecl {
+                                name: entry.name.clone(),
+                                fields,
+                                linear,
+                            },
+                        );
+                    }
+                    DefKind::Enum => {
+                        let variants = entry
+                            .enum_variants
+                            .as_ref()
+                            .map(|vs| {
+                                vs.iter()
+                                    .map(|v| VariantDecl {
+                                        name: v.name.clone(),
+                                        fields: v.fields.clone(),
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        w.enums.insert(
+                            h,
+                            EnumDecl {
+                                name: entry.name.clone(),
+                                variants,
+                            },
+                        );
+                    }
+                    _ => {
+                        w.globals.insert(h, entry.def.ty.clone());
+                    }
                 }
             }
         }
