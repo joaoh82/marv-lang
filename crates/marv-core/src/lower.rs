@@ -30,8 +30,8 @@
 use std::collections::{HashMap, HashSet};
 
 use marv_syntax::{
-    ArmBody, BinOp, Block, Else, EnumDecl, Expr, Field, FieldPat, FnDecl, IfExpr, Item, MatchExpr,
-    Module, Pattern, Stmt, StructDecl, Tail, Type as SType,
+    ArmBody, BinOp, Block, Else, EnumDecl, Expr, Field, FieldInit, FieldPat, FnDecl, IfExpr, Item,
+    LValue, MatchExpr, Module, Pattern, Stmt, StructDecl, Tail, Type as SType,
 };
 
 use crate::hash::symbol_hash;
@@ -70,6 +70,18 @@ pub enum LowerError {
     MixedEnumPatterns { expected: String, found: String },
     /// A constructor pattern naming a variant no in-scope enum declares.
     UnknownConstructor { name: String },
+    /// A struct literal `Name { .. }` whose `Name` is not an in-module struct.
+    UnknownStruct { name: String },
+    /// A struct literal that omits a field the struct declares.
+    MissingStructField { ty: String, field: String },
+    /// Assignment to a binding that is not a `var` (a `let`, parameter, or
+    /// pattern binding is immutable — `spec/01` §4).
+    AssignToImmutable { name: String },
+    /// Assignment to a name that is not a binding in scope.
+    AssignToUndeclared { name: String },
+    /// Index assignment `a[i] = e`. Functional element update needs an
+    /// array/slice store, which arrives with aggregate codegen (MARV-9).
+    IndexAssignUnsupported,
 }
 
 impl std::fmt::Display for LowerError {
@@ -116,6 +128,25 @@ impl std::fmt::Display for LowerError {
             LowerError::UnknownConstructor { name } => {
                 write!(f, "no enum in scope declares a constructor `{name}`")
             }
+            LowerError::UnknownStruct { name } => {
+                write!(f, "no struct `{name}` is declared in this module")
+            }
+            LowerError::MissingStructField { ty, field } => {
+                write!(f, "struct literal for `{ty}` is missing field `{field}`")
+            }
+            LowerError::AssignToImmutable { name } => write!(
+                f,
+                "cannot assign to `{name}`: it is immutable (only a `var` binding may be \
+                 reassigned)"
+            ),
+            LowerError::AssignToUndeclared { name } => {
+                write!(f, "cannot assign to `{name}`: no such binding is in scope")
+            }
+            LowerError::IndexAssignUnsupported => write!(
+                f,
+                "index assignment `a[i] = e` is not supported yet (it needs an array/slice store, \
+                 which arrives with aggregate codegen, MARV-9)"
+            ),
         }
     }
 }
@@ -286,6 +317,10 @@ struct Binding {
     name: String,
     atom: Atom,
     ty: Option<SType>,
+    /// Whether this binding may be reassigned: `true` for a `var`, `false` for a
+    /// `let`, a parameter, or a `match`-bound field (`spec/01` §4 — only `var`
+    /// bindings are mutable).
+    mutable: bool,
 }
 
 /// Collects the straight-line `let`-value computations of a single block, in
@@ -449,6 +484,8 @@ impl Lowerer {
                     name: p.name.clone(),
                     atom: Atom::Var(i as u32),
                     ty: Some(p.ty.clone()),
+                    // Parameters are passed by value and are not reassignable.
+                    mutable: false,
                 });
             }
         }
@@ -591,19 +628,24 @@ impl Lowerer {
         let mut b = Builder::new(base_depth);
 
         for stmt in &block.stmts {
-            let (name, ann, value) = match stmt {
-                Stmt::Let { name, ty, value } => (name, ty, value),
-                Stmt::Var { name, ty, value } => (name, ty, value),
-            };
-            // Best-effort surface type for the bound name (annotation first,
-            // else inferred from the value where M1 can).
-            let vty = ann.clone().or_else(|| self.type_of_expr(value, &env));
-            let atom = self.emit_atom(value, &env, &mut b)?;
-            env.push(Binding {
-                name: name.clone(),
-                atom,
-                ty: vty,
-            });
+            match stmt {
+                Stmt::Let { name, ty, value } | Stmt::Var { name, ty, value } => {
+                    let mutable = matches!(stmt, Stmt::Var { .. });
+                    // Best-effort surface type for the bound name (annotation
+                    // first, else inferred from the value where M1 can).
+                    let vty = ty.clone().or_else(|| self.type_of_expr(value, &env));
+                    let atom = self.emit_atom(value, &env, &mut b)?;
+                    env.push(Binding {
+                        name: name.clone(),
+                        atom,
+                        ty: vty,
+                        mutable,
+                    });
+                }
+                Stmt::Assign { target, value } => {
+                    self.lower_assign(target, value, &mut env, &mut b)?;
+                }
+            }
         }
 
         let tail = self.lower_tail(&block.tail, &env, &mut b)?;
@@ -712,6 +754,8 @@ impl Lowerer {
                                 name: name.clone(),
                                 atom: Atom::Var(branch_depth + i as u32),
                                 ty: None,
+                                // Pattern-bound fields are immutable.
+                                mutable: false,
                             });
                         }
                     }
@@ -823,6 +867,18 @@ impl Lowerer {
                 let idx = self.resolve_proj(base, field, env)?;
                 Ok(b.push(Core::Proj { base: ab, idx }))
             }
+            Expr::Index(base, index) => {
+                let ab = self.emit_atom(base, env, b)?;
+                let ai = self.emit_atom(index, env, b)?;
+                Ok(b.push(Core::Prim {
+                    op: PrimOp::Index,
+                    args: vec![ab, ai],
+                }))
+            }
+            Expr::Struct { path, fields } => {
+                let node = self.emit_struct_lit(path, fields, env, b)?;
+                Ok(b.push(node))
+            }
             Expr::Call(callee, args) => {
                 if let Some(c) = self.callee_ctor(callee, env) {
                     let node = self.emit_ctor(&c, args, env, b)?;
@@ -855,6 +911,15 @@ impl Lowerer {
                     args: vec![al, ar],
                 })
             }
+            Expr::Index(base, index) => {
+                let ab = self.emit_atom(base, env, b)?;
+                let ai = self.emit_atom(index, env, b)?;
+                Ok(Core::Prim {
+                    op: PrimOp::Index,
+                    args: vec![ab, ai],
+                })
+            }
+            Expr::Struct { path, fields } => self.emit_struct_lit(path, fields, env, b),
             Expr::Field(base, field) => {
                 if let Some(c) = self.field_nullary_ctor(base, field, env) {
                     return Ok(ctor_node(&c, Vec::new()));
@@ -936,6 +1001,171 @@ impl Lowerer {
             .map(|a| self.emit_atom(a, env, b))
             .collect::<Result<Vec<_>, _>>()?;
         Ok(ctor_node(c, fields))
+    }
+
+    // ---- construction & mutation (MARV-4) -------------------------------
+
+    /// Lower a struct literal `Name { field: expr, ... }` to a [`Core::Ctor`]
+    /// (products use tag 0, `spec/02` §C). Field initializers, written in any
+    /// order, are reordered into the struct's declaration order — the order
+    /// `Ctor`/`Proj` index into — and evaluated in that order.
+    fn emit_struct_lit(
+        &self,
+        path: &[String],
+        inits: &[FieldInit],
+        env: &[Binding],
+        b: &mut Builder,
+    ) -> Result<Core, LowerError> {
+        let sname = path.join(".");
+        let decl = self
+            .structs
+            .get(&sname)
+            .ok_or_else(|| LowerError::UnknownStruct {
+                name: sname.clone(),
+            })?;
+        // Reject any initializer naming a field the struct does not declare.
+        for init in inits {
+            if !decl.iter().any(|f| f.name == init.name) {
+                return Err(LowerError::UnknownField {
+                    ty: sname.clone(),
+                    field: init.name.clone(),
+                });
+            }
+        }
+        // Emit one atom per declared field, in declaration order; every field
+        // must be initialized exactly once.
+        let field_names: Vec<String> = decl.iter().map(|f| f.name.clone()).collect();
+        let mut fields = Vec::with_capacity(field_names.len());
+        for fname in &field_names {
+            let init = inits.iter().find(|i| &i.name == fname).ok_or_else(|| {
+                LowerError::MissingStructField {
+                    ty: sname.clone(),
+                    field: fname.clone(),
+                }
+            })?;
+            fields.push(self.emit_atom(&init.value, env, b)?);
+        }
+        Ok(Core::Ctor {
+            ty: self.struct_ty_hash(&sname),
+            tag: 0,
+            fields,
+        })
+    }
+
+    /// Lower an assignment `target = value` under mutable value semantics
+    /// (`spec/01` §4). The value is evaluated once; the result is threaded into
+    /// `target` by [`Self::assign_to`], which rebinds the root `var`.
+    fn lower_assign(
+        &self,
+        target: &LValue,
+        value: &Expr,
+        env: &mut Vec<Binding>,
+        b: &mut Builder,
+    ) -> Result<(), LowerError> {
+        let new_atom = self.emit_atom(value, env.as_slice(), b)?;
+        self.assign_to(target, new_atom, env, b)
+    }
+
+    /// Thread a new value into an l-value. Mutable value semantics has no mutable
+    /// cells in Core: a `var x = …` reassignment is modeled by *rebinding* `x`
+    /// (a fresh [`Binding`] shadows the old one, so later references resolve to
+    /// the new value); a field update `p.x = e` rebuilds the aggregate with that
+    /// one field replaced (a `Ctor` over the other fields' projections) and
+    /// rebinds the root. The recursion bottoms out at the root `var`.
+    ///
+    /// Rebinding is sound across the whole reachable surface because `if`/`match`
+    /// appear only as terminal block *tails* (`spec/02` §B): a branch is the last
+    /// thing in its block, so a `var` it mutates is never read again after the
+    /// branch joins. The cross-iteration case — a loop body's mutation surviving
+    /// to the next iteration — is the job of `Core::Loop` lowering (MARV-2).
+    fn assign_to(
+        &self,
+        lv: &LValue,
+        new_atom: Atom,
+        env: &mut Vec<Binding>,
+        b: &mut Builder,
+    ) -> Result<(), LowerError> {
+        match lv {
+            LValue::Var(name) => {
+                let pos = env
+                    .iter()
+                    .rposition(|x| &x.name == name)
+                    .ok_or_else(|| LowerError::AssignToUndeclared { name: name.clone() })?;
+                if !env[pos].mutable {
+                    return Err(LowerError::AssignToImmutable { name: name.clone() });
+                }
+                let ty = env[pos].ty.clone();
+                env.push(Binding {
+                    name: name.clone(),
+                    atom: new_atom,
+                    ty,
+                    mutable: true,
+                });
+                Ok(())
+            }
+            LValue::Field(base, field) => {
+                let base_expr = lvalue_to_expr(base);
+                // Resolve the base aggregate's struct (its name → field index of
+                // the target and total arity), exactly as a projection would.
+                let bt = self
+                    .type_of_expr(&base_expr, env.as_slice())
+                    .ok_or_else(|| LowerError::UnresolvedProjection {
+                        field: field.clone(),
+                    })?;
+                let sname = struct_name(&bt).ok_or_else(|| LowerError::UnresolvedProjection {
+                    field: field.clone(),
+                })?;
+                let decl =
+                    self.structs
+                        .get(&sname)
+                        .ok_or_else(|| LowerError::UnresolvedProjection {
+                            field: field.clone(),
+                        })?;
+                let idx = decl.iter().position(|f| &f.name == field).ok_or_else(|| {
+                    LowerError::UnknownField {
+                        ty: sname.clone(),
+                        field: field.clone(),
+                    }
+                })? as u32;
+                let n = decl.len();
+                let ty_hash = self.struct_ty_hash(&sname);
+
+                // The current value of the aggregate being updated.
+                let base_atom = self.emit_atom(&base_expr, env.as_slice(), b)?;
+                // Rebuild it: the target field takes the new value; every other
+                // field is projected from the current aggregate.
+                let mut new_fields = Vec::with_capacity(n);
+                for j in 0..n as u32 {
+                    if j == idx {
+                        new_fields.push(new_atom.clone());
+                    } else {
+                        new_fields.push(b.push(Core::Proj {
+                            base: base_atom.clone(),
+                            idx: j,
+                        }));
+                    }
+                }
+                let rebuilt = b.push(Core::Ctor {
+                    ty: ty_hash,
+                    tag: 0,
+                    fields: new_fields,
+                });
+                self.assign_to(base, rebuilt, env, b)
+            }
+            LValue::Index(..) => Err(LowerError::IndexAssignUnsupported),
+        }
+    }
+
+    /// The nominal content hash of an in-module struct by source name — the same
+    /// hash [`Self::lower_named`] commits to, so a literal/field-rebuild `Ctor`
+    /// and a type reference to the struct agree.
+    fn struct_ty_hash(&self, sname: &str) -> Hash {
+        let qualified = if self.structs.contains_key(sname) {
+            format!("{}.{}", self.module_path, sname)
+        } else {
+            sname.to_string()
+        };
+        symbol_hash(&qualified)
     }
 
     /// Resolve the function atom and the effective argument list of a call,
@@ -1089,8 +1319,27 @@ impl Lowerer {
                     None
                 }
             }
+            // A struct literal has the named struct's type, so a binding to it
+            // (`let p = Point { .. }`) resolves field projections on `p`.
+            Expr::Struct { path, .. } => Some(SType::Named(path.clone())),
+            // Indexing a slice yields its element type.
+            Expr::Index(base, _) => match self.type_of_expr(base, env)? {
+                SType::Slice(inner) => Some(*inner),
+                _ => None,
+            },
             _ => None,
         }
+    }
+}
+
+/// Reinterpret an l-value as the equivalent expression, so the read-side
+/// machinery ([`Lowerer::emit_atom`], [`Lowerer::resolve_proj`],
+/// [`Lowerer::type_of_expr`]) can be reused for a field-update's base.
+fn lvalue_to_expr(lv: &LValue) -> Expr {
+    match lv {
+        LValue::Var(name) => Expr::Var(name.clone()),
+        LValue::Field(base, field) => Expr::Field(Box::new(lvalue_to_expr(base)), field.clone()),
+        LValue::Index(base, index) => Expr::Index(Box::new(lvalue_to_expr(base)), index.clone()),
     }
 }
 

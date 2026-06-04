@@ -15,6 +15,7 @@ fixture source for the test suite. As of M4 the integer/boolean subset is
 | [`factorial.mv`](factorial.mv) | **Runnable (M4):** recursion + an `if`. `marv run --entry factorial 6` and `marv build --run …` both yield `720`. |
 | [`arithmetic.mv`](arithmetic.mv) | **Runnable (M4):** a nullary `main` that calls two other functions — curried cross-function calls lowered to direct native calls. |
 | [`color.mv`](color.mv) | **Runnable:** an `enum` + an exhaustive `match`. `main` constructs `Color.Green` and `rank` matches it; `marv run --entry main examples/color.mv` yields `2`. Drop an arm and `marv check` fires E0130 (non-exhaustive). |
+| [`mutation.mv`](mutation.mv) | **Runnable:** construction + mutation (MARV-4) — a `struct` literal `Point { x: …, y: … }`, a `var` accumulator reassigned with `total = …`, and an in-place field update `q.x = …`. `marv run --entry main examples/mutation.mv` yields `45`; mutating the copy `q` leaves the original untouched (mutable value semantics, `spec/01` §4). |
 
 `hello` and `report` use features still beyond the parser, so `marv fmt`
 normalizes them with its whitespace fallback for now. `geometry.mv`, `clamp.mv`,
@@ -23,7 +24,7 @@ normalizes them with its whitespace fallback for now. `geometry.mv`, `clamp.mv`,
 exercises the parser itself (`clamp.mv` joined this set in M6, when
 `requires`/`ensures` clauses became parseable; `color.mv` joined when surface
 `enum`/`match` landed — note the formatter does not yet preserve `///` doc
-comments, so these carry none). `factorial.mv`, `arithmetic.mv`, and `color.mv`
+comments, so these carry none). `factorial.mv`, `arithmetic.mv`, `color.mv`, and `mutation.mv`
 additionally lie inside the *executable* subset, so the interpreter runs them
 (`marv run`); the integer ones (`factorial`, `arithmetic`) also run on the
 Cranelift JIT (`marv build --run`) and WebAssembly (`marv build --target

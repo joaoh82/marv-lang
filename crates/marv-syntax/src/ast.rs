@@ -138,8 +138,10 @@ pub struct Block {
     pub tail: Option<Tail>,
 }
 
-/// A block statement. Only bindings exist in M0 (see the module docs: there are
-/// no expression-statements).
+/// A block statement: a binding or an assignment. There are still no
+/// expression-statements (see the module docs); a standalone expression is only
+/// ever a block tail. An [`Stmt::Assign`], by contrast, is *not* an expression —
+/// it has no value — so it is unambiguously a statement and never a tail.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Stmt {
     Let {
@@ -152,6 +154,23 @@ pub enum Stmt {
         ty: Option<Type>,
         value: Expr,
     },
+    /// `lvalue = expr` (`spec/02` §B `assign_stmt`). Reassigns a mutable `var`
+    /// binding, a field of one (`p.x = e`), or an element (`a[i] = e`), under the
+    /// mutable-value-semantics model (`spec/01` §4).
+    Assign { target: LValue, value: Expr },
+}
+
+/// An assignment target (`spec/02` §B `lvalue`): a root binding name, optionally
+/// followed by field projections and index accesses. The root is always a bare
+/// identifier; aliasing therefore stays local (`spec/01` §4).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LValue {
+    /// `name`
+    Var(String),
+    /// `base.field`
+    Field(Box<LValue>, String),
+    /// `base[index]`
+    Index(Box<LValue>, Box<Expr>),
 }
 
 /// The terminal element of a block: its value. Exactly one of these may appear,
@@ -246,8 +265,25 @@ pub enum Expr {
     Field(Box<Expr>, String),
     /// `callee(arg, ...)`
     Call(Box<Expr>, Vec<Expr>),
+    /// `base[index]` — index into a slice/array/aggregate (`spec/02` §B `postfix`).
+    Index(Box<Expr>, Box<Expr>),
+    /// `Name { field: expr, ... }` — a struct literal (product construction,
+    /// `spec/02` §B `primary` struct-literal form). `path` names the struct;
+    /// `fields` are the field initializers, written in any order (lowering
+    /// reorders them into declaration order for the `Ctor`).
+    Struct {
+        path: Path,
+        fields: Vec<FieldInit>,
+    },
     /// `(lhs op rhs)` — always fully parenthesized in canonical form.
     Binary(Box<Expr>, BinOp, Box<Expr>),
+}
+
+/// One `name: expr` initializer of a struct literal (`spec/02` §B `field_init`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FieldInit {
+    pub name: String,
+    pub value: Expr,
 }
 
 /// The M0 binary operators (`spec/02` §B `binop`).

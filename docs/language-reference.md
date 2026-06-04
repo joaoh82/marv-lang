@@ -25,8 +25,9 @@ subset). See [`spec/01`](../spec/01-design-spec.md) §1.
 - Files are UTF-8, extension `.mv`. **[impl]**
 - Comments: `//` line, `///` doc. No block comments. (Doc comments are currently dropped by
   the formatter — see the roadmap.) **[impl]**
-- Bindings: `let` (immutable), `var` (mutable). There is no `null`. **[impl]** (`var`
-  reassignment is **[design]** pending the mutation surface task.)
+- Bindings: `let` (immutable), `var` (mutable). There is no `null`. **[impl]** — `var`
+  reassignment (`x = e`), field updates (`p.x = e`), and struct literals all parse, lower, and
+  run (see §4). Assigning a `let` (or a parameter) is a compile error.
 - Naming is formatter-enforced: `snake_case` values/functions, `UpperCamelCase`
   types/interfaces/capabilities, `SCREAMING_SNAKE` consts.
 - Blocks are expressions; the final expression is the block's value. `return` exists for
@@ -43,15 +44,18 @@ debug). *(Note: the interpreter and backends currently compute integers at 64-bi
 per-width semantics are roadmap.)*
 
 ### Aggregates
-- **struct** (product): `struct Point { x: f64, y: f64 }`. Value semantics. Declarations and
-  field projection are **[impl]**; struct *literals* are **[design]** (mutation/construction task).
+- **struct** (product): `struct Point { x: f64, y: f64 }`. Value semantics. Declarations,
+  field projection, **struct literals** (`Point { x: 1, y: 2 }`, fields in any order), and
+  field assignment (`p.x = e`) are **[impl]** — literals lower to `Ctor { tag: 0, … }` with
+  fields reordered into declaration order, so write-order does not affect identity.
 - **enum** (sum): `enum Shape { Circle(f64), Rect(f64, f64) }`, matched exhaustively with
   `match`. Declarations, constructor application (`Shape.Circle(r)`), and `match` — with
   payload-binding constructor patterns and the `_` wildcard — are **[impl]** end to end:
   parsed, lowered to `Ctor`/`Match`, exhaustiveness-checked, and run by the interpreter. See
   `examples/color.mv` and the `std/` prelude.
-- **array** `[N]T`, **slice** `[]T`, **tuple** `(A, B)`. Types parse **[impl]**; literals and
-  indexing are **[design]**.
+- **array** `[N]T`, **slice** `[]T`, **tuple** `(A, B)`. Types parse **[impl]**; **index
+  reads** `a[i]` parse and lower to `Prim{Index}` **[impl]**. Array/slice *literals* and index
+  *stores* (`a[i] = e`) are **[design]** — the store awaits aggregate codegen (MARV-9).
 - **optional** `?T` = `Option[T]` — the only way to express absence. `Option`/`Result` are
   written in marv (`std/`) and now parse + lower **[impl]**; the `?T`/`!T` *sugar* and `?`
   propagation are still **[design]**.
@@ -72,7 +76,12 @@ Ord[T] { fn cmp(a: &T, b: &T) -> Ordering }` + `impl Ord[i32] { … }`.
 
 No GC, no lifetime annotations. **Mutable value semantics**: values are conceptually copied
 on assignment/pass (compiler optimizes to moves/in-place); no shared mutable aliasing of
-owned values. **References are second-class** (`&T`/`&mut T`): they may be passed *down* into
+owned values. This is **[impl]** through the front end: a `var x = e` reassignment lowers to
+ANF *rebinding* (a fresh binding shadows the old — Core has no mutable cell), and a field
+update `p.x = e` rebuilds the aggregate from the other fields' projections, so mutating a copy
+never affects the original (`examples/mutation.mv`). Because `if`/`match` are terminal block
+*tails*, branch-local mutation needs no join lowering; cross-*iteration* mutation arrives with
+loops (MARV-2). **References are second-class** (`&T`/`&mut T`): they may be passed *down* into
 a call but never stored in a field, returned, or captured — so a reference can never outlive
 its call and all aliasing reasoning is local. The checker enforces this (escaping-reference
 diagnostics). **`linear`** types must be consumed exactly once (forgetting to `close` a
@@ -168,11 +177,12 @@ is visible in the signature, requires a `SAFETY:` justification comment, and is 
 ## What you can actually write today
 
 The parser accepts: `mod`/`import`, `struct`/`enum`/`fn` (incl. `pure fn`, generic parameter
-lists), `let`/`var` bindings, `if`/`else(-if)`, `match` (constructor + `_` patterns, payload
-binding), enum constructor application, generic type arguments (`Option[T]`), the binary
+lists), `let`/`var` bindings, assignment (`x = e`, `p.x = e`), `if`/`else(-if)`, `match`
+(constructor + `_` patterns, payload binding), enum constructor application, struct literals
+(`Name { f: e, … }`), index reads (`a[i]`), generic type arguments (`Option[T]`), the binary
 operators (`+ - * / % == != < <= > >= and or`), function calls and recursion, field
 projection, and `requires`/`ensures` contracts. That is enough for the
 [`examples/`](../examples) that run end to end (`factorial`, `arithmetic`, `clamp`, `color`,
-…), the `std/` prelude (`option`, `result`), and the M4/M6 gates. Everything still marked
-**[core]**/**[design]** above is the surface roadmap — tracked in the project tracker, ordered
-construction/mutation → loops → errors → generics (checking) → capabilities → collections.
+`mutation`, …), the `std/` prelude (`option`, `result`), and the M4/M6 gates. Everything still
+marked **[core]**/**[design]** above is the surface roadmap — tracked in the project tracker,
+ordered loops → errors → generics (checking) → capabilities → collections.

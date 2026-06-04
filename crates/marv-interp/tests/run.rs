@@ -61,6 +61,29 @@ fn interprets_payload_variant_binding() {
     assert_eq!(out.value, Value::Int(42));
 }
 
+#[test]
+fn interprets_struct_construction_field_and_var_mutation() {
+    // Build a struct, mutate a `var` accumulator and a struct field, and read
+    // fields back — all end to end through the real front end (MARV-4).
+    let src = "mod demo\n\nstruct Point { x: i64, y: i64 }\n\npure fn run() -> i64 {\n    var sum = 0\n    let p = Point { x: 10, y: 20 }\n    sum = (sum + p.x)\n    sum = (sum + p.y)\n    var q = Point { x: 1, y: 2 }\n    q.x = 5\n    sum = (sum + q.x)\n    sum\n}\n";
+    let prog = program_from_source(src);
+    let out = prog.run("run", &[], &[]).expect("run");
+    // 0 + 10 + 20 + 5 = 35.
+    assert_eq!(out.value, Value::Int(35));
+    assert!(out.effects.is_empty(), "mutable value semantics is pure");
+}
+
+#[test]
+fn mutation_has_value_semantics_no_aliasing() {
+    // `var q = p` copies `p`; mutating `q.x` must not change `p` (spec/01 §4 —
+    // no shared mutable aliasing of owned values).
+    let src = "mod demo\n\nstruct Point { x: i64, y: i64 }\n\npure fn moved(p: Point) -> Point {\n    var q = p\n    q.x = (q.x + 100)\n    q\n}\n\npure fn run() -> i64 {\n    let start = Point { x: 1, y: 2 }\n    let m = moved(start)\n    (m.x - start.x)\n}\n";
+    let prog = program_from_source(src);
+    let out = prog.run("run", &[], &[]).expect("run");
+    // m.x = 101, start.x stays 1 ⇒ difference is 100.
+    assert_eq!(out.value, Value::Int(100));
+}
+
 /// A `touch(fs: Fs)` whose body performs `Fs` op 0. Hand-built because the
 /// surface has no `perform` form yet.
 fn touch_program() -> Program {

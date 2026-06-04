@@ -45,7 +45,11 @@ type PResult<T> = Result<T, ParseError>;
 /// Parse a complete module from source text.
 pub fn parse(src: &str) -> PResult<Module> {
     let tokens = lex(src).map_err(|e| ParseError::new(e.message))?;
-    let mut p = Parser { tokens, pos: 0 };
+    let mut p = Parser {
+        tokens,
+        pos: 0,
+        no_struct: false,
+    };
     let module = p.parse_module()?;
     p.expect(Tok::Eof)?;
     Ok(module)
@@ -54,6 +58,13 @@ pub fn parse(src: &str) -> PResult<Module> {
 struct Parser {
     tokens: Vec<Tok>,
     pos: usize,
+    /// When set, a bare `Name {` is *not* read as a struct literal — the `{`
+    /// belongs to an enclosing block. This resolves the classic ambiguity in
+    /// `if cond { .. }` / `match scrut { .. }`, where `cond`/`scrut` is an
+    /// expression immediately followed by a block brace (`spec/02` §B). The flag
+    /// governs only the head expression; it is cleared again inside any
+    /// parenthesis, bracket, argument list, or nested block.
+    no_struct: bool,
 }
 
 impl Parser {
@@ -346,7 +357,10 @@ impl Parser {
                 break;
             }
             self.bump(); // the clause keyword
-            let expr = self.parse_expr()?;
+                         // A contract clause is a head expression: the function body's `{`
+                         // follows it, so (like an `if`/`match` head) a bare `Name {` here is
+                         // not a struct literal.
+            let expr = self.parse_expr_no_struct()?;
             if is_req {
                 requires.push(expr);
             } else {
@@ -420,6 +434,13 @@ impl Parser {
 
     fn parse_block(&mut self) -> PResult<Block> {
         self.expect(Tok::LBrace)?;
+        // Inside a block the struct-literal/block-brace ambiguity is gone (the
+        // brace here can only delimit a struct literal), so re-enable them even
+        // when this block is the body of an `if`/`match` whose head suppressed
+        // them.
+        let saved_no_struct = self.no_struct;
+        self.no_struct = false;
+
         let mut stmts = Vec::new();
         let mut tail = None;
 
@@ -442,14 +463,27 @@ impl Parser {
                     break;
                 }
                 _ => {
-                    tail = Some(Tail::Expr(self.parse_expr()?));
-                    break;
+                    // The line is either an assignment statement (`lvalue = expr`)
+                    // or the block's tail expression. They share a leading
+                    // expression, so parse it, then disambiguate on a following
+                    // `=`: an assignment is a statement (the loop continues); a
+                    // bare expression is the tail (the block ends).
+                    let expr = self.parse_expr()?;
+                    if self.eat(&Tok::Eq) {
+                        let value = self.parse_expr()?;
+                        let target = expr_to_lvalue(expr)?;
+                        stmts.push(Stmt::Assign { target, value });
+                    } else {
+                        tail = Some(Tail::Expr(expr));
+                        break;
+                    }
                 }
             }
         }
 
         self.skip_nl();
         self.expect(Tok::RBrace)?;
+        self.no_struct = saved_no_struct;
         Ok(Block { stmts, tail })
     }
 
@@ -483,7 +517,7 @@ impl Parser {
 
     fn parse_if(&mut self) -> PResult<IfExpr> {
         self.expect(Tok::If)?;
-        let cond = self.parse_expr()?;
+        let cond = self.parse_expr_no_struct()?;
         let then = self.parse_block()?;
         // In canonical form `} else` shares a line, so no `Nl` is skipped here.
         let els = if self.eat(&Tok::Else) {
@@ -500,7 +534,7 @@ impl Parser {
 
     fn parse_match(&mut self) -> PResult<MatchExpr> {
         self.expect(Tok::Match)?;
-        let scrutinee = self.parse_expr()?;
+        let scrutinee = self.parse_expr_no_struct()?;
         self.expect(Tok::LBrace)?;
 
         let mut arms = Vec::new();
@@ -569,6 +603,26 @@ impl Parser {
         self.parse_bin(0)
     }
 
+    /// Parse an expression with struct literals suppressed (the head of an `if`
+    /// condition or `match` scrutinee, where a following `{` opens a block).
+    fn parse_expr_no_struct(&mut self) -> PResult<Expr> {
+        let saved = self.no_struct;
+        self.no_struct = true;
+        let r = self.parse_expr();
+        self.no_struct = saved;
+        r
+    }
+
+    /// Parse an expression with struct literals re-enabled (inside a paren,
+    /// bracket, argument, or field-initializer, the brace ambiguity is gone).
+    fn parse_expr_allow_struct(&mut self) -> PResult<Expr> {
+        let saved = self.no_struct;
+        self.no_struct = false;
+        let r = self.parse_expr();
+        self.no_struct = saved;
+        r
+    }
+
     /// Precedence-climbing binary-operator parser. `min_prec` is the lowest
     /// binding power this call will accept; operators are left-associative.
     fn parse_bin(&mut self, min_prec: u8) -> PResult<Expr> {
@@ -621,6 +675,13 @@ impl Parser {
                     self.expect(Tok::RParen)?;
                     expr = Expr::Call(Box::new(expr), args);
                 }
+                Tok::LBracket => {
+                    self.bump();
+                    // Inside the brackets struct literals are unambiguous again.
+                    let index = self.parse_expr_allow_struct()?;
+                    self.expect(Tok::RBracket)?;
+                    expr = Expr::Index(Box::new(expr), Box::new(index));
+                }
                 _ => break,
             }
         }
@@ -632,12 +693,14 @@ impl Parser {
         if self.peek() == &Tok::RParen {
             return Ok(args);
         }
-        args.push(self.parse_expr()?);
+        // Argument expressions sit inside parentheses, so struct literals are
+        // unambiguous here even when the call is the head of an `if`/`match`.
+        args.push(self.parse_expr_allow_struct()?);
         while self.eat(&Tok::Comma) {
             if self.peek() == &Tok::RParen {
                 break; // trailing comma
             }
-            args.push(self.parse_expr()?);
+            args.push(self.parse_expr_allow_struct()?);
         }
         Ok(args)
     }
@@ -662,14 +725,22 @@ impl Parser {
             }
             Tok::Ident(name) => {
                 self.bump();
-                Ok(Expr::Var(name))
+                // `Name { field: expr, ... }` is a struct literal — but only when
+                // struct literals are not suppressed (an `if`/`match` head) and a
+                // `{` immediately follows on the same line.
+                if !self.no_struct && self.peek() == &Tok::LBrace {
+                    self.parse_struct_literal(vec![name])
+                } else {
+                    Ok(Expr::Var(name))
+                }
             }
             Tok::LParen => {
                 self.bump();
                 if self.eat(&Tok::RParen) {
                     Ok(Expr::Unit)
                 } else {
-                    let inner = self.parse_expr()?;
+                    // Inside parentheses the brace ambiguity is gone.
+                    let inner = self.parse_expr_allow_struct()?;
                     self.expect(Tok::RParen)?;
                     Ok(inner)
                 }
@@ -678,5 +749,53 @@ impl Parser {
                 "expected an expression, found {other:?}"
             ))),
         }
+    }
+
+    /// Parse a struct literal body `{ field: expr, ... }`, given the already-read
+    /// type `path`. The opening `{` is the next token (`spec/02` §B `primary`
+    /// struct-literal form). Field initializers may be written in any order;
+    /// trailing commas are tolerated, and the empty form `Name {}` is allowed.
+    fn parse_struct_literal(&mut self, path: Path) -> PResult<Expr> {
+        self.expect(Tok::LBrace)?;
+        self.skip_nl();
+        let mut fields = Vec::new();
+        if self.peek() != &Tok::RBrace {
+            fields.push(self.parse_field_init()?);
+            while self.eat(&Tok::Comma) {
+                self.skip_nl();
+                if self.peek() == &Tok::RBrace {
+                    break; // trailing comma
+                }
+                fields.push(self.parse_field_init()?);
+            }
+        }
+        self.skip_nl();
+        self.expect(Tok::RBrace)?;
+        Ok(Expr::Struct { path, fields })
+    }
+
+    fn parse_field_init(&mut self) -> PResult<FieldInit> {
+        let name = self.ident()?;
+        self.expect(Tok::Colon)?;
+        // A field value sits inside the literal's braces, so struct literals are
+        // unambiguous here.
+        let value = self.parse_expr_allow_struct()?;
+        Ok(FieldInit { name, value })
+    }
+}
+
+/// Convert a parsed expression into an assignment target, or fail if it is not a
+/// valid `lvalue` (`spec/02` §B: a root identifier followed by field and index
+/// accesses). This reuses the postfix expression parser to read the target, then
+/// validates its shape here.
+fn expr_to_lvalue(e: Expr) -> PResult<LValue> {
+    match e {
+        Expr::Var(name) => Ok(LValue::Var(name)),
+        Expr::Field(base, field) => Ok(LValue::Field(Box::new(expr_to_lvalue(*base)?), field)),
+        Expr::Index(base, index) => Ok(LValue::Index(Box::new(expr_to_lvalue(*base)?), index)),
+        _ => Err(ParseError::new(
+            "invalid assignment target: an `lvalue` is a name optionally followed by `.field` \
+             and `[index]` accesses",
+        )),
     }
 }

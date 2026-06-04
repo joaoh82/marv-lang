@@ -246,6 +246,14 @@ fn gen_block(rng: &mut Rng, depth: u32) -> Block {
 }
 
 fn gen_stmt(rng: &mut Rng) -> Stmt {
+    // One in three statements is an assignment (`lvalue = expr`); the rest are
+    // `let`/`var` bindings. Assignments are brace-safe, so they are fuzzed here.
+    if rng.chance(1, 3) {
+        return Stmt::Assign {
+            target: gen_lvalue(rng),
+            value: gen_expr(rng, 2),
+        };
+    }
     let name = rng.pick(IDENTS).to_string();
     let ty = if rng.chance(1, 2) {
         Some(gen_type(rng, 1))
@@ -258,6 +266,20 @@ fn gen_stmt(rng: &mut Rng) -> Stmt {
     } else {
         Stmt::Var { name, ty, value }
     }
+}
+
+/// An assignment target: a root name followed by 0–2 `.field` / `[index]`
+/// accesses (`spec/02` §B `lvalue`).
+fn gen_lvalue(rng: &mut Rng) -> LValue {
+    let mut lv = LValue::Var(rng.pick(IDENTS).to_string());
+    for _ in 0..rng.below(3) {
+        if rng.chance(1, 2) {
+            lv = LValue::Field(Box::new(lv), rng.pick(IDENTS).to_string());
+        } else {
+            lv = LValue::Index(Box::new(lv), Box::new(gen_atom_expr(rng)));
+        }
+    }
+    lv
 }
 
 fn gen_if(rng: &mut Rng, depth: u32) -> IfExpr {
@@ -275,7 +297,7 @@ fn gen_expr(rng: &mut Rng, depth: u32) -> Expr {
     if depth == 0 {
         return gen_atom_expr(rng);
     }
-    match rng.below(6) {
+    match rng.below(7) {
         0 => Expr::Binary(
             Box::new(gen_expr(rng, depth - 1)),
             *pick_binop(rng),
@@ -291,6 +313,13 @@ fn gen_expr(rng: &mut Rng, depth: u32) -> Expr {
         2 => Expr::Field(
             Box::new(gen_postfix(rng, depth - 1)),
             rng.pick(IDENTS).to_string(),
+        ),
+        // `base[index]` — an index expression (brace-safe, unlike struct
+        // literals, so it is fuzzed here). The base is a postfix chain so it is
+        // always a valid indexee.
+        3 => Expr::Index(
+            Box::new(gen_postfix(rng, depth - 1)),
+            Box::new(gen_expr(rng, depth - 1)),
         ),
         _ => gen_atom_expr(rng),
     }

@@ -17,8 +17,8 @@ where each one sits and what must land first. Each task references back here.
 | Task | Phase | Blocked by | Unblocks | Priority |
 |------|-------|-----------|----------|----------|
 | ~~**MARV-1** enums + `match` (payloads)~~ ✅ done | 1 · Surface (spine) | — | 3, 5, 9, `std` | high |
-| **MARV-4** construction/mutation (struct literals, indexing, assignment, `var`) | 1 · Surface (spine) | — | 2, 9 | high |
-| **MARV-2** `while`/`for` loops → `Core::Loop` | 1 · Surface (spine) | MARV-4 | 11 | high |
+| ~~**MARV-4** construction/mutation (struct literals, indexing, assignment, `var`)~~ ✅ done | 1 · Surface (spine) | — | 2, 9 | high |
+| **MARV-2** `while`/`for` loops → `Core::Loop` | 1 · Surface (spine) | ~~MARV-4~~ ✅ | 11 | high |
 | **MARV-3** error handling (`error`, `!T`, `?`, error-set inference) | 1 · Surface (spine) | MARV-1 | 6 | high |
 | **MARV-5** generics + interfaces/impl (monomorphization) | 1 · Surface | MARV-1 | 6 | medium |
 | **MARV-6** capabilities/`perform` from source | 1 · Surface | MARV-5, MARV-3 | — | medium |
@@ -35,14 +35,18 @@ Done (Phase 0 · Infra/agent): **MARV-15** repo housekeeping · **MARV-16** CI/C
 **MARV-17** agent enablement (AGENTS.md, MCP server, skill).
 Done (Phase 1 · Surface): **MARV-1** enums + `match` (surface parser + lowering →
 `Ctor`/`Match`; generic parameter lists + type arguments; `std/option`+`std/result` now parse
-and lower; `examples/color.mv` runs).
+and lower; `examples/color.mv` runs) · **MARV-4** construction/mutation (struct literals →
+`Ctor`, index `a[i]` → `Prim{Index}`, assignment `lvalue = e` and `var` reassignment under
+mutable value semantics — rebinding in ANF, field updates rebuild the aggregate;
+`examples/mutation.mv` runs). Index *store* `a[i] = e` is deferred to MARV-9 (array/slice
+store) and cross-iteration `var` mutation to MARV-2 (loop join lowering).
 
 ## Recommended order
 
 **The spine** — the critical path to "you can write non-trivial programs in marv," in order:
 
 ```
-MARV-1 enums+match ✅  →  MARV-4 construction/mutation  →  MARV-2 loops  →  MARV-3 error handling
+MARV-1 enums+match ✅  →  MARV-4 construction/mutation ✅  →  MARV-2 loops  →  MARV-3 error handling
 ```
 
 Each turns the language from "integer functions" into something progressively more real, and
@@ -61,10 +65,11 @@ builds) and MARV-12 (doc-comments + spans). Good independent work to run alongsi
 
 - **Phase 1 · Surface.** Grow what the parser/lowering accept. The single biggest unblocker;
   most other work compounds on it. Today's parsed subset: `mod`/`import`, `struct`/`enum`/`fn`
-  (incl. `pure fn`, generic parameter lists), `let`/`var`, `if`/`else`, `match` (constructor +
-  `_` patterns, payload binding), enum constructor application, generic type arguments
-  (`Option[T]`), the binary operators, calls/recursion, field projection, and
-  `requires`/`ensures` contracts.
+  (incl. `pure fn`, generic parameter lists), `let`/`var`, assignment (`lvalue = e`, incl.
+  `p.x = e`), `if`/`else`, `match` (constructor + `_` patterns, payload binding), enum
+  constructor application, struct literals (`Name { f: e, … }`), index expressions (`a[i]`),
+  generic type arguments (`Option[T]`), the binary operators, calls/recursion, field
+  projection, and `requires`/`ensures` contracts.
 - **Phase 2 · Backends.** Reachability-pruned builds; runtime layout for aggregates/enums
   across all three backends in lockstep; then AOT/LLVM/WASM-component packaging.
 - **Phase 3 · Verification.** Extend the Tier-2 verified subset (ADTs, arrays, bounded

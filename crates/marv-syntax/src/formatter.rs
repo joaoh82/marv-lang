@@ -207,6 +207,9 @@ fn format_stmt(stmt: &Stmt) -> String {
     let (kw, name, ty, value) = match stmt {
         Stmt::Let { name, ty, value } => ("let", name, ty, value),
         Stmt::Var { name, ty, value } => ("var", name, ty, value),
+        Stmt::Assign { target, value } => {
+            return format!("{} = {}", format_lvalue(target), format_expr(value));
+        }
     };
     let mut s = format!("{kw} {name}");
     if let Some(ty) = ty {
@@ -216,6 +219,15 @@ fn format_stmt(stmt: &Stmt) -> String {
     s.push_str(" = ");
     s.push_str(&format_expr(value));
     s
+}
+
+/// Format an assignment target (`spec/02` §B `lvalue`).
+fn format_lvalue(lv: &LValue) -> String {
+    match lv {
+        LValue::Var(name) => name.clone(),
+        LValue::Field(base, field) => format!("{}.{}", format_lvalue(base), field),
+        LValue::Index(base, index) => format!("{}[{}]", format_lvalue(base), format_expr(index)),
+    }
 }
 
 /// Format a block tail. `level` is the indentation of the line it sits on (the
@@ -306,6 +318,20 @@ fn format_expr(expr: &Expr) -> String {
         Expr::Call(callee, args) => {
             let args: Vec<String> = args.iter().map(format_expr).collect();
             format!("{}({})", format_expr(callee), args.join(", "))
+        }
+        Expr::Index(base, index) => {
+            format!("{}[{}]", format_expr(base), format_expr(index))
+        }
+        Expr::Struct { path, fields } => {
+            if fields.is_empty() {
+                format!("{} {{}}", path.join("."))
+            } else {
+                let inits: Vec<String> = fields
+                    .iter()
+                    .map(|f| format!("{}: {}", f.name, format_expr(&f.value)))
+                    .collect();
+                format!("{} {{ {} }}", path.join("."), inits.join(", "))
+            }
         }
         Expr::Binary(lhs, op, rhs) => {
             format!(
