@@ -8,10 +8,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 around one premise: **the author is a coding agent, and the auditor is a human.** Every design
 rule serves explicitness, local reasoning, and machine-verifiability.
 
-Right now this repo is **spec-only** — it contains three design documents under `spec/` and
-no implementation yet. There is no build system, no `Cargo.toml`, and (currently) no git repo.
-The first real work is to scaffold the Rust workspace described below. Read the specs before
-writing any code; they are the source of truth.
+The compiler is **implemented end to end in Rust** — Stage-0 milestones **M0–M7 are
+complete**: front end, Core IR, checker, salsa query server + JSON-RPC, interpreter plus
+Cranelift/WASM codegen, runtime contracts + SMT verification, and the content-addressed store.
+Current work is **growing the language surface** (and beginning self-hosting) via `MARV-#`
+tasks — see [`docs/roadmap.md`](docs/roadmap.md) for live status and ordering, and the
+[`crates/`](crates/) tree for the code.
+
+The three design documents under `spec/` remain the **source of truth for design** — read them
+before changing semantics. But for *what is actually built today*, trust `docs/roadmap.md` and
+the code, not any future-tense prose in the specs (or in this file).
 
 | File | What it defines |
 |------|------|
@@ -33,10 +39,10 @@ Bootstrap trajectory: **Stage 0** = full compiler in Rust; **Stage 1** = once ma
 itself, rewrite the compiler in marv and self-host, keeping the Rust Stage-0 compiler
 permanently as a *differential-testing oracle*. marv source files use the `.mv` extension.
 
-## Planned workspace layout
+## Workspace layout
 
-When scaffolding, follow the crate split from `spec/README.md` — each crate is one compiler
-phase, which keeps salsa query boundaries clean:
+The crate split follows `spec/README.md` — each crate is one compiler phase, which keeps salsa
+query boundaries clean:
 
 ```
 crates/
@@ -48,13 +54,16 @@ crates/
   marv-codegen-cl/  # Cranelift backend (dev + native)
   marv-codegen-llvm/# LLVM backend (release native) via inkwell
   marv-codegen-wasm/# WASM + component-model backend (browser & server)
-  marv-interp/      # tree-walking interpreter (semantics oracle, used before codegen lands)
+  marv-interp/      # tree-walking interpreter (semantics oracle / differential reference)
   marv-store/       # content-addressed code store + lockfile resolution
   marv-server/      # JSON-RPC agent-protocol server (wraps marv-db queries)
+  marv-mcp/         # MCP stdio server forwarding tools to marv/* protocol methods
   marv-cli/         # `marv` command-line front-end
 std/                # marv standard library, written in marv
+selfhost/           # Stage-1 self-hosting: compiler passes ported to marv (in progress)
 examples/           # illustrative .mv programs, kept in canonical form
 tests/              # golden tests, round-trip property tests, differential tests
+web/                # browser demo: capability-gated WASM sandbox + prebuilt artifacts
 docs/               # human-facing toolchain documentation (usage + impl status)
 ```
 
@@ -82,9 +91,12 @@ affects observable behavior, not a follow-up:
 A change that alters behavior without touching the relevant example/test/doc is
 incomplete.
 
-## Build milestones (implement in this order)
+## Build milestones (M0–M7 — complete)
 
-Each milestone has an explicit acceptance gate — treat the gate as the definition of done.
+These Stage-0 milestones are all **done**; the list is kept as the record of what each
+delivered and the acceptance gate it had to clear. Ongoing work (surface expansion,
+backend/verification breadth, self-hosting) is tracked as `MARV-#` tasks in
+[`docs/roadmap.md`](docs/roadmap.md) — go there for what to build next.
 
 - **M0 — Front end.** Lexer + parser + AST + canonical formatter. Gate: the round-trip
   property `parse ∘ format == id` holds on all canonical forms (proptest).
