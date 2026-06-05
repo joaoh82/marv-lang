@@ -13,7 +13,7 @@ implementation, and are expected to grow with each milestone.
 | [`language-reference.md`](language-reference.md) | The language: types, memory model, effects/capabilities, error sets, contracts, modules — with "implemented vs. designed" markers. |
 | [`stdlib.md`](stdlib.md) | The standard prelude (`std/`): `Option`, `Result`, and the capability interfaces. |
 | [`platform-support.md`](platform-support.md) | Backends (interpreter, Cranelift, WASM, LLVM-stub), host/target matrix, and tooling prerequisites. |
-| [`agents.md`](agents.md) | Using marv from LLMs/agents: AGENTS.md, the MCP server, the Claude Code skill, and client wiring. |
+| [`agents.md`](agents.md) | Using marv from LLMs/agents: the generate→check→repair loop, the MCP server, the Claude Code skill, and client wiring. |
 | [`cli.md`](cli.md) | The `marv` command-line interface and its subcommands. |
 | [`formatter.md`](formatter.md) | The canonical formatter: what "canonical form" means and the current M0 status. |
 | [`core-ir.md`](core-ir.md) | The Core IR and content hashing: ANF + de Bruijn lowering and `blake3` identity (M1). |

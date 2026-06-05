@@ -115,9 +115,11 @@ code whose hash was already reviewed.
 
 ## Using marv from an agent
 
-marv is designed to be driven by LLMs/agents. Start with **[`AGENTS.md`](AGENTS.md)** — the
-cross-tool instructions (read by Claude Code, Codex, Cursor, …) for the loop, the commands,
-the capability model, and the invariants. For tool-call access, the **MCP server**
+marv is designed to be driven by LLMs/agents. Start with **[`docs/agents.md`](docs/agents.md)**
+— how to drive the toolchain: the generate→check→repair loop, the CLI commands, the capability
+model, and the invariants. The repo's agent-instruction files ([`AGENTS.md`](AGENTS.md) for
+Codex/Cursor, [`CLAUDE.md`](CLAUDE.md) for Claude Code) carry the contributor rules and point
+there. For tool-call access, the **MCP server**
 ([`crates/marv-mcp`](crates/marv-mcp)) exposes the JSON-RPC protocol methods as MCP tools;
 see [`docs/agents.md`](docs/agents.md) for wiring it into Claude Code, Codex, and other MCP
 clients, plus the bundled Claude Code skill.

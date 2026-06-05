@@ -44,9 +44,8 @@ tightly and respect the invariants. Full context: [`docs/agents.md`](../../../do
 
 ## What parses today
 
-`mod`/`import`, `struct`/`fn` (incl. `pure fn`), `enum`/`match`, `error`/`!T`/`?` error
-handling, struct literals + index reads + assignment (`var`), `while`/`for` loops, `let`/`var`,
-`if`/`else`, the binary operators, calls/recursion, field projection, generic parameter lists,
-and `requires`/`ensures` contracts. Generics monomorphization, capabilities-from-source, and
-collection literals are roadmap — for those today, use a `*.core.json` snapshot (see
-`tests/run/*.core.json`). Don't generate surface that won't parse.
+`mod`/`import`, `struct`/`fn` (incl. `pure fn`), `let`/`var`, `if`/`else`, the binary
+operators, calls/recursion, field projection, and `requires`/`ensures` contracts. Enums/
+`match`, loops, `?`, generics, capabilities-from-source, and collections are roadmap — for
+those today, use a `*.core.json` snapshot (see `tests/run/*.core.json`). Don't generate
+surface that won't parse.
