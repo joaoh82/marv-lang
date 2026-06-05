@@ -257,6 +257,10 @@ fn collect_core_syms(c: &Core, out: &mut Vec<Hash>) {
                 .for_each(|b| collect_core_syms(&b.body, out));
         }
         Core::Prim { args, .. } => args.iter().for_each(|a| atom(a, out)),
+        Core::Cast { value, to } => {
+            atom(value, out);
+            collect_type_syms(to, out);
+        }
         Core::Perform { cap, args, .. } => {
             atom(cap, out);
             args.iter().for_each(|a| atom(a, out));
@@ -367,6 +371,10 @@ fn subst_core(c: &Core, subst: &dyn Fn(Hash) -> Option<Hash>) -> Core {
         Core::Prim { op, args } => Core::Prim {
             op: *op,
             args: args.iter().map(|a| subst_atom(a, subst)).collect(),
+        },
+        Core::Cast { value, to } => Core::Cast {
+            value: subst_atom(value, subst),
+            to: subst_type(to, subst),
         },
         Core::Perform { cap, op, args } => Core::Perform {
             cap: subst_atom(cap, subst),

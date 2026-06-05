@@ -1,0 +1,21 @@
+mod casts
+
+fn byte_of(n: i64) -> u8 {
+    (n as u8)
+}
+
+fn code_point(c: char) -> u32 {
+    (c as u32)
+}
+
+fn newline() -> char {
+    '\n'
+}
+
+fn widen_then_narrow(n: i32) -> u8 {
+    (((n as i64) + 1) as u8)
+}
+
+fn str_len(s: str) -> usize {
+    len(s)
+}

@@ -200,8 +200,9 @@ pub enum Atom {
 }
 
 /// A total primitive operation (`spec/02` §C `Core::Prim`). The M0 binary
-/// operators map here; `Not`/`Len`/`Index`/`Cast` round out the total set the
-/// later milestones need.
+/// operators map here; `Not`/`Len`/`Index` round out the total set the later
+/// milestones need. Scalar conversion is *not* a `PrimOp` — it carries a target
+/// type a flat op cannot, so it is its own [`Core::Cast`] node.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PrimOp {
     Add,
@@ -277,10 +278,19 @@ pub enum Core {
         scrutinee: Atom,
         branches: Vec<Branch>,
     },
-    /// total primitive operation (arithmetic, comparison, cast, len, index, …).
+    /// total primitive operation (arithmetic, comparison, len, index, …).
     Prim {
         op: PrimOp,
         args: Vec<Atom>,
+    },
+    /// explicit scalar conversion `value as to` (`spec/01` §3.1). Unlike a
+    /// [`Core::Prim`], a cast carries its *target type* (the destination width /
+    /// representation), which a flat `PrimOp` cannot. There are no implicit
+    /// numeric coercions; widening and narrowing both lower to this node, and a
+    /// narrowing cast is range-checked in debug builds (Tier 1).
+    Cast {
+        value: Atom,
+        to: Type,
     },
     /// perform a capability operation: `cap` identifies the capability, `op` the
     /// method.

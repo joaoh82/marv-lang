@@ -358,6 +358,7 @@ fn surface_ty(t: &ast::Type) -> String {
             format!("{}[{}]", path.join("."), args.join(", "))
         }
         ast::Type::Slice(inner) => format!("[]{}", surface_ty(inner)),
+        ast::Type::Array { len, elem } => format!("[{len}]{}", surface_ty(elem)),
         ast::Type::Ref { mutable, inner } => {
             format!(
                 "&{}{}",
@@ -731,6 +732,7 @@ fn collect_globals(c: &Core, out: &mut Vec<Hash>) {
             branches.iter().for_each(|b| collect_globals(&b.body, out));
         }
         Core::Prim { args, .. } => args.iter().for_each(|a| atom(a, out)),
+        Core::Cast { value, .. } => atom(value, out),
         Core::Perform { cap, args, .. } => {
             atom(cap, out);
             args.iter().for_each(|a| atom(a, out));

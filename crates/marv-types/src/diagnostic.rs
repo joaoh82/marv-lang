@@ -173,6 +173,9 @@ pub enum Code {
     NotAFunction,
     /// A primitive operation was applied to operands of the wrong type.
     BadPrimOperand,
+    /// An `as` cast was applied between types that have no defined conversion
+    /// (`spec/01` §3.1 — only scalar↔scalar conversions are legal).
+    BadCast,
     /// A function exercises a capability its declared effect row does not list.
     MissingCapability,
     /// A `Perform` names a capability that is not a capability value in scope
@@ -203,6 +206,7 @@ impl Code {
             Code::TypeMismatch => "E0101",
             Code::NotAFunction => "E0102",
             Code::BadPrimOperand => "E0103",
+            Code::BadCast => "E0104",
             Code::MissingCapability => "E0110",
             Code::UnauthorizedPerform => "E0111",
             Code::ForgedCapability => "E0112",
@@ -224,6 +228,7 @@ impl Code {
             Code::BadPrimOperand => {
                 "a primitive operation is applied to an operand of the wrong type"
             }
+            Code::BadCast => "an `as` cast is applied between types with no defined conversion",
             Code::MissingCapability => {
                 "a function exercises a capability its declared effect row does not list"
             }
@@ -254,6 +259,7 @@ impl Code {
             Code::TypeMismatch,
             Code::NotAFunction,
             Code::BadPrimOperand,
+            Code::BadCast,
             Code::MissingCapability,
             Code::UnauthorizedPerform,
             Code::ForgedCapability,

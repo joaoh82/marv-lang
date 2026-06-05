@@ -105,6 +105,20 @@ fn corpus_cases() -> Vec<(&'static str, &'static str, Vec<i64>, i64)> {
         // single-carried-variable loop with no invariant (the `k == 1` path)
         ("loops.mv", "count_down", vec![7], 0),
         ("loops.mv", "count_down", vec![0], 0),
+        // `as` casts (MARV-7): width truncation/wrapping must agree with the
+        // interpreter's `eval_cast` bit-for-bit.
+        ("casts.mv", "truncate_u8", vec![300], 44),
+        ("casts.mv", "truncate_u8", vec![255], 255),
+        ("casts.mv", "truncate_u8", vec![256], 0),
+        ("casts.mv", "truncate_i8", vec![200], -56),
+        ("casts.mv", "truncate_i8", vec![127], 127),
+        ("casts.mv", "truncate_i8", vec![128], -128),
+        ("casts.mv", "truncate_u16", vec![70000], 4464),
+        ("casts.mv", "truncate_i32", vec![4_294_967_301], 5),
+        ("casts.mv", "bool_cast", vec![0], 0),
+        ("casts.mv", "bool_cast", vec![7], 1),
+        ("casts.mv", "char_round", vec![65], 65),
+        ("casts.mv", "chained", vec![300], 44),
     ]
 }
 

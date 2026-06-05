@@ -203,7 +203,7 @@ fn gen_type(rng: &mut Rng, depth: u32) -> Type {
     if depth == 0 {
         return gen_atom_type(rng);
     }
-    match rng.below(6) {
+    match rng.below(7) {
         0 => Type::Slice(Box::new(gen_type(rng, depth - 1))),
         1 => Type::Ref {
             mutable: rng.chance(1, 2),
@@ -215,6 +215,10 @@ fn gen_type(rng: &mut Rng, depth: u32) -> Type {
             args: (0..(1 + rng.below(2)))
                 .map(|_| gen_atom_type(rng))
                 .collect(),
+        },
+        3 => Type::Array {
+            len: rng.below(64) as u64,
+            elem: Box::new(gen_type(rng, depth - 1)),
         },
         _ => gen_atom_type(rng),
     }
@@ -325,7 +329,8 @@ fn gen_expr(rng: &mut Rng, depth: u32) -> Expr {
     }
 }
 
-/// A var/field/call chain — always a valid callee or field base.
+/// A var/field/call chain — always a valid callee or field base. Postfix `as`
+/// casts (`spec/02` §B `postfix`) are fuzzed here too, wrapping the chain.
 fn gen_postfix(rng: &mut Rng, depth: u32) -> Expr {
     let mut e = Expr::Var(rng.pick(IDENTS).to_string());
     for _ in 0..rng.below(3) {
@@ -336,15 +341,19 @@ fn gen_postfix(rng: &mut Rng, depth: u32) -> Expr {
             e = Expr::Call(Box::new(e), args);
         }
     }
+    if rng.chance(1, 4) {
+        e = Expr::Cast(Box::new(e), gen_atom_type(rng));
+    }
     e
 }
 
 fn gen_atom_expr(rng: &mut Rng) -> Expr {
-    match rng.below(6) {
+    match rng.below(7) {
         0 => Expr::Int(rng.below(10000) as i64),
         1 => Expr::Bool(rng.chance(1, 2)),
         2 => Expr::Str(gen_string(rng)),
         3 => Expr::Unit,
+        4 => Expr::Char(STR_CHARS[rng.below(STR_CHARS.len() as u32) as usize]),
         _ => Expr::Var(rng.pick(IDENTS).to_string()),
     }
 }

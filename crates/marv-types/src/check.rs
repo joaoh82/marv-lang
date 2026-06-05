@@ -455,6 +455,8 @@ impl<'a> Checker<'a> {
 
             Core::Prim { op, args } => self.synth_prim(*op, args, env),
 
+            Core::Cast { value, to } => self.synth_cast(value, to, env),
+
             Core::Perform { cap, op, args } => self.synth_perform(cap, *op, args, env),
 
             Core::Raise { error, args } => {
@@ -792,8 +794,13 @@ impl<'a> Checker<'a> {
             }
             Len => {
                 match arg(args, 0) {
-                    Ty::Known(Type::Slice(_)) | Ty::Known(Type::Array(_, _)) | Ty::Unknown => {}
-                    _ => bad(self, "requires a slice or array operand"),
+                    Ty::Known(Type::Slice(_))
+                    | Ty::Known(Type::Array(_, _))
+                    // A `str` is a UTF-8 slice (`spec/01` §3.1), so `len` accepts
+                    // it (its byte length) just as the interpreter does.
+                    | Ty::Known(Type::Str)
+                    | Ty::Unknown => {}
+                    _ => bad(self, "requires a slice, array, or `str` operand"),
                 }
                 Ty::Known(Type::Int(IntTy::Usize))
             }
@@ -813,6 +820,56 @@ impl<'a> Checker<'a> {
                 }
                 elem
             }
+        }
+    }
+
+    /// Type an explicit `as` cast (`spec/01` §3.1). Only scalar↔scalar
+    /// conversions are legal (`int`/`float`/`bool`/`char`); anything else is a
+    /// [`Code::BadCast`]. An `Unknown` source is permissive (no false error). The
+    /// debug-checked narrowing range guard is a Tier-1 *runtime* obligation, so it
+    /// is the interpreter/backends' job — the checker only gates legality. The
+    /// cast's result type is its declared target.
+    fn synth_cast(&mut self, value: &Atom, to: &Type, env: &mut Vec<Binder>) -> Out {
+        let from = self.atom_ty(value, env);
+        let source_ok = match peel_ty(&from) {
+            Ty::Unknown => true,
+            Ty::IntLit => true,
+            Ty::Known(t) => is_scalar(&t),
+        };
+        if !source_ok || !is_scalar(to) {
+            self.emit(Diagnostic::error(
+                Code::BadCast,
+                format!(
+                    "`as` cast to `{}` requires a scalar operand (`int`/`float`/`bool`/`char`); \
+                     there is no conversion from `{}`",
+                    show_type(to),
+                    show_ty(&from),
+                ),
+            ));
+        } else if let Atom::Lit(Literal::Int(n)) = value {
+            // The narrowing range check (`spec/01` §3.1) is a Tier-1 debug
+            // obligation; for a *constant* operand it is statically decidable, so
+            // a literal that cannot fit its narrowing target is a compile error
+            // here (a fuller runtime check awaits width-tracked runtime values).
+            let overflows = match to {
+                Type::Int(width) => !int_lit_fits(*n, *width),
+                Type::Char => char::from_u32(*n as u32).is_none() || *n < 0,
+                _ => false,
+            };
+            if overflows {
+                self.emit(Diagnostic::error(
+                    Code::BadCast,
+                    format!(
+                        "the literal `{n}` does not fit in `{}` (narrowing `as` is checked)",
+                        show_type(to),
+                    ),
+                ));
+            }
+        }
+        Out {
+            ty: Ty::Known(to.clone()),
+            eff: EffectRow::empty(),
+            uses: atom_uses(value, env),
         }
     }
 
@@ -1150,6 +1207,33 @@ fn peel(t: &Type) -> &Type {
         Type::Linear(inner) => peel(inner),
         other => other,
     }
+}
+
+/// Whether a type is a scalar `as`-cast operand/target (`spec/01` §3.1):
+/// `int`/`float`/`bool`/`char`. References and `linear` wrappers are peeled.
+fn is_scalar(t: &Type) -> bool {
+    matches!(
+        peel(t),
+        Type::Int(_) | Type::Float(_) | Type::Bool | Type::Char
+    )
+}
+
+/// Whether a constant integer literal fits in the given integer width — the
+/// statically-decidable case of the narrowing `as` check (`spec/01` §3.1). The
+/// 64-bit widths accept any `i64` (the literal's own representation).
+fn int_lit_fits(n: i64, ty: IntTy) -> bool {
+    let n = n as i128;
+    let (lo, hi): (i128, i128) = match ty {
+        IntTy::I8 => (i8::MIN as i128, i8::MAX as i128),
+        IntTy::I16 => (i16::MIN as i128, i16::MAX as i128),
+        IntTy::I32 => (i32::MIN as i128, i32::MAX as i128),
+        IntTy::I64 | IntTy::Isize => (i64::MIN as i128, i64::MAX as i128),
+        IntTy::U8 => (0, u8::MAX as i128),
+        IntTy::U16 => (0, u16::MAX as i128),
+        IntTy::U32 => (0, u32::MAX as i128),
+        IntTy::U64 | IntTy::Usize => (0, u64::MAX as i128),
+    };
+    lo <= n && n <= hi
 }
 
 /// The fields and linearity of a lowered struct type (`Tuple`, possibly

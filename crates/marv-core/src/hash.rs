@@ -410,6 +410,11 @@ fn encode_core(e: &mut Encoder, c: &Core) {
             encode_core(e, cond);
             encode_core(e, body);
         }
+        Core::Cast { value, to } => {
+            e.u8(11);
+            encode_atom(e, value);
+            encode_type(e, to);
+        }
     }
 }
 

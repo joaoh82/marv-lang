@@ -68,6 +68,7 @@ agent may key behaviour on it. The full set is `marv_types::Code::catalog()`.
 | `E0101` | a value's type does not match the type its context requires |
 | `E0102` | a non-function value is applied as if it were a function |
 | `E0103` | a primitive operation is applied to an operand of the wrong type |
+| `E0104` | an `as` cast is applied between types with no defined conversion (or a constant that does not fit its narrowing target) |
 | `E0110` | a function exercises a capability its declared effect row does not list |
 | `E0111` | a `perform` names a capability that is not a capability value in scope |
 | `E0112` | a capability was produced by construction instead of being received or narrowed |

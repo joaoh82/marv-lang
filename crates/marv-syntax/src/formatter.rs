@@ -177,6 +177,7 @@ fn format_type(ty: &Type) -> String {
             format!("{}[{}]", path.join("."), args.join(", "))
         }
         Type::Slice(inner) => format!("[]{}", format_type(inner)),
+        Type::Array { len, elem } => format!("[{}]{}", len, format_type(elem)),
         Type::Ref { mutable, inner } => {
             let kw = if *mutable { "&mut " } else { "&" };
             format!("{}{}", kw, format_type(inner))
@@ -369,6 +370,7 @@ fn format_expr(expr: &Expr) -> String {
         Expr::Int(n) => n.to_string(),
         Expr::Bool(b) => b.to_string(),
         Expr::Str(s) => format!("\"{}\"", escape_str(s)),
+        Expr::Char(c) => format!("'{}'", escape_char(*c)),
         Expr::Var(name) => name.clone(),
         Expr::Field(base, name) => format!("{}.{}", format_expr(base), name),
         Expr::Call(callee, args) => {
@@ -379,6 +381,9 @@ fn format_expr(expr: &Expr) -> String {
             format!("{}[{}]", format_expr(base), format_expr(index))
         }
         Expr::Try(inner) => format!("{}?", format_expr(inner)),
+        // A cast is fully parenthesized, like a binary node, so the canonical
+        // form is unambiguous and re-parses to the same `Cast`.
+        Expr::Cast(inner, ty) => format!("({} as {})", format_expr(inner), format_type(ty)),
         Expr::Struct { path, fields } => {
             if fields.is_empty() {
                 format!("{} {{}}", path.join("."))
@@ -415,4 +420,19 @@ fn escape_str(s: &str) -> String {
         }
     }
     out
+}
+
+/// Escape a character literal's scalar, the inverse of the lexer's char
+/// unescaping. Only the delimiter `'`, the escape lead `\`, and the standard
+/// control escapes need escaping; everything else prints verbatim.
+fn escape_char(c: char) -> String {
+    match c {
+        '\'' => "\\'".to_string(),
+        '\\' => "\\\\".to_string(),
+        '\n' => "\\n".to_string(),
+        '\t' => "\\t".to_string(),
+        '\r' => "\\r".to_string(),
+        '\0' => "\\0".to_string(),
+        other => other.to_string(),
+    }
 }

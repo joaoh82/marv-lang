@@ -283,6 +283,7 @@ fn encode_body(ctx: &Context, c: &Core, env: &[SExpr]) -> Result<SExpr, String> 
             Ok(ctx.ite(cond, then_t, else_t))
         }
 
+        Core::Cast { .. } => Err("`as` casts are outside the verified subset".to_string()),
         Core::App { .. } => Err("function calls are outside the verified subset".to_string()),
         Core::Ctor { .. } | Core::Proj { .. } => {
             Err("aggregates/ADTs are outside the verified subset".to_string())
