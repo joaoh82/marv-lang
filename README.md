@@ -162,7 +162,8 @@ tests/               repository-level golden / round-trip / differential fixture
 Stage-0 milestones **M0–M7 are complete**. The language *surface* the parser accepts is a
 deliberate growing subset (today: `fn`/`struct`, `enum`/`match`, `error`/`!T`/`?` error
 handling, struct literals + indexing + assignment, `char` literals + `as` casts + `len`,
-`while`/`for` loops, `let`/`var`, `if`/`else`, arithmetic/boolean ops, calls/recursion,
+`while`/`for` loops, `let`/`var`, `if`/`else`, arithmetic/boolean ops, the prefix unary
+operators (`-e`, `not e`, `&e`/`&mut e`), calls/recursion,
 `pure` + `requires`/`ensures` contracts); generics, capabilities-from-source, and collection
 literals are the next surface work. The full backlog (surface growth → backend breadth → verification breadth → AOT/LLVM →
 self-hosting) — with phases, ordering, and the dependency graph — is in

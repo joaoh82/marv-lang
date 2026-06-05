@@ -457,6 +457,27 @@ impl<'a> Checker<'a> {
 
             Core::Cast { value, to } => self.synth_cast(value, to, env),
 
+            // `&e` / `&mut e` (`spec/02` §B `unary`): the result is a
+            // [`Type::Ref`] over the operand's type. The second-class rules — a
+            // reference may not be stored in a field, returned, or captured — are
+            // enforced wherever such a `Ref` type later flows (see
+            // [`EscapeSite`]); producing one is itself fine. An `Unknown` operand
+            // stays `Unknown` so an unresolved referent neither errors nor masks.
+            Core::Ref { mutable, of } => {
+                let ty = match self.atom_ty(of, env) {
+                    Ty::Unknown => Ty::Unknown,
+                    other => Ty::Known(Type::Ref {
+                        mutable: *mutable,
+                        of: Box::new(ty_to_type(&other)),
+                    }),
+                };
+                Out {
+                    ty,
+                    eff: EffectRow::empty(),
+                    uses: atom_uses(of, env),
+                }
+            }
+
             Core::Perform { cap, op, args } => self.synth_perform(cap, *op, args, env),
 
             Core::Raise { error, args } => {
@@ -792,23 +813,39 @@ impl<'a> Checker<'a> {
                 }
                 Ty::Known(Type::Bool)
             }
+            Neg => {
+                let o = arg(args, 0);
+                if !numeric(o) {
+                    bad(self, "requires a numeric operand");
+                    return Ty::Unknown;
+                }
+                // Negation preserves the operand's (numeric) type; an
+                // unconstrained integer literal stays a literal.
+                o.clone()
+            }
             Len => {
+                // The operand may be the collection itself or a second-class
+                // reference to it (`&[]T`), so peel references before matching.
                 match arg(args, 0) {
-                    Ty::Known(Type::Slice(_))
-                    | Ty::Known(Type::Array(_, _))
+                    Ty::Unknown => {}
                     // A `str` is a UTF-8 slice (`spec/01` §3.1), so `len` accepts
                     // it (its byte length) just as the interpreter does.
-                    | Ty::Known(Type::Str)
-                    | Ty::Unknown => {}
+                    Ty::Known(t)
+                        if matches!(peel(t), Type::Slice(_) | Type::Array(_, _) | Type::Str) => {}
                     _ => bad(self, "requires a slice, array, or `str` operand"),
                 }
                 Ty::Known(Type::Int(IntTy::Usize))
             }
             Index => {
+                // As with `len`, peel any reference to reach the collection.
                 let elem = match arg(args, 0) {
-                    Ty::Known(Type::Slice(e)) | Ty::Known(Type::Array(e, _)) => {
-                        Ty::Known((**e).clone())
-                    }
+                    Ty::Known(t) => match peel(t) {
+                        Type::Slice(e) | Type::Array(e, _) => Ty::Known((**e).clone()),
+                        _ => {
+                            bad(self, "requires a slice or array as its first operand");
+                            Ty::Unknown
+                        }
+                    },
                     Ty::Unknown => Ty::Unknown,
                     _ => {
                         bad(self, "requires a slice or array as its first operand");
@@ -1393,6 +1430,7 @@ fn prim_name(op: PrimOp) -> &'static str {
         And => "and",
         Or => "or",
         Not => "not",
+        Neg => "-",
         Len => "len",
         Index => "index",
     }

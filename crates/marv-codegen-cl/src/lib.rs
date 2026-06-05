@@ -431,6 +431,10 @@ impl Trans<'_, '_> {
                 state, cond, body, ..
             } => self.eval_loop(state, cond, body),
 
+            // A second-class reference has no runtime cell (mutable value
+            // semantics, `spec/01` §4); it evaluates to its referent's value.
+            Core::Ref { of, .. } => self.eval_atom(of),
+
             Core::Lam { .. } => Err(CodegenError::Unsupported("first-class lambda".into())),
             Core::Perform { .. } => Err(CodegenError::Unsupported(
                 "capability perform (use the interpreter)".into(),
@@ -616,6 +620,7 @@ impl Trans<'_, '_> {
             And => self.builder.ins().band(v(0), v(1)),
             Or => self.builder.ins().bor(v(0), v(1)),
             Not => self.builder.ins().bxor_imm(v(0), 1),
+            Neg => self.builder.ins().ineg(v(0)),
             Len | Index => {
                 return Err(CodegenError::Unsupported(
                     "len/index (no aggregate layout yet)".into(),

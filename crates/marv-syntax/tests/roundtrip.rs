@@ -95,6 +95,8 @@ const ALL_BINOPS: &[BinOp] = &[
     BinOp::Or,
 ];
 
+const ALL_UNOPS: &[UnOp] = &[UnOp::Neg, UnOp::Not, UnOp::Ref, UnOp::RefMut];
+
 // ---- generators ----------------------------------------------------------
 
 fn gen_module(rng: &mut Rng) -> Module {
@@ -301,7 +303,7 @@ fn gen_expr(rng: &mut Rng, depth: u32) -> Expr {
     if depth == 0 {
         return gen_atom_expr(rng);
     }
-    match rng.below(7) {
+    match rng.below(8) {
         0 => Expr::Binary(
             Box::new(gen_expr(rng, depth - 1)),
             *pick_binop(rng),
@@ -325,6 +327,10 @@ fn gen_expr(rng: &mut Rng, depth: u32) -> Expr {
             Box::new(gen_postfix(rng, depth - 1)),
             Box::new(gen_expr(rng, depth - 1)),
         ),
+        // A prefix unary (`spec/02` §B `unary`). The operand is a `postfix`
+        // chain — exactly the grammar's `unary = [prefix] , postfix` — so the
+        // canonical form re-parses to the same node.
+        4 => Expr::Unary(*pick_unop(rng), Box::new(gen_postfix(rng, depth - 1))),
         _ => gen_atom_expr(rng),
     }
 }
@@ -366,6 +372,10 @@ fn gen_string(rng: &mut Rng) -> String {
 
 fn pick_binop(rng: &mut Rng) -> &BinOp {
     &ALL_BINOPS[rng.below(ALL_BINOPS.len() as u32) as usize]
+}
+
+fn pick_unop(rng: &mut Rng) -> &UnOp {
+    &ALL_UNOPS[rng.below(ALL_UNOPS.len() as u32) as usize]
 }
 
 // ---- the gates -----------------------------------------------------------

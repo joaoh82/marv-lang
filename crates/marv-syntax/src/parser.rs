@@ -750,7 +750,7 @@ impl Parser {
     /// Precedence-climbing binary-operator parser. `min_prec` is the lowest
     /// binding power this call will accept; operators are left-associative.
     fn parse_bin(&mut self, min_prec: u8) -> PResult<Expr> {
-        let mut lhs = self.parse_postfix()?;
+        let mut lhs = self.parse_unary()?;
         while let Some(op) = self.peek_binop() {
             let prec = op.precedence();
             if prec < min_prec {
@@ -761,6 +761,42 @@ impl Parser {
             lhs = Expr::Binary(Box::new(lhs), op, Box::new(rhs));
         }
         Ok(lhs)
+    }
+
+    /// Parse a prefix `unary` (`spec/02` §B `unary = [ "not" | "-" | "&" | "&mut"
+    /// ] , postfix`). Unary binds tighter than every binary operator. The grammar
+    /// admits a single optional prefix; the parser is right-recursive (the operand
+    /// is itself a `unary`), so a stacked draft like `not not p` or `- -x` still
+    /// parses — and the canonical formatter re-emits it bijectively. `&`/`&mut`
+    /// here are the expression reference-of operators; the type prefixes `&T`/`&mut
+    /// T` are a different position handled by [`Self::parse_type`].
+    fn parse_unary(&mut self) -> PResult<Expr> {
+        let op = match self.peek() {
+            Tok::Not => {
+                self.bump();
+                Some(UnOp::Not)
+            }
+            Tok::Minus => {
+                self.bump();
+                Some(UnOp::Neg)
+            }
+            Tok::Amp => {
+                self.bump();
+                if self.eat(&Tok::Mut) {
+                    Some(UnOp::RefMut)
+                } else {
+                    Some(UnOp::Ref)
+                }
+            }
+            _ => None,
+        };
+        match op {
+            Some(op) => {
+                let operand = self.parse_unary()?;
+                Ok(Expr::Unary(op, Box::new(operand)))
+            }
+            None => self.parse_postfix(),
+        }
     }
 
     /// Peek a binary operator without skipping `Nl` — a newline ends the

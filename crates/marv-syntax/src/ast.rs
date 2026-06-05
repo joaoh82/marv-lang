@@ -330,6 +330,39 @@ pub enum Expr {
     Cast(Box<Expr>, Type),
     /// `(lhs op rhs)` — always fully parenthesized in canonical form.
     Binary(Box<Expr>, BinOp, Box<Expr>),
+    /// A prefix unary operator applied to an operand (`spec/02` §B `unary`):
+    /// `-e`, `not e`, `&e`, `&mut e`. Unary binds tighter than every binary
+    /// operator and is right-associative, so a stacked form like `not not p`
+    /// or `- -x` nests outermost-first.
+    Unary(UnOp, Box<Expr>),
+}
+
+/// The prefix unary operators (`spec/02` §B `unary`). `&`/`&mut` here are the
+/// *expression* reference-of operators (distinct from the `&T`/`&mut T` type
+/// prefixes parsed by `parse_type`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnOp {
+    /// `-e` — arithmetic negation.
+    Neg,
+    /// `not e` — logical negation.
+    Not,
+    /// `&e` — take a (shared, second-class) reference to `e`.
+    Ref,
+    /// `&mut e` — take a mutable second-class reference to `e`.
+    RefMut,
+}
+
+impl UnOp {
+    /// The canonical spelling of the operator (without any trailing separator;
+    /// see [`crate::format`] for how `not`/`&mut` get their space).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            UnOp::Neg => "-",
+            UnOp::Not => "not",
+            UnOp::Ref => "&",
+            UnOp::RefMut => "&mut",
+        }
+    }
 }
 
 /// One `name: expr` initializer of a struct literal (`spec/02` §B `field_init`).

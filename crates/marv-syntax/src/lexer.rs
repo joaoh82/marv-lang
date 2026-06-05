@@ -37,6 +37,7 @@ pub enum Tok {
     Mut,
     And,
     Or,
+    Not,
     As,
 
     Ident(String),
@@ -119,6 +120,7 @@ fn keyword(word: &str) -> Option<Tok> {
         "mut" => Tok::Mut,
         "and" => Tok::And,
         "or" => Tok::Or,
+        "not" => Tok::Not,
         "as" => Tok::As,
         _ => return None,
     })

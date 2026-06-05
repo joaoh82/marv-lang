@@ -60,6 +60,14 @@ codegen is MARV-9.
 `examples/casts.mv` runs and checks clean). The value domain is still 64-bit, so sub-width
 semantics surface only at the cast boundary — per-width **arithmetic** wrapping, array/slice
 *literals*, index *stores*, and backend `len`/index over aggregates remain MARV-9.
+· **MARV-23** prefix unary operators (`spec/02` §B `unary`): `-e` → `Prim{Neg}`, `not e` →
+`Prim{Not}`, and `&e`/`&mut e` → a new `Core::Ref { mutable, of }` node the checker types as
+`&T` (so escaping-reference diagnostics fire on `&e`). Unary binds tighter than every binary
+operator; `not` is now a reserved word (like `and`/`or`). `-e`/`not e` run identically across
+interpreter + Cranelift + WASM (`tests/run/unary.mv`, differential-tested); a second-class
+reference carries no runtime cell, so `&e` evaluates to its referent's value. `examples/report.mv`
+now parses, lowers, and checks for real — its `total(&sales)` reference-passing exercises the
+new operator (its doc comments drop until MARV-12 teaches the formatter to preserve them).
 
 ## Recommended order
 

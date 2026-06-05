@@ -456,6 +456,12 @@ impl Program {
                 eval_cast(&v, to)
             }
 
+            // `&e` / `&mut e`: mutable value semantics has no cells in Core
+            // (`spec/01` §4), and second-class references never outlive their
+            // frame, so at runtime a reference *is* its referent's value — pass it
+            // through. (True mutation *through* a `&mut` is a separate feature.)
+            Core::Ref { of, .. } => self.eval_atom(of, env),
+
             Core::Perform { cap, op, args } => {
                 let capv = self.eval_atom(cap, env)?;
                 let name = match capv {
@@ -817,6 +823,16 @@ fn eval_prim(op: PrimOp, args: &[Value]) -> Result<Value, RunError> {
         And => Ok(Value::Bool(bool_of(a)? && bool_of(b)?)),
         Or => Ok(Value::Bool(bool_of(a)? || bool_of(b)?)),
         Not => Ok(Value::Bool(!bool_of(a)?)),
+        Neg => {
+            let a = a.unwrap();
+            if let Some(x) = int(a) {
+                Ok(Value::Int(x.wrapping_neg()))
+            } else if let Some(x) = float(a) {
+                Ok(Value::Float(-x))
+            } else {
+                Err(RunError::Unsupported(format!("negation of {a:?}")))
+            }
+        }
         Len => match a {
             Some(Value::Agg { fields, .. }) => Ok(Value::Int(fields.len() as i64)),
             Some(Value::Str(s)) => Ok(Value::Int(s.len() as i64)),

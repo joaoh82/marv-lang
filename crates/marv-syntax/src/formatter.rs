@@ -403,6 +403,19 @@ fn format_expr(expr: &Expr) -> String {
                 format_expr(rhs)
             )
         }
+        // A prefix unary is its operator directly against the operand: `-x`,
+        // `&x`, `not x`, `&mut x`. The word operators `not` and `&mut` end in a
+        // letter, so they take a single separating space; `-`/`&` abut their
+        // operand. The operand is a `postfix`/`unary` (binary and cast nodes are
+        // themselves parenthesized), so no extra parentheses are needed and the
+        // form re-parses to the same `Unary`.
+        Expr::Unary(op, operand) => {
+            let sep = match op {
+                UnOp::Not | UnOp::RefMut => " ",
+                UnOp::Neg | UnOp::Ref => "",
+            };
+            format!("{}{}{}", op.as_str(), sep, format_expr(operand))
+        }
     }
 }
 
