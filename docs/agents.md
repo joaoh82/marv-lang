@@ -166,7 +166,8 @@ Mirror that — don't claim a check passed that you didn't run.
 The parser currently accepts: `mod`/`import`, `struct`/`fn` (incl. `pure fn`),
 `enum`/`match` (payload-binding patterns + `_`), `error`/`!T`/`?` error handling, struct
 literals + index reads + assignment (`lvalue = e`, `var`), `while`/`for` loops with
-`invariant`, `let`/`var`, `if`/`else`, the binary operators, calls/recursion, field
+`invariant`, `let`/`var`, `if`/`else`, the binary operators, the prefix unary operators
+(`-e`, `not e`, `&e`/`&mut e`), calls/recursion, field
 projection, generic parameter lists + type arguments, and `requires`/`ensures` contracts.
 Generics monomorphization, capabilities-from-source, and collection literals are on the
 surface roadmap — to use those features today, construct a `*.core.json` snapshot (see

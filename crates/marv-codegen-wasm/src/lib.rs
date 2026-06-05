@@ -351,7 +351,8 @@ fn walk_caps(
             let def = resolve_cap_def(cap, tys, world).ok_or(WasmError::UnresolvedCapability)?;
             f(def, op.0)?;
         }
-        // Atom / App / Ctor / Proj / Prim / Raise carry only atomic children.
+        // Atom / App / Ctor / Proj / Prim / Cast / Ref / Raise carry only atomic
+        // children (no nested `perform`).
         _ => {}
     }
     Ok(())
@@ -560,6 +561,10 @@ impl Trans<'_> {
             Core::Loop {
                 state, cond, body, ..
             } => self.eval_loop(state, cond, body),
+
+            // A second-class reference has no runtime cell (mutable value
+            // semantics, `spec/01` §4); it evaluates to its referent's value.
+            Core::Ref { of, .. } => self.eval_atom(of),
 
             Core::Lam { .. } => Err(WasmError::Unsupported("first-class lambda".into())),
             Core::Raise { .. } => Err(WasmError::Unsupported("raise".into())),
@@ -799,6 +804,11 @@ impl Trans<'_> {
             Not => {
                 self.emit(Instruction::I64Const(1));
                 self.emit(Instruction::I64Xor);
+            }
+            // `-x` — wasm has no integer-negate, so multiply by -1.
+            Neg => {
+                self.emit(Instruction::I64Const(-1));
+                self.emit(Instruction::I64Mul);
             }
             Len | Index => {
                 return Err(WasmError::Unsupported(

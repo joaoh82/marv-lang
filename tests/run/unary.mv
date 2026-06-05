@@ -1,0 +1,21 @@
+mod unary
+
+pure fn neg(n: i64) -> i64 {
+    -n
+}
+
+pure fn abs(n: i64) -> i64 {
+    if (n < 0) {
+        -n
+    } else {
+        n
+    }
+}
+
+pure fn flip(n: i64) -> i64 {
+    if not (n == 0) {
+        1
+    } else {
+        0
+    }
+}

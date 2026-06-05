@@ -222,6 +222,10 @@ pub enum PrimOp {
     /// Strict logical disjunction (see [`PrimOp::And`]).
     Or,
     Not,
+    /// Arithmetic negation `-x` (the prefix `-` operator, `spec/02` §B `unary`).
+    /// Unary, like [`PrimOp::Not`]; the operand is numeric and the result has the
+    /// operand's type.
+    Neg,
     Len,
     Index,
 }
@@ -291,6 +295,16 @@ pub enum Core {
     Cast {
         value: Atom,
         to: Type,
+    },
+    /// take a second-class reference to `of` (`&e` / `&mut e`, `spec/02` §B
+    /// `unary`; `spec/01` §4). Its type is [`Type::Ref`]; the second-class rules
+    /// (a reference is never stored in a field, returned, or captured) are
+    /// enforced by the checker over that type. There are no mutable cells in Core
+    /// (mutable value semantics, `spec/01` §4), so at runtime a reference *is* its
+    /// referent's value — the backends evaluate `of` and pass it through.
+    Ref {
+        mutable: bool,
+        of: Atom,
     },
     /// perform a capability operation: `cap` identifies the capability, `op` the
     /// method.

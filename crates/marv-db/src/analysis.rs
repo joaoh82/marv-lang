@@ -733,6 +733,7 @@ fn collect_globals(c: &Core, out: &mut Vec<Hash>) {
         }
         Core::Prim { args, .. } => args.iter().for_each(|a| atom(a, out)),
         Core::Cast { value, .. } => atom(value, out),
+        Core::Ref { of, .. } => atom(of, out),
         Core::Perform { cap, args, .. } => {
             atom(cap, out);
             args.iter().for_each(|a| atom(a, out));

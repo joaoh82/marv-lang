@@ -119,6 +119,13 @@ fn corpus_cases() -> Vec<(&'static str, &'static str, Vec<i64>, i64)> {
         ("casts.mv", "bool_cast", vec![7], 1),
         ("casts.mv", "char_round", vec![65], 65),
         ("casts.mv", "chained", vec![300], 44),
+        // prefix unary operators (MARV-23): `-e` and `not e`.
+        ("unary.mv", "neg", vec![5], -5),
+        ("unary.mv", "neg", vec![-3], 3),
+        ("unary.mv", "abs", vec![-7], 7),
+        ("unary.mv", "abs", vec![4], 4),
+        ("unary.mv", "flip", vec![5], 1),
+        ("unary.mv", "flip", vec![0], 0),
     ]
 }
 

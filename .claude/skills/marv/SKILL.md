@@ -46,7 +46,8 @@ tightly and respect the invariants. Full context: [`docs/agents.md`](../../../do
 
 `mod`/`import`, `struct`/`fn` (incl. `pure fn`), `enum`/`match`, `error`/`!T`/`?` error
 handling, struct literals + index reads + assignment (`var`), `while`/`for` loops, `let`/`var`,
-`if`/`else`, the binary operators, calls/recursion, field projection, generic parameter lists,
+`if`/`else`, the binary operators, the prefix unary operators (`-e`, `not e`, `&e`/`&mut e`),
+calls/recursion, field projection, generic parameter lists,
 and `requires`/`ensures` contracts. Generics monomorphization, capabilities-from-source, and
 collection literals are roadmap — for those today, use a `*.core.json` snapshot (see
 `tests/run/*.core.json`). Don't generate surface that won't parse.

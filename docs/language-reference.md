@@ -92,8 +92,10 @@ never affects the original (`examples/mutation.mv`). Because `if`/`match` are te
 *tails*, branch-local mutation needs no join lowering; cross-*iteration* mutation is handled by
 loops (§4.1). **References are second-class** (`&T`/`&mut T`): they may be passed *down* into
 a call but never stored in a field, returned, or captured — so a reference can never outlive
-its call and all aliasing reasoning is local. The checker enforces this (escaping-reference
-diagnostics). **`linear`** types must be consumed exactly once (forgetting to `close` a
+its call and all aliasing reasoning is local. A reference is taken with the prefix `&e`/`&mut e`
+expression operator (`f(&x)`); this is **[impl]** through the front end and checker (the
+reference-of expression lowers to a `Core::Ref` the checker types as `&T`). The checker enforces
+the second-class rule (escaping-reference diagnostics). **`linear`** types must be consumed exactly once (forgetting to `close` a
 `File` is a compile error). Allocation is explicit via an `Alloc` capability — a function
 with no `Alloc` parameter provably performs no heap allocation.
 
@@ -247,7 +249,9 @@ lists), `let`/`var` bindings, assignment (`x = e`, `p.x = e`), `if`/`else(-if)`,
 (`Name { f: e, … }`), index reads (`a[i]`), `len(x)`, `char` literals (`'a'`) and `as` casts
 (`(n as u8)`), array/slice types (`[N]T`, `[]T`), `while`/`for` loops with `invariant` clauses,
 generic type arguments (`Option[T]`), the binary
-operators (`+ - * / % == != < <= > >= and or`), function calls and recursion, field
+operators (`+ - * / % == != < <= > >= and or`), the prefix unary operators
+(`-e`, `not e`, `&e`, `&mut e` — `&`/`&mut` take a second-class reference, `spec/01` §4),
+function calls and recursion, field
 projection, and `requires`/`ensures` contracts. That is enough for the
 [`examples/`](../examples) that run end to end (`factorial`, `arithmetic`, `clamp`, `color`,
 `mutation`, `loops`, `casts`, …), the `std/` prelude (`option`, `result`), and the M4/M6 gates.

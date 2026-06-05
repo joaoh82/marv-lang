@@ -313,6 +313,7 @@ fn encode_primop(e: &mut Encoder, op: PrimOp) {
         PrimOp::Not => 13,
         PrimOp::Len => 14,
         PrimOp::Index => 15,
+        PrimOp::Neg => 16,
     });
 }
 
@@ -414,6 +415,11 @@ fn encode_core(e: &mut Encoder, c: &Core) {
             e.u8(11);
             encode_atom(e, value);
             encode_type(e, to);
+        }
+        Core::Ref { mutable, of } => {
+            e.u8(12);
+            e.u8(*mutable as u8);
+            encode_atom(e, of);
         }
     }
 }

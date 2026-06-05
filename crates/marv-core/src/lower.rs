@@ -31,7 +31,7 @@ use std::collections::{HashMap, HashSet};
 
 use marv_syntax::{
     ArmBody, BinOp, Block, Else, EnumDecl, Expr, Field, FieldInit, FieldPat, FnDecl, IfExpr, Item,
-    LValue, MatchExpr, Module, Pattern, Stmt, StructDecl, Tail, Type as SType,
+    LValue, MatchExpr, Module, Pattern, Stmt, StructDecl, Tail, Type as SType, UnOp,
 };
 
 use crate::hash::symbol_hash;
@@ -648,6 +648,12 @@ impl Lowerer {
                 // Arithmetic operators are not boolean predicates.
                 _ => Err(LowerError::ContractNotPredicate),
             },
+            // `not p` is logical negation of a predicate (`spec/02` §B `unary`).
+            Expr::Unary(UnOp::Not, inner) => Ok(Pred::Not(Box::new(self.lower_pred(
+                inner,
+                params,
+                allow_result,
+            )?))),
             _ => Err(LowerError::ContractNotPredicate),
         }
     }
@@ -957,6 +963,12 @@ impl Lowerer {
                     args: vec![al, ar],
                 }))
             }
+            // A prefix unary (`spec/02` §B `unary`): `-e`/`not e` map to a unary
+            // `Prim`; `&e`/`&mut e` map to `Core::Ref` (`spec/01` §4).
+            Expr::Unary(op, operand) => {
+                let a = self.emit_atom(operand, env, b)?;
+                Ok(b.push(unary_core(*op, a)))
+            }
             Expr::Field(base, field) => {
                 // `Enum.Variant` (nullary, e.g. `Option.None`) is a constructor,
                 // not a field projection.
@@ -1050,6 +1062,11 @@ impl Lowerer {
                     op: prim_op(*op),
                     args: vec![al, ar],
                 })
+            }
+            // A prefix unary at a tail position: emit the unary node unbound.
+            Expr::Unary(op, operand) => {
+                let a = self.emit_atom(operand, env, b)?;
+                Ok(unary_core(*op, a))
             }
             Expr::Index(base, index) => {
                 let ab = self.emit_atom(base, env, b)?;
@@ -1742,11 +1759,27 @@ impl Lowerer {
             // A struct literal has the named struct's type, so a binding to it
             // (`let p = Point { .. }`) resolves field projections on `p`.
             Expr::Struct { path, .. } => Some(SType::Named(path.clone())),
-            // Indexing a slice or array yields its element type.
-            Expr::Index(base, _) => match self.type_of_expr(base, env)? {
+            // Indexing a slice or array yields its element type. The base may be
+            // a second-class reference to the collection (`sales: &[]Sale`), so
+            // peel any `&`/`&mut` before matching.
+            Expr::Index(base, _) => match peel_ref_ty(self.type_of_expr(base, env)?) {
                 SType::Slice(inner) => Some(*inner),
                 SType::Array { elem, .. } => Some(*elem),
                 _ => None,
+            },
+            // A prefix unary's type: `-e` keeps the operand's type, `not e` is
+            // `bool`, and `&e`/`&mut e` wrap the operand's type in a reference.
+            Expr::Unary(op, operand) => match op {
+                UnOp::Neg => self.type_of_expr(operand, env),
+                UnOp::Not => Some(SType::Named(vec!["bool".to_string()])),
+                UnOp::Ref => self.type_of_expr(operand, env).map(|t| SType::Ref {
+                    mutable: false,
+                    inner: Box::new(t),
+                }),
+                UnOp::RefMut => self.type_of_expr(operand, env).map(|t| SType::Ref {
+                    mutable: true,
+                    inner: Box::new(t),
+                }),
             },
             _ => None,
         }
@@ -1882,6 +1915,16 @@ fn struct_name(t: &SType) -> Option<String> {
     }
 }
 
+/// Strip outer `&`/`&mut` references from a surface type, so projection / index
+/// resolution sees through a second-class reference to the underlying
+/// collection or aggregate (e.g. indexing `sales: &[]Sale`).
+fn peel_ref_ty(t: SType) -> SType {
+    match t {
+        SType::Ref { inner, .. } => peel_ref_ty(*inner),
+        other => other,
+    }
+}
+
 /// Map a surface comparison operator to a contract [`CmpOp`], or `None` for a
 /// non-comparison operator.
 fn cmp_op(op: BinOp) -> Option<CmpOp> {
@@ -1912,6 +1955,30 @@ fn prim_op(op: BinOp) -> PrimOp {
         BinOp::Ge => PrimOp::Ge,
         BinOp::And => PrimOp::And,
         BinOp::Or => PrimOp::Or,
+    }
+}
+
+/// Build the Core node for a prefix unary operator over an already-lowered
+/// operand atom (`spec/02` §B `unary`): `-`/`not` are unary [`Core::Prim`]s,
+/// `&`/`&mut` are [`Core::Ref`]s.
+fn unary_core(op: UnOp, operand: Atom) -> Core {
+    match op {
+        UnOp::Neg => Core::Prim {
+            op: PrimOp::Neg,
+            args: vec![operand],
+        },
+        UnOp::Not => Core::Prim {
+            op: PrimOp::Not,
+            args: vec![operand],
+        },
+        UnOp::Ref => Core::Ref {
+            mutable: false,
+            of: operand,
+        },
+        UnOp::RefMut => Core::Ref {
+            mutable: true,
+            of: operand,
+        },
     }
 }
 
@@ -1969,6 +2036,10 @@ fn to_indices(c: &Core, depth: u32) -> Core {
         Core::Cast { value, to } => Core::Cast {
             value: atom_to_index(value, depth),
             to: to.clone(),
+        },
+        Core::Ref { mutable, of } => Core::Ref {
+            mutable: *mutable,
+            of: atom_to_index(of, depth),
         },
         Core::Perform { cap, op, args } => Core::Perform {
             cap: atom_to_index(cap, depth),
