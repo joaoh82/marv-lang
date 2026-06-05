@@ -1,0 +1,8 @@
+mod casts
+
+fn mix(n: i64) -> i64 {
+    let small = n as u8
+    let arr : [ 4 ]u8 = make()
+    let nl = '\n'
+    small as i64 + nl as i64
+}

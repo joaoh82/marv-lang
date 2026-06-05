@@ -922,6 +922,7 @@ impl Lowerer {
             Expr::Int(n) => Ok(Atom::Lit(Literal::Int(*n))),
             Expr::Bool(v) => Ok(Atom::Lit(Literal::Bool(*v))),
             Expr::Str(s) => Ok(Atom::Lit(Literal::Str(s.clone()))),
+            Expr::Char(c) => Ok(Atom::Lit(Literal::Char(*c))),
             // `e?` (`spec/02` §D): with errors modeled as an effect that
             // propagates by unwinding (a `Raise` aborts the computation), the
             // success value of a non-raising `e` *is* its value, so `?` lowers to
@@ -929,6 +930,14 @@ impl Lowerer {
             // function's inferred set through the callee's effect row (`App`), and
             // the checker types `e?` as the operand's success type.
             Expr::Try(inner) => self.emit_atom(inner, env, b),
+            // `e as T` (`spec/01` §3.1) → a `Cast` carrying the target type.
+            Expr::Cast(inner, ty) => {
+                let value = self.emit_atom(inner, env, b)?;
+                Ok(b.push(Core::Cast {
+                    value,
+                    to: self.lower_type(ty, &[]),
+                }))
+            }
             Expr::Var(name) => {
                 // A local binding wins over a same-named constructor; otherwise a
                 // bare nullary variant (`None`) is a `Ctor`.
@@ -971,6 +980,9 @@ impl Lowerer {
                 Ok(b.push(node))
             }
             Expr::Call(callee, args) => {
+                if let Some(node) = self.builtin_call(callee, args, env, b)? {
+                    return Ok(b.push(node));
+                }
                 if let Some(c) = self.callee_ctor(callee, env) {
                     let node = self.emit_ctor(&c, args, env, b)?;
                     return Ok(b.push(node));
@@ -986,16 +998,51 @@ impl Lowerer {
         }
     }
 
+    /// Lower a call to a built-in that maps to a Core primitive rather than a
+    /// function application. Today that is `len(x)` → [`PrimOp::Len`] (`spec/02`
+    /// §C), the length of a slice/array/string. A local binding named `len`
+    /// shadows the builtin (it is then an ordinary call). Returns `None` when the
+    /// call is not a recognized builtin, leaving the normal call path to handle it.
+    fn builtin_call(
+        &self,
+        callee: &Expr,
+        args: &[Expr],
+        env: &[Binding],
+        b: &mut Builder,
+    ) -> Result<Option<Core>, LowerError> {
+        if let Expr::Var(name) = callee {
+            if name == "len" && args.len() == 1 && self.resolve_local(name, env).is_none() {
+                let a = self.emit_atom(&args[0], env, b)?;
+                return Ok(Some(Core::Prim {
+                    op: PrimOp::Len,
+                    args: vec![a],
+                }));
+            }
+        }
+        Ok(None)
+    }
+
     /// Lower `e` as a block's **tail** computation: like [`Self::emit_atom`] but
     /// the final node is returned *unbound* (it is the block's result), avoiding
     /// a redundant trailing copy.
     fn emit_tail(&self, e: &Expr, env: &[Binding], b: &mut Builder) -> Result<Core, LowerError> {
         match e {
-            Expr::Unit | Expr::Int(_) | Expr::Bool(_) | Expr::Str(_) | Expr::Var(_) => {
-                Ok(Core::Atom(self.emit_atom(e, env, b)?))
-            }
+            Expr::Unit
+            | Expr::Int(_)
+            | Expr::Bool(_)
+            | Expr::Str(_)
+            | Expr::Char(_)
+            | Expr::Var(_) => Ok(Core::Atom(self.emit_atom(e, env, b)?)),
             // `e?` at a tail position: lower the operand (see `emit_atom`).
             Expr::Try(inner) => self.emit_tail(inner, env, b),
+            // `e as T` at a tail position: emit the `Cast` unbound.
+            Expr::Cast(inner, ty) => {
+                let value = self.emit_atom(inner, env, b)?;
+                Ok(Core::Cast {
+                    value,
+                    to: self.lower_type(ty, &[]),
+                })
+            }
             Expr::Binary(l, op, r) => {
                 let al = self.emit_atom(l, env, b)?;
                 let ar = self.emit_atom(r, env, b)?;
@@ -1022,6 +1069,9 @@ impl Lowerer {
                 Ok(Core::Proj { base: ab, idx })
             }
             Expr::Call(callee, args) => {
+                if let Some(node) = self.builtin_call(callee, args, env, b)? {
+                    return Ok(node);
+                }
                 if let Some(c) = self.callee_ctor(callee, env) {
                     return self.emit_ctor(&c, args, env, b);
                 }
@@ -1576,6 +1626,9 @@ impl Lowerer {
                 self.lower_named(path, &lowered)
             }
             SType::Slice(inner) => Type::Slice(Box::new(self.lower_type(inner, generics))),
+            SType::Array { len, elem } => {
+                Type::Array(Box::new(self.lower_type(elem, generics)), *len)
+            }
             SType::Ref { mutable, inner } => Type::Ref {
                 mutable: *mutable,
                 of: Box::new(self.lower_type(inner, generics)),
@@ -1689,9 +1742,10 @@ impl Lowerer {
             // A struct literal has the named struct's type, so a binding to it
             // (`let p = Point { .. }`) resolves field projections on `p`.
             Expr::Struct { path, .. } => Some(SType::Named(path.clone())),
-            // Indexing a slice yields its element type.
+            // Indexing a slice or array yields its element type.
             Expr::Index(base, _) => match self.type_of_expr(base, env)? {
                 SType::Slice(inner) => Some(*inner),
+                SType::Array { elem, .. } => Some(*elem),
                 _ => None,
             },
             _ => None,
@@ -1911,6 +1965,10 @@ fn to_indices(c: &Core, depth: u32) -> Core {
         Core::Prim { op, args } => Core::Prim {
             op: *op,
             args: args.iter().map(|a| atom_to_index(a, depth)).collect(),
+        },
+        Core::Cast { value, to } => Core::Cast {
+            value: atom_to_index(value, depth),
+            to: to.clone(),
         },
         Core::Perform { cap, op, args } => Core::Perform {
             cap: atom_to_index(cap, depth),

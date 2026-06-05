@@ -393,6 +393,8 @@ impl Trans<'_, '_> {
 
             Core::Prim { op, args } => self.eval_prim(*op, args),
 
+            Core::Cast { value, to } => self.eval_cast(value, to),
+
             Core::Match {
                 scrutinee,
                 branches,
@@ -550,7 +552,9 @@ impl Trans<'_, '_> {
             Literal::Int(n) => Ok(Slot::Val(self.builder.ins().iconst(WORD, *n))),
             Literal::Float(_) => Err(CodegenError::Unsupported("float literal".into())),
             Literal::Str(_) => Err(CodegenError::Unsupported("string literal".into())),
-            Literal::Char(_) => Err(CodegenError::Unsupported("char literal".into())),
+            // A `char` is its Unicode code point as a machine word — the same
+            // scalar the interpreter computes, keeping the two in agreement.
+            Literal::Char(c) => Ok(Slot::Val(self.builder.ins().iconst(WORD, *c as i64))),
         }
     }
 
@@ -619,6 +623,58 @@ impl Trans<'_, '_> {
             }
         };
         Ok(Slot::Val(out))
+    }
+
+    /// Emit an `as` cast (`spec/01` §3.1). Integer targets truncate/wrap to their
+    /// width, `char` is the code-point identity, and `bool` maps nonzero→true —
+    /// matching the interpreter's `eval_cast` so the backends agree. Float targets
+    /// are not yet supported (the backend is integer-only, like float literals).
+    fn eval_cast(&mut self, value: &Atom, to: &Type) -> Result<Slot, CodegenError> {
+        let v = self.eval_atom(value)?;
+        let v = self.as_word(v)?;
+        let out = match to {
+            Type::Int(width) => self.wrap_int(v, *width),
+            // A `char` shares the integer representation (its code point).
+            Type::Char => v,
+            Type::Bool => {
+                let c = self.builder.ins().icmp_imm(IntCC::NotEqual, v, 0);
+                self.builder.ins().uextend(WORD, c)
+            }
+            Type::Float(_) => {
+                return Err(CodegenError::Unsupported(
+                    "float cast (the backend is integer-only)".into(),
+                ))
+            }
+            _ => {
+                return Err(CodegenError::Unsupported(
+                    "cast to a non-scalar type".into(),
+                ))
+            }
+        };
+        Ok(Slot::Val(out))
+    }
+
+    /// Truncate/wrap a machine word to a narrower integer width by shifting the
+    /// significant bits up and back down — arithmetically for signed widths
+    /// (sign-extending), logically for unsigned (zero-extending). The 64-bit
+    /// widths are the identity. Mirrors the interpreter's `wrap_int`.
+    fn wrap_int(&mut self, v: Value, ty: IntTy) -> Value {
+        let (bits, signed) = match ty {
+            IntTy::I8 => (8, true),
+            IntTy::I16 => (16, true),
+            IntTy::I32 => (32, true),
+            IntTy::U8 => (8, false),
+            IntTy::U16 => (16, false),
+            IntTy::U32 => (32, false),
+            IntTy::I64 | IntTy::Isize | IntTy::U64 | IntTy::Usize => return v,
+        };
+        let shift = 64 - bits;
+        let up = self.builder.ins().ishl_imm(v, shift);
+        if signed {
+            self.builder.ins().sshr_imm(up, shift)
+        } else {
+            self.builder.ins().ushr_imm(up, shift)
+        }
     }
 
     /// Emit a comparison whose `i8` result is zero-extended to a machine word so

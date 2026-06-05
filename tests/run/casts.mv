@@ -1,0 +1,31 @@
+mod casts
+
+fn truncate_u8(n: i64) -> i64 {
+    ((n as u8) as i64)
+}
+
+fn truncate_i8(n: i64) -> i64 {
+    ((n as i8) as i64)
+}
+
+fn truncate_u16(n: i64) -> i64 {
+    ((n as u16) as i64)
+}
+
+fn truncate_i32(n: i64) -> i64 {
+    ((n as i32) as i64)
+}
+
+fn bool_cast(n: i64) -> i64 {
+    let flag = (n as bool)
+    (flag as i64)
+}
+
+fn char_round(n: i64) -> i64 {
+    let c = (n as char)
+    (c as i64)
+}
+
+fn chained(n: i64) -> i64 {
+    (((n as u8) as u16) as i64)
+}

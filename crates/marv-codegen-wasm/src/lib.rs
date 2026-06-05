@@ -515,6 +515,8 @@ impl Trans<'_> {
 
             Core::Prim { op, args } => self.eval_prim(*op, args),
 
+            Core::Cast { value, to } => self.eval_cast(value, to),
+
             Core::Match {
                 scrutinee,
                 branches,
@@ -674,7 +676,12 @@ impl Trans<'_> {
             }
             Atom::Lit(Literal::Float(_)) => Err(WasmError::Unsupported("float literal".into())),
             Atom::Lit(Literal::Str(_)) => Err(WasmError::Unsupported("string literal".into())),
-            Atom::Lit(Literal::Char(_)) => Err(WasmError::Unsupported("char literal".into())),
+            // A `char` is its Unicode code point as an `i64` — the same scalar
+            // the interpreter and Cranelift compute (`spec/01` §3.1).
+            Atom::Lit(Literal::Char(c)) => {
+                self.emit(Instruction::I64Const(*c as i64));
+                Ok(Out::Stack)
+            }
             Atom::Var(idx) => Ok(self.slot_to_out(self.slot(*idx)?)),
             Atom::Global(h) => {
                 if self.fn_index.contains_key(h) {
@@ -800,6 +807,59 @@ impl Trans<'_> {
             }
         }
         Ok(Out::Stack)
+    }
+
+    /// Emit an `as` cast (`spec/01` §3.1): integer targets truncate/wrap to their
+    /// width, `char` is the code-point identity, and `bool` maps nonzero→true —
+    /// matching the interpreter and Cranelift backend so the three agree. Float
+    /// targets are not yet supported (the backend is integer-only).
+    fn eval_cast(&mut self, value: &Atom, to: &Type) -> Result<Out, WasmError> {
+        let av = self.resolve_arg(value)?;
+        if matches!(av, ArgVal::Unit) {
+            return Err(WasmError::Unsupported("unit operand to a cast".into()));
+        }
+        self.push_argval(&av);
+        match to {
+            Type::Int(width) => self.wrap_int(*width),
+            // A `char` shares the integer representation (its code point): no-op.
+            Type::Char => {}
+            Type::Bool => {
+                self.emit(Instruction::I64Const(0));
+                self.cmp(Instruction::I64Ne);
+            }
+            Type::Float(_) => {
+                return Err(WasmError::Unsupported(
+                    "float cast (the backend is integer-only)".into(),
+                ))
+            }
+            _ => return Err(WasmError::Unsupported("cast to a non-scalar type".into())),
+        }
+        Ok(Out::Stack)
+    }
+
+    /// Truncate/wrap the top-of-stack `i64` to a narrower integer width by
+    /// shifting the significant bits up and back down — arithmetic shift for
+    /// signed widths (sign-extending), logical for unsigned (zero-extending). The
+    /// 64-bit widths are the identity. Mirrors the interpreter's `wrap_int`.
+    fn wrap_int(&mut self, ty: IntTy) {
+        let (bits, signed) = match ty {
+            IntTy::I8 => (8, true),
+            IntTy::I16 => (16, true),
+            IntTy::I32 => (32, true),
+            IntTy::U8 => (8, false),
+            IntTy::U16 => (16, false),
+            IntTy::U32 => (32, false),
+            IntTy::I64 | IntTy::Isize | IntTy::U64 | IntTy::Usize => return,
+        };
+        let shift = (64 - bits) as i64;
+        self.emit(Instruction::I64Const(shift));
+        self.emit(Instruction::I64Shl);
+        self.emit(Instruction::I64Const(shift));
+        if signed {
+            self.emit(Instruction::I64ShrS);
+        } else {
+            self.emit(Instruction::I64ShrU);
+        }
     }
 
     /// A wasm comparison yields `i32`; widen it to the uniform `i64` boolean.

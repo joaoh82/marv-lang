@@ -141,6 +141,9 @@ pub enum Type {
     Generic { path: Path, args: Vec<Type> },
     /// `[]T` — a slice of `T`.
     Slice(Box<Type>),
+    /// `[N]T` — a fixed-length array of `N` elements of `T` (`spec/02` §B
+    /// `base_type`, `spec/01` §3.2).
+    Array { len: u64, elem: Box<Type> },
     /// `&T` / `&mut T` — a second-class reference.
     Ref { mutable: bool, inner: Box<Type> },
     /// `!T` (or bare `!`, i.e. `!()`) — an error union over success type `T`
@@ -298,6 +301,9 @@ pub enum Expr {
     Int(i64),
     Bool(bool),
     Str(String),
+    /// A character literal `'a'` — a single Unicode scalar (`spec/01` §3.1,
+    /// `spec/02` §B `char_lit`).
+    Char(char),
     /// A bare identifier. Dotted access is [`Expr::Field`], not a path.
     Var(String),
     /// `base.name`
@@ -318,6 +324,10 @@ pub enum Expr {
     /// value of error-union/optional type it yields the success value and
     /// propagates the error/none case to the enclosing function.
     Try(Box<Expr>),
+    /// `expr as Type` — an explicit scalar conversion (`spec/02` §B `postfix`,
+    /// `spec/01` §3.1). There are no implicit numeric coercions; widening and
+    /// narrowing both go through `as`, and narrowing is checked in debug builds.
+    Cast(Box<Expr>, Type),
     /// `(lhs op rhs)` — always fully parenthesized in canonical form.
     Binary(Box<Expr>, BinOp, Box<Expr>),
 }

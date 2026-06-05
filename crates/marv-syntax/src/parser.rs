@@ -459,11 +459,27 @@ impl Parser {
                 self.expect(Tok::RParen)?;
                 Ok(Type::Unit)
             }
+            // `[]T` (slice) or `[N]T` (fixed array) — disambiguated on whether an
+            // integer length precedes the closing bracket (`spec/02` §B
+            // `base_type`).
             Tok::LBracket => {
                 self.bump();
-                self.expect(Tok::RBracket)?;
-                let elem = self.parse_type()?;
-                Ok(Type::Slice(Box::new(elem)))
+                if let Tok::Int(n) = self.peek().clone() {
+                    self.bump();
+                    if n < 0 {
+                        return Err(ParseError::new("array length must be non-negative"));
+                    }
+                    self.expect(Tok::RBracket)?;
+                    let elem = self.parse_type()?;
+                    Ok(Type::Array {
+                        len: n as u64,
+                        elem: Box::new(elem),
+                    })
+                } else {
+                    self.expect(Tok::RBracket)?;
+                    let elem = self.parse_type()?;
+                    Ok(Type::Slice(Box::new(elem)))
+                }
             }
             Tok::Ident(_) => {
                 let path = self.parse_path()?;
@@ -795,6 +811,14 @@ impl Parser {
                     self.bump();
                     expr = Expr::Try(Box::new(expr));
                 }
+                // Postfix `as Type` — explicit scalar cast (`spec/02` §B
+                // `postfix`). The cast target is a `base_type`, so it never
+                // crosses into a following block brace.
+                Tok::As => {
+                    self.bump();
+                    let ty = self.parse_type()?;
+                    expr = Expr::Cast(Box::new(expr), ty);
+                }
                 _ => break,
             }
         }
@@ -827,6 +851,10 @@ impl Parser {
             Tok::Str(s) => {
                 self.bump();
                 Ok(Expr::Str(s))
+            }
+            Tok::Char(c) => {
+                self.bump();
+                Ok(Expr::Char(c))
             }
             Tok::True => {
                 self.bump();

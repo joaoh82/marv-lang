@@ -37,10 +37,12 @@ pub enum Tok {
     Mut,
     And,
     Or,
+    As,
 
     Ident(String),
     Int(i64),
     Str(String),
+    Char(char),
 
     // Punctuation / delimiters.
     LParen,
@@ -117,6 +119,7 @@ fn keyword(word: &str) -> Option<Tok> {
         "mut" => Tok::Mut,
         "and" => Tok::And,
         "or" => Tok::Or,
+        "as" => Tok::As,
         _ => return None,
     })
 }
@@ -166,6 +169,11 @@ pub fn lex(src: &str) -> Result<Vec<Tok>, LexError> {
             '"' => {
                 let (s, next) = lex_string(&chars, i)?;
                 out.push(Tok::Str(s));
+                i = next;
+            }
+            '\'' => {
+                let (c, next) = lex_char(&chars, i)?;
+                out.push(Tok::Char(c));
                 i = next;
             }
             c if c.is_ascii_digit() => {
@@ -228,6 +236,48 @@ fn lex_string(chars: &[char], start: usize) -> Result<(String, usize), LexError>
     }
 
     Err(LexError::new("unterminated string literal"))
+}
+
+/// Lex a character literal starting at the opening `'` (index `start`). Returns
+/// the single Unicode scalar it denotes and the index just past the closing `'`.
+/// The same escapes as a string literal are accepted, plus `\'`.
+fn lex_char(chars: &[char], start: usize) -> Result<(char, usize), LexError> {
+    let mut i = start + 1; // skip opening quote
+    let c = *chars
+        .get(i)
+        .ok_or_else(|| LexError::new("unterminated character literal"))?;
+    let value = if c == '\\' {
+        let esc = chars
+            .get(i + 1)
+            .ok_or_else(|| LexError::new("unterminated escape in character literal"))?;
+        let decoded = match esc {
+            'n' => '\n',
+            't' => '\t',
+            'r' => '\r',
+            '\\' => '\\',
+            '\'' => '\'',
+            '"' => '"',
+            '0' => '\0',
+            other => {
+                return Err(LexError::new(format!(
+                    "unknown character escape `\\{other}`"
+                )))
+            }
+        };
+        i += 2;
+        decoded
+    } else if c == '\'' {
+        return Err(LexError::new("empty character literal"));
+    } else {
+        i += 1;
+        c
+    };
+    if chars.get(i) != Some(&'\'') {
+        return Err(LexError::new(
+            "unterminated character literal (expected a closing `'`)",
+        ));
+    }
+    Ok((value, i + 1))
 }
 
 /// Lex an integer literal. Underscores between digits are accepted and dropped

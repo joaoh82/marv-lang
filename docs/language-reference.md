@@ -40,8 +40,13 @@ subset). See [`spec/01`](../spec/01-design-spec.md) §1.
 ### Primitives **[impl]**
 `i8 i16 i32 i64 i128 isize`, `u8 u16 u32 u64 u128 usize`, `f32 f64`, `bool`, `char`, `str`,
 `()`. No implicit conversions — widening/narrowing use explicit `as` (narrowing checked in
-debug). *(Note: the interpreter and backends currently compute integers at 64-bit width;
-per-width semantics are roadmap.)*
+debug). **`char` literals** (`'a'`, `'\n'`) and **`as` casts** (`(n as u8)`) parse, lower to
+`Core::Cast`, check (scalar↔scalar only — `E0104` otherwise), and run **[impl]**: an integer
+target truncates/wraps to its width *identically across the interpreter, Cranelift, and WASM*
+(differential-tested in `tests/run/casts.mv`), a `char` is its Unicode code point, and `bool`
+maps nonzero→true. The narrowing range check is enforced statically for constant operands
+(`256 as u8` → `E0104`). *(Note: the value domain is still 64-bit — sub-width semantics show
+up only at the cast boundary; per-width **arithmetic** wrapping remains roadmap.)*
 
 ### Aggregates
 - **struct** (product): `struct Point { x: f64, y: f64 }`. Value semantics. Declarations,
@@ -53,9 +58,12 @@ per-width semantics are roadmap.)*
   payload-binding constructor patterns and the `_` wildcard — are **[impl]** end to end:
   parsed, lowered to `Ctor`/`Match`, exhaustiveness-checked, and run by the interpreter. See
   `examples/color.mv` and the `std/` prelude.
-- **array** `[N]T`, **slice** `[]T`, **tuple** `(A, B)`. Types parse **[impl]**; **index
-  reads** `a[i]` parse and lower to `Prim{Index}` **[impl]**. Array/slice *literals* and index
-  *stores* (`a[i] = e`) are **[design]** — the store awaits aggregate codegen (MARV-9).
+- **array** `[N]T`, **slice** `[]T`, **tuple** `(A, B)`. Types parse **[impl]** (both `[]T`
+  and the fixed `[N]T` form); **index reads** `a[i]` parse and lower to `Prim{Index}`, and
+  `len(x)` lowers to `Prim{Len}` (a builtin, not a call) — both run on the interpreter for
+  `str`/aggregate operands **[impl]**. Array/slice *literals*, index *stores* (`a[i] = e`),
+  and backend execution of `len`/index over aggregates are **[design]** — they await aggregate
+  codegen (MARV-9).
 - **optional** `?T` = `Option[T]` — the only way to express absence. `Option`/`Result` are
   written in marv (`std/`) and parse + lower **[impl]**; the `?T`/`!T` *sugar* and the postfix
   `?` propagation operator now parse and lower too **[impl]** (`!T` → `Result[T, error-union]`;
@@ -236,11 +244,12 @@ is visible in the signature, requires a `SAFETY:` justification comment, and is 
 The parser accepts: `mod`/`import`, `struct`/`enum`/`fn` (incl. `pure fn`, generic parameter
 lists), `let`/`var` bindings, assignment (`x = e`, `p.x = e`), `if`/`else(-if)`, `match`
 (constructor + `_` patterns, payload binding), enum constructor application, struct literals
-(`Name { f: e, … }`), index reads (`a[i]`), `while`/`for` loops with `invariant` clauses,
+(`Name { f: e, … }`), index reads (`a[i]`), `len(x)`, `char` literals (`'a'`) and `as` casts
+(`(n as u8)`), array/slice types (`[N]T`, `[]T`), `while`/`for` loops with `invariant` clauses,
 generic type arguments (`Option[T]`), the binary
 operators (`+ - * / % == != < <= > >= and or`), function calls and recursion, field
 projection, and `requires`/`ensures` contracts. That is enough for the
 [`examples/`](../examples) that run end to end (`factorial`, `arithmetic`, `clamp`, `color`,
-`mutation`, `loops`, …), the `std/` prelude (`option`, `result`), and the M4/M6 gates. Everything
-still marked **[core]**/**[design]** above is the surface roadmap — tracked in the project
-tracker, ordered errors → generics (checking) → capabilities → collections.
+`mutation`, `loops`, `casts`, …), the `std/` prelude (`option`, `result`), and the M4/M6 gates.
+Everything still marked **[core]**/**[design]** above is the surface roadmap — tracked in the
+project tracker, ordered errors → generics (checking) → capabilities → collections.

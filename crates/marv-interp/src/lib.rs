@@ -451,6 +451,11 @@ impl Program {
                 eval_prim(*op, &args)
             }
 
+            Core::Cast { value, to } => {
+                let v = self.eval_atom(value, env)?;
+                eval_cast(&v, to)
+            }
+
             Core::Perform { cap, op, args } => {
                 let capv = self.eval_atom(cap, env)?;
                 let name = match capv {
@@ -729,7 +734,11 @@ fn lit_value(l: &Literal) -> Value {
         Literal::Int(n) => Value::Int(*n),
         Literal::Float(bits) => Value::Float(f64::from_bits(*bits)),
         Literal::Str(s) => Value::Str(s.clone()),
-        Literal::Char(c) => Value::Str(c.to_string()),
+        // A `char` is a Unicode scalar; the value domain has no distinct char,
+        // so it collapses to its code point as an `Int` — the same scalar the
+        // int-only backends compute, which keeps the differential oracle honest
+        // (`spec/01` §3.1). `c as i64` is then the identity its code point.
+        Literal::Char(c) => Value::Int(*c as i64),
     }
 }
 
@@ -820,6 +829,85 @@ fn eval_prim(op: PrimOp, args: &[Value]) -> Result<Value, RunError> {
                 .ok_or_else(|| RunError::Unsupported("index out of range".into())),
             _ => Err(RunError::Unsupported("index of non-collection".into())),
         },
+    }
+}
+
+/// Evaluate an `as` cast (`spec/01` §3.1) over an already-evaluated scalar.
+///
+/// Casts are **total and wrapping**: an integer target truncates/wraps to its
+/// width exactly as the int-only backends do (so all three agree bit-for-bit),
+/// a float target converts (rounding to `f32` precision when narrowing), `bool`
+/// maps nonzero→true, and `char` is the identity on the code point (a `char` is
+/// represented as its scalar `Int` at runtime). The debug narrowing *range*
+/// check (`spec/01` §3.1) is enforced statically for constant operands by the
+/// checker; a fuller runtime check awaits width-tracked runtime values.
+fn eval_cast(v: &Value, to: &Type) -> Result<Value, RunError> {
+    let scalar_int = |v: &Value| -> Option<i128> {
+        match v {
+            Value::Int(n) => Some(*n as i128),
+            Value::Bool(b) => Some(*b as i128),
+            // Truncate toward zero; Rust's float→int `as` saturates out-of-range.
+            Value::Float(x) if !x.is_nan() => Some(*x as i128),
+            Value::Float(_) => Some(0),
+            _ => None,
+        }
+    };
+    match to {
+        Type::Int(width) => scalar_int(v)
+            .map(|n| Value::Int(wrap_int(n, *width)))
+            .ok_or_else(|| {
+                RunError::Unsupported(format!("cannot cast `{}` to an integer", v.render()))
+            }),
+        Type::Char => scalar_int(v).map(|n| Value::Int(n as i64)).ok_or_else(|| {
+            RunError::Unsupported(format!("cannot cast `{}` to `char`", v.render()))
+        }),
+        Type::Bool => match v {
+            Value::Bool(b) => Ok(Value::Bool(*b)),
+            Value::Int(n) => Ok(Value::Bool(*n != 0)),
+            _ => Err(RunError::Unsupported(format!(
+                "cannot cast `{}` to `bool`",
+                v.render()
+            ))),
+        },
+        Type::Float(ft) => {
+            let x = match v {
+                Value::Int(n) => *n as f64,
+                Value::Bool(b) => (*b as i64) as f64,
+                Value::Float(x) => *x,
+                _ => {
+                    return Err(RunError::Unsupported(format!(
+                        "cannot cast `{}` to a float",
+                        v.render()
+                    )))
+                }
+            };
+            // A narrowing `as f32` rounds to single precision then back.
+            let x = match ft {
+                FloatTy::F32 => x as f32 as f64,
+                FloatTy::F64 => x,
+            };
+            Ok(Value::Float(x))
+        }
+        _ => Err(RunError::Unsupported(format!(
+            "unsupported `as` cast target `{}`",
+            show_type(to)
+        ))),
+    }
+}
+
+/// Truncate/wrap an integer to a target width, returning the bit pattern as the
+/// `i64` the value domain stores (identity for the 64-bit widths). Mirrors the
+/// Cranelift/WASM backends' integer-cast lowering so the three agree.
+fn wrap_int(n: i128, ty: IntTy) -> i64 {
+    match ty {
+        IntTy::I8 => n as i8 as i64,
+        IntTy::I16 => n as i16 as i64,
+        IntTy::I32 => n as i32 as i64,
+        IntTy::I64 | IntTy::Isize => n as i64,
+        IntTy::U8 => n as u8 as i64,
+        IntTy::U16 => n as u16 as i64,
+        IntTy::U32 => n as u32 as i64,
+        IntTy::U64 | IntTy::Usize => n as u64 as i64,
     }
 }
 
