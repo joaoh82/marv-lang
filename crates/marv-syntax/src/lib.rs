@@ -35,7 +35,7 @@ mod parser;
 
 pub use ast::*;
 pub use formatter::format_module;
-pub use parser::{parse, ParseError};
+pub use parser::{parse, parse_with_spans, ParseError};
 
 /// Width, in spaces, that a hard tab expands to in the whitespace fallback.
 const TAB_WIDTH: usize = 4;

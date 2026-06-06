@@ -20,8 +20,9 @@
 //! - **The error code is `E0110`, not the prose example's `E0307`.** §6 fixes the
 //!   real numbering by check family (capabilities are `E011x`); the M2 checker
 //!   and `spec/03` §6 are the source of truth, and the `E0307` in the §4.1 prose
-//!   is an older illustrative number. Likewise spans are `null` (not threaded
-//!   through the front end yet — §2 span scope-honesty).
+//!   is an older illustrative number. Spans over *Core-ingested* files are `null`
+//!   (Core has no source text); over `.mv` source they are real, def-granular
+//!   spans (MARV-12) — see the source-span tests below.
 
 use marv_core::ir::*;
 use marv_core::symbol_hash;
@@ -127,7 +128,10 @@ fn missing_fs_fix_flow() {
     let d = &diags[0];
     assert_eq!(d["code"], "E0110"); // MissingCapability (spec §6 family E011x)
     assert_eq!(d["severity"], "error");
-    assert!(d["span"].is_null(), "spans not threaded yet (§2)");
+    assert!(
+        d["span"].is_null(),
+        "Core-ingested files have no source span"
+    );
     assert!(d["message"].as_str().unwrap().contains("Fs"));
 
     // The diagnostic carries the mechanical fix, exactly as in §4.1.
@@ -344,6 +348,22 @@ fn verify_proves_and_counterexamples_over_the_protocol() {
     }
 
     assert_eq!(ok["status"], "proved", "correct clamp should prove: {ok:#}");
+    // The result carries a `relatedSpan` pointing at the verified definition's
+    // header in source (MARV-12).
+    let rs = &ok["relatedSpan"];
+    assert_eq!(
+        rs["file"], "math.mv",
+        "relatedSpan names the source file: {ok:#}"
+    );
+    let (lo, hi) = (
+        rs["startByte"].as_u64().unwrap() as usize,
+        rs["endByte"].as_u64().unwrap() as usize,
+    );
+    assert_eq!(
+        &CLAMP_PAIR[lo..hi],
+        "pure fn clamp",
+        "span covers the header"
+    );
 
     let bug = call(
         &mut server,
@@ -359,6 +379,72 @@ fn verify_proves_and_counterexamples_over_the_protocol() {
         bug["obligation"].as_str().unwrap().contains("result"),
         "obligation names the violated clause: {bug:#}"
     );
+}
+
+/// MARV-12 — over `.mv` source, a diagnostic carries the real span of the
+/// definition's header (keyword(s) through name), and doc comments preceding the
+/// definition are excluded from that header span.
+#[test]
+fn source_diagnostic_carries_real_header_span() {
+    let mut server = Server::new();
+    // A doc-commented function whose body type does not match its return type:
+    // the M2 checker raises `TypeMismatch` (E0101) from real source.
+    let src = "mod m\n\n/// A documented but wrong function.\n/// Second line.\nfn f() -> i32 {\n    true\n}\n";
+    let open = call(
+        &mut server,
+        "marv/openSnapshot",
+        json!({ "files": [ { "path": "m.mv", "text": src } ] }),
+    );
+    let s = open["snapshotId"].as_str().unwrap().to_string();
+
+    let checked = call(&mut server, "marv/check", json!({ "snapshotId": s }));
+    let diags = checked["diagnostics"].as_array().unwrap();
+    assert_eq!(diags.len(), 1, "one type-mismatch diagnostic: {checked:#}");
+    let span = &diags[0]["span"];
+    assert!(
+        !span.is_null(),
+        "source diagnostics carry a real span: {checked:#}"
+    );
+    assert_eq!(span["file"], "m.mv");
+    let (lo, hi) = (
+        span["startByte"].as_u64().unwrap() as usize,
+        span["endByte"].as_u64().unwrap() as usize,
+    );
+    // The header span is the `fn f` declaration — NOT the `///` doc lines above it.
+    assert_eq!(&src[lo..hi], "fn f");
+    // Line/col are 0-based: `fn f` is on line 4 (after `mod m`, blank, two docs).
+    assert_eq!(span["start"]["line"], 4);
+    assert_eq!(span["start"]["col"], 0);
+}
+
+/// MARV-12 — `typeAt` resolves an offset to its enclosing definition and returns
+/// that definition's real header span.
+#[test]
+fn type_at_returns_real_span() {
+    let mut server = Server::new();
+    let src = "mod m\n\npure fn add(a: i32, b: i32) -> i32 {\n    (a + b)\n}\n";
+    let open = call(
+        &mut server,
+        "marv/openSnapshot",
+        json!({ "files": [ { "path": "m.mv", "text": src } ] }),
+    );
+    let s = open["snapshotId"].as_str().unwrap().to_string();
+
+    // An offset inside the body resolves to `m.add`.
+    let byte = src.find("(a + b)").unwrap() as u64;
+    let ta = call(
+        &mut server,
+        "marv/typeAt",
+        json!({ "snapshotId": s, "file": "m.mv", "byte": byte }),
+    );
+    assert_eq!(ta["def"], "m.add");
+    assert_eq!(ta["type"], "fn(i32, i32) -> i32");
+    let span = &ta["span"];
+    let (lo, hi) = (
+        span["startByte"].as_u64().unwrap() as usize,
+        span["endByte"].as_u64().unwrap() as usize,
+    );
+    assert_eq!(&src[lo..hi], "pure fn add");
 }
 
 /// §3.4 — `commit`: freezing a snapshot's definitions into the content-addressed

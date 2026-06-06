@@ -1,5 +1,11 @@
 mod math
 
+/// Clamp `x` into the inclusive range `[lo, hi]`.
+///
+/// A `pure` total function with contracts: it requires a well-formed range
+/// (`lo <= hi`) and ensures the result lies within it. Doc comments like this
+/// one round-trip through the canonical formatter but are excluded from the
+/// definition's content hash (`spec/02` §F).
 pure fn clamp(x: i32, lo: i32, hi: i32) -> i32
     requires (lo <= hi)
     ensures ((result >= lo) and (result <= hi))

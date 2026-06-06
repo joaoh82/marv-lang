@@ -57,7 +57,7 @@ memoization carries across snapshots. `closeSnapshot` discards one.
 | `marv/applyEdits` | A new `{ snapshotId }` after whole-file replacements and/or byte-range `edits`. |
 | `marv/closeSnapshot` | `{ closed }`. |
 | `marv/check` | `{ diagnostics }` for the snapshot, optionally scoped to a `def` or `file`. |
-| `marv/typeAt` | `{ def, type, effects }` for the definition enclosing a byte offset. |
+| `marv/typeAt` | `{ def, type, effects, span }` for the definition enclosing a byte offset (`span` is the def's real header span over source, `null` over Core). |
 | `marv/signature` | `{ name, params, ret, effects, errorSet, pure, requires, ensures, hash }`. |
 | `marv/effects` | `{ effects }` — the **inferred** capability row. |
 | `marv/errorSet` | `{ errorSet }` — the **inferred** error set. |
@@ -91,13 +91,17 @@ protocol). The stdio NDJSON transport and JSON-RPC error envelope are covered to
 
 Three boundaries are worth stating plainly, continuing the M1/M2 notes:
 
-1. **Spans are `null`.** `spec/02` §F rule 4 keeps source spans out of the Core
-   IR and the M0 AST carries none, so every diagnostic/edit `span` on the wire is
-   `null` (`spec/03` §2 span scope-honesty). The `code`, `message`, and each
-   fix's `newText` are always present — an agent learns *what* to insert — and
-   the byte-precise location fills in once the front end threads spans. `typeAt`
-   is correspondingly **definition-granular** (it anchors on the def header text)
-   rather than offset-exact.
+1. **Spans are definition-granular (MARV-12).** Over `.mv` source, every
+   diagnostic, `typeAt`, and `verify` carries a **real** span — the byte range and
+   `{line, col}` of the enclosing definition's header — threaded from the lexer
+   through the parser's `ItemSpan` side table (the AST and Core hashing are
+   untouched). A `MissingCapability` fix resolves its edit to the parameter-list
+   insertion point, so `applyFix` lands at a real offset. What is *not* yet
+   exact is sub-definition granularity: `spec/02` §F rule 4 keeps spans out of the
+   span-free Core IR the checker runs over, so a diagnostic points at its def's
+   header rather than the offending sub-expression (that finer grain needs a
+   Core→source map). Core-ingested files have no source text, so their spans stay
+   `null`. The `code`, `message`, and each fix's `newText` are always present.
 
 2. **Driving the capability rules needs Core ingestion.** The M0 front end emits
    no `perform`/`raise`/enum/`linear` forms, so a capability or error-set misuse

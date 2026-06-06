@@ -22,9 +22,10 @@
 //! Every diagnostic follows `spec/03-compiler-protocol.md` §2 ([`Diagnostic`]:
 //! stable [`Code`], severity, span, message, related, fixes) and carries a
 //! machine-actionable [`Fix`] for each of the mechanically-derivable cases the
-//! protocol names. See [`diagnostic`] for the span scope-honesty note and
-//! [`check`] for the rule-by-rule details and which rules the current front end
-//! can reach from real `.mv` source.
+//! protocol names. See [`diagnostic`] for how real (definition-granular) source
+//! spans are stamped one layer up in `marv-db`, and [`check`] for the
+//! rule-by-rule details and which rules the current front end can reach from
+//! real `.mv` source.
 //!
 //! ## Entry points
 //!

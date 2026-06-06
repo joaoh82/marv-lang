@@ -15,7 +15,7 @@
 //! span lines (between items, inside blocks) skip `Nl` explicitly.
 
 use crate::ast::*;
-use crate::lexer::{lex, Tok};
+use crate::lexer::{lex_spanned, Tok};
 
 /// A parse failure. M0 keeps this deliberately simple (a message); structured,
 /// fix-carrying diagnostics are milestone M2 (`spec/03`).
@@ -44,19 +44,32 @@ type PResult<T> = Result<T, ParseError>;
 
 /// Parse a complete module from source text.
 pub fn parse(src: &str) -> PResult<Module> {
-    let tokens = lex(src).map_err(|e| ParseError::new(e.message))?;
+    Ok(parse_with_spans(src)?.0)
+}
+
+/// Parse a complete module, also returning the real source [`ItemSpan`]s of every
+/// top-level item (MARV-12). The `Module` itself is identical to [`parse`]'s
+/// output — spans live in the side table, so the round-trip property is unaffected.
+pub fn parse_with_spans(src: &str) -> PResult<(Module, Vec<ItemSpan>)> {
+    let (tokens, spans) = lex_spanned(src).map_err(|e| ParseError::new(e.message))?;
     let mut p = Parser {
         tokens,
+        spans,
         pos: 0,
         no_struct: false,
+        item_spans: Vec::new(),
+        name_hi: 0,
+        param_insert: None,
     };
     let module = p.parse_module()?;
     p.expect(Tok::Eof)?;
-    Ok(module)
+    Ok((module, p.item_spans))
 }
 
 struct Parser {
     tokens: Vec<Tok>,
+    /// `(start_byte, end_byte)` of each token, aligned 1:1 with `tokens`.
+    spans: Vec<(u32, u32)>,
     pos: usize,
     /// When set, a bare `Name {` is *not* read as a struct literal — the `{`
     /// belongs to an enclosing block. This resolves the classic ambiguity in
@@ -65,6 +78,14 @@ struct Parser {
     /// governs only the head expression; it is cleared again inside any
     /// parenthesis, bracket, argument list, or nested block.
     no_struct: bool,
+    /// Accumulated per-item source spans (MARV-12), in source order.
+    item_spans: Vec<ItemSpan>,
+    /// Scratch: end byte of the most recently parsed declaration name, so
+    /// `parse_item` can close the header span.
+    name_hi: u32,
+    /// Scratch: byte offset just inside a `fn`'s parameter `(`, for the
+    /// capability-insertion point; reset to `None` per item.
+    param_insert: Option<u32>,
 }
 
 impl Parser {
@@ -72,6 +93,38 @@ impl Parser {
         // The token stream always ends in `Eof`, so indexing the last element is
         // safe once `pos` runs off the end.
         self.tokens.get(self.pos).unwrap_or(&Tok::Eof)
+    }
+
+    /// The byte span of the token at the current position (a zero-width span at
+    /// end of input once `pos` runs off the end).
+    fn cur_span(&self) -> (u32, u32) {
+        self.spans
+            .get(self.pos)
+            .copied()
+            .or_else(|| self.spans.last().copied())
+            .unwrap_or((0, 0))
+    }
+
+    /// Start byte of the current token.
+    fn cur_lo(&self) -> u32 {
+        self.cur_span().0
+    }
+
+    /// Collect consecutive doc-comment lines (separated by newlines) that precede
+    /// the next item, returning their text and consuming them. Leaves the parser
+    /// positioned on the first non-doc, non-newline token.
+    fn take_docs(&mut self) -> Vec<String> {
+        let mut docs = Vec::new();
+        loop {
+            self.skip_nl();
+            if let Tok::Doc(text) = self.peek() {
+                docs.push(text.clone());
+                self.bump();
+            } else {
+                break;
+            }
+        }
+        docs
     }
 
     fn bump(&mut self) -> Tok {
@@ -139,11 +192,21 @@ impl Parser {
 
         let mut items = Vec::new();
         loop {
-            self.skip_nl();
+            // Doc comments (`///`) bind to the item that follows them.
+            let docs = self.take_docs();
             if self.peek() == &Tok::Eof {
-                break;
+                break; // trailing doc comments with no item: tolerated, dropped
             }
-            items.push(self.parse_item()?);
+            // The header starts at this item's first token (keyword/modifier).
+            let header_lo = self.cur_lo();
+            self.param_insert = None;
+            let item = self.parse_item(docs)?;
+            self.item_spans.push(ItemSpan {
+                name: item.name().to_string(),
+                header: (header_lo, self.name_hi),
+                param_insert: self.param_insert,
+            });
+            items.push(item);
         }
 
         Ok(Module {
@@ -184,20 +247,20 @@ impl Parser {
         Ok(Import { path, names })
     }
 
-    fn parse_item(&mut self) -> PResult<Item> {
+    fn parse_item(&mut self, docs: Vec<String>) -> PResult<Item> {
         match self.peek() {
             Tok::Pure => {
                 self.bump();
-                Ok(Item::Fn(self.parse_fn(true)?))
+                Ok(Item::Fn(self.parse_fn(true, docs)?))
             }
-            Tok::Fn => Ok(Item::Fn(self.parse_fn(false)?)),
+            Tok::Fn => Ok(Item::Fn(self.parse_fn(false, docs)?)),
             Tok::Linear => {
                 self.bump();
-                Ok(Item::Struct(self.parse_struct(true)?))
+                Ok(Item::Struct(self.parse_struct(true, docs)?))
             }
-            Tok::Struct => Ok(Item::Struct(self.parse_struct(false)?)),
-            Tok::Enum => Ok(Item::Enum(self.parse_enum()?)),
-            Tok::Error => Ok(Item::Error(self.parse_error_decl()?)),
+            Tok::Struct => Ok(Item::Struct(self.parse_struct(false, docs)?)),
+            Tok::Enum => Ok(Item::Enum(self.parse_enum(docs)?)),
+            Tok::Error => Ok(Item::Error(self.parse_error_decl(docs)?)),
             other => Err(ParseError::new(format!(
                 "expected an item (`fn`, `pure fn`, `struct`, `linear struct`, `enum`, `error`), \
                  found {other:?}"
@@ -224,9 +287,11 @@ impl Parser {
         Ok(names)
     }
 
-    fn parse_enum(&mut self) -> PResult<EnumDecl> {
+    fn parse_enum(&mut self, docs: Vec<String>) -> PResult<EnumDecl> {
         self.expect(Tok::Enum)?;
+        let name_hi = self.cur_span().1;
         let name = self.ident()?;
+        self.name_hi = name_hi;
         let generics = self.parse_generics()?;
         self.expect(Tok::LBrace)?;
         self.skip_nl();
@@ -245,6 +310,7 @@ impl Parser {
         self.skip_nl();
         self.expect(Tok::RBrace)?;
         Ok(EnumDecl {
+            docs,
             name,
             generics,
             variants,
@@ -253,9 +319,11 @@ impl Parser {
 
     /// Parse `error Name { Variant, Variant, ... }` (`spec/02` §B `error_decl`).
     /// Variants are bare identifiers (no payload); a trailing comma is tolerated.
-    fn parse_error_decl(&mut self) -> PResult<ErrorDecl> {
+    fn parse_error_decl(&mut self, docs: Vec<String>) -> PResult<ErrorDecl> {
         self.expect(Tok::Error)?;
+        let name_hi = self.cur_span().1;
         let name = self.ident()?;
+        self.name_hi = name_hi;
         self.expect(Tok::LBrace)?;
         self.skip_nl();
 
@@ -272,7 +340,11 @@ impl Parser {
         }
         self.skip_nl();
         self.expect(Tok::RBrace)?;
-        Ok(ErrorDecl { name, variants })
+        Ok(ErrorDecl {
+            docs,
+            name,
+            variants,
+        })
     }
 
     fn parse_variant(&mut self) -> PResult<Variant> {
@@ -291,9 +363,11 @@ impl Parser {
         Ok(Variant { name, fields })
     }
 
-    fn parse_struct(&mut self, linear: bool) -> PResult<StructDecl> {
+    fn parse_struct(&mut self, linear: bool, docs: Vec<String>) -> PResult<StructDecl> {
         self.expect(Tok::Struct)?;
+        let name_hi = self.cur_span().1;
         let name = self.ident()?;
+        self.name_hi = name_hi;
         self.expect(Tok::LBrace)?;
         self.skip_nl();
 
@@ -311,6 +385,7 @@ impl Parser {
         self.skip_nl();
         self.expect(Tok::RBrace)?;
         Ok(StructDecl {
+            docs,
             linear,
             name,
             fields,
@@ -324,10 +399,15 @@ impl Parser {
         Ok(Field { name, ty })
     }
 
-    fn parse_fn(&mut self, is_pure: bool) -> PResult<FnDecl> {
+    fn parse_fn(&mut self, is_pure: bool, docs: Vec<String>) -> PResult<FnDecl> {
         self.expect(Tok::Fn)?;
+        let name_hi = self.cur_span().1;
         let name = self.ident()?;
+        self.name_hi = name_hi;
         let generics = self.parse_generics()?;
+        // Record the byte just inside `(` as the capability-insertion point: a new
+        // leading parameter (`fs: Fs, `) lands here for the `MissingCapability` fix.
+        self.param_insert = Some(self.cur_span().1);
         self.expect(Tok::LParen)?;
 
         let mut params = Vec::new();
@@ -352,6 +432,7 @@ impl Parser {
 
         let body = self.parse_block()?;
         Ok(FnDecl {
+            docs,
             is_pure,
             name,
             generics,

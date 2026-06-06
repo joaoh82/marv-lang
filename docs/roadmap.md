@@ -27,7 +27,7 @@ where each one sits and what must land first. Each task references back here.
 | **MARV-9** aggregate/enum codegen (interp + Cranelift + WASM) | 2 · Backends | MARV-1, MARV-4 | 10 | medium |
 | **MARV-10** AOT native + LLVM + WASM component/WIT | 2 · Backends | MARV-9 | — | low |
 | **MARV-11** verified-subset expansion + loop invariants + `old`/quantifiers | 3 · Verification | MARV-2, MARV-1 | — | medium |
-| **MARV-12** formatter doc-comments + real source spans | 5 · Infra/polish | — *(independent)* | — | medium |
+| ~~**MARV-12** formatter doc-comments + real source spans~~ ✅ done | 5 · Infra/polish | — *(independent)* | — | medium |
 | **MARV-13** port more compiler passes to marv (self-hosting) | 4 · Self-hosting | Phase-1 surface *(incremental now)* | — | low |
 | **MARV-14** persistent on-disk store + cross-module resolution | 4 · Store | — *(std linking wants Phase 1)* | — | low |
 
@@ -67,7 +67,11 @@ operator; `not` is now a reserved word (like `and`/`or`). `-e`/`not e` run ident
 interpreter + Cranelift + WASM (`tests/run/unary.mv`, differential-tested); a second-class
 reference carries no runtime cell, so `&e` evaluates to its referent's value. `examples/report.mv`
 now parses, lowers, and checks for real — its `total(&sales)` reference-passing exercises the
-new operator (its doc comments drop until MARV-12 teaches the formatter to preserve them).
+new operator. · **MARV-12** (done) teaches the lexer/AST/formatter to **preserve `///` doc
+comments** (kept on the item below them, normalized, excluded from the content hash) and threads
+**real, definition-granular source spans** lexer→parser→`marv-db` so diagnostics, `typeAt`, and
+`verify` carry byte+`{line,col}` spans and a `MissingCapability` fix resolves to a real insertion
+offset. Per-sub-expression spans stay out of scope (the Core IR is span-free by identity design).
 
 ## Recommended order
 
@@ -106,8 +110,9 @@ builds) and MARV-12 (doc-comments + spans). Good independent work to run alongsi
 - **Phase 4 · Self-hosting & store.** Port compiler passes to marv (Stage-1, differential vs
   the Rust Stage-0 oracle) as the surface allows; mature the content store into a real
   cross-module package system.
-- **Phase 5 · Infra/polish.** Doc-comment preservation and real source spans through to
-  diagnostics. (Phase 0 — repo/CI/agent enablement — is done.)
+- **Phase 5 · Infra/polish.** Doc-comment preservation and real (definition-granular) source
+  spans through to diagnostics/`typeAt`/`verify` are **done** (MARV-12). (Phase 0 —
+  repo/CI/agent enablement — is also done.)
 
 ## How a task is meant to be picked up
 

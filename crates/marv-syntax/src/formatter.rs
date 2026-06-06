@@ -31,12 +31,30 @@ pub fn format_module(module: &Module) -> String {
     }
 
     for item in &module.items {
-        out.push('\n'); // blank line before each item
+        out.push('\n'); // blank line before each item (and its doc comments)
+        out.push_str(&format_docs(item.docs()));
         out.push_str(&format_item(item));
         out.push('\n');
     }
 
     out
+}
+
+/// Format an item's doc-comment lines as canonical `/// text` lines (one per
+/// entry, each terminated by a newline), at column 0. An empty-content line is
+/// rendered as a bare `///`. Returns `""` when the item has no docs.
+fn format_docs(docs: &[String]) -> String {
+    let mut s = String::new();
+    for line in docs {
+        if line.is_empty() {
+            s.push_str("///\n");
+        } else {
+            s.push_str("/// ");
+            s.push_str(line);
+            s.push('\n');
+        }
+    }
+    s
 }
 
 fn format_import(import: &Import) -> String {

@@ -89,13 +89,16 @@ positive tests that well-typed programs check clean
 
 Two boundaries are worth stating plainly, in the spirit of the M1 scope note:
 
-1. **Spans.** `spec/02` §F rule 4 excludes source spans from the Core IR, and
-   the M0 AST does not carry spans either. So a check run today has no byte
-   offsets to attach: `Diagnostic.span` and `Edit.span` are `Option` and are
-   currently `None`. The `code`, `message`, and fix `title`/`new_text` are
-   always populated — an agent already learns *what* to insert — and the
-   byte-precise location fills in once the front end threads spans through
-   lowering. This is a wiring task, not a checker change.
+1. **Spans are definition-granular.** `spec/02` §F rule 4 excludes source spans
+   from the Core IR, so the checker — which runs over Core — emits `None` for
+   `Diagnostic.span`/`Edit.span`. Real source spans are stamped one layer up: the
+   `marv-db` analysis pass pairs each diagnostic with its definition's header span
+   (from the parser's `ItemSpan`s) and resolves a fix's insertion point where one
+   is mechanically derivable (MARV-12). So on the wire a *source* diagnostic
+   points at its **definition's header**, not yet at an exact sub-expression —
+   that finer grain would need a Core→source map the identity model omits.
+   Core-ingested files have no source text, so their spans stay `null`. The
+   `code`, `message`, and fix `title`/`new_text` are always populated regardless.
 
 2. **Which rules the front end can reach.** The front end now emits `fn`/`struct`/`enum`
    over arithmetic, `if`, `match`, calls, enum constructors, field access, **struct literals
