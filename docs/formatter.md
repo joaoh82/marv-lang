@@ -35,7 +35,12 @@ When the input parses, the formatter applies every canonical rule:
 | Trailing commas / semicolons | removed |
 | Integer literals | `1_000` → `1000` |
 | String escapes | normalized (`\n`, `\t`, `\r`, `\"`, `\\`) |
+| Doc comments (`///`) | preserved on the item below them, normalized to one `/// text` line each (single leading space, trailing whitespace trimmed); `//` and `////…` are ordinary comments and dropped |
 | File ending | exactly one trailing newline |
+
+Doc comments are **preserved** by the formatter (MARV-12) but are **excluded
+from a definition's content hash** (`spec/02` §F — they are not part of identity),
+so adding or rewording a `///` block is a free, hash-stable edit.
 
 The covered subset is module headers, imports, `struct`/`fn` declarations
 (`pure fn`, `linear struct`), the type language (named, `[]T`, `&`/`&mut`, `()`),

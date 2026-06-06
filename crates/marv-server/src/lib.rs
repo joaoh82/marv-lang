@@ -30,7 +30,7 @@ use std::io::{BufRead, Write};
 use marv_core::symbol_hash;
 use marv_db::{
     analyze, repair_core_text, DefInfo, DiagInfo, FileAnalysis, MarvDatabase, SourceFile,
-    SourceKind,
+    SourceKind, SrcSpan,
 };
 use serde_json::{json, Value};
 
@@ -459,7 +459,12 @@ impl Server {
                 .find(|d| d.qualified == name || d.name == name)
             {
                 let outcome = marv_verify::verify_def(&vd.def, &vd.params);
-                return Ok(verify_result_json(&outcome));
+                let mut result = verify_result_json(&outcome);
+                // Point the agent at the verified definition's source (MARV-12).
+                if let (Some(s), Some(obj)) = (vd.span.as_ref(), result.as_object_mut()) {
+                    obj.insert("relatedSpan".into(), span_json(&f.path, Some(s)));
+                }
+                return Ok(result);
             }
         }
         Err(RpcError::app(format!("unknown definition `{name}`")))
@@ -529,13 +534,14 @@ impl Server {
             .find(|f| f.path == file)
             .ok_or_else(|| RpcError::app(format!("unknown file `{file}`")))?;
         let analysis = self.analyze_file(f);
-        // The enclosing definition is the one whose header byte is the greatest
-        // not exceeding the offset (spans are not threaded yet — def-granular).
+        // The enclosing definition is the one whose header starts at the greatest
+        // byte not exceeding the offset. Spans are real but def-granular (the Core
+        // IR is span-free by design), so `typeAt` resolves to the whole def.
         let enclosing = analysis
             .defs
             .iter()
-            .filter(|d| d.decl_byte.map(|b| b <= byte).unwrap_or(false))
-            .max_by_key(|d| d.decl_byte.unwrap());
+            .filter(|d| d.span.map(|s| s.start_byte <= byte).unwrap_or(false))
+            .max_by_key(|d| d.span.unwrap().start_byte);
         match enclosing {
             Some(d) => {
                 let params_ty: Vec<&str> = d.params.iter().map(|p| p.ty.as_str()).collect();
@@ -543,6 +549,7 @@ impl Server {
                     "def": d.qualified,
                     "type": format!("fn({}) -> {}", params_ty.join(", "), d.ret),
                     "effects": d.effects,
+                    "span": span_json(&f.path, d.span.as_ref()),
                 }))
             }
             None => Err(RpcError::app("no definition encloses that offset")),
@@ -641,14 +648,27 @@ impl Server {
                 SourceKind::Core => repair_core_text(&f.text, def_name.as_deref())
                     .ok_or_else(|| RpcError::app("could not repair Core file"))?,
                 SourceKind::Source => {
-                    // Source fixes are textual edits; they need a resolved span,
-                    // which the front end does not thread yet (`spec/03` §2 span
-                    // scope-honesty). Apply edits if present, else report it.
-                    return Err(RpcError::app(
-                        "this fix has no resolvable source span yet (spans are not threaded \
-                         through the front end); applyFix currently mechanizes the Core-level \
-                         capability/error repairs",
-                    ));
+                    // Source fixes are textual edits at the resolved offsets the
+                    // front end now threads (MARV-12). Apply the first fix whose
+                    // every edit carries a span; otherwise report that this
+                    // diagnostic's fix has no resolvable source location yet.
+                    let edits = diag
+                        .fixes
+                        .iter()
+                        .find(|fx| {
+                            !fx.edits.is_empty() && fx.edits.iter().all(|e| e.span.is_some())
+                        })
+                        .map(|fx| fx.edits.as_slice());
+                    match edits {
+                        Some(edits) => apply_src_edits(&f.text, edits)?,
+                        None => {
+                            return Err(RpcError::app(
+                                "this fix has no resolvable source span (the reachable source \
+                                 diagnostics today carry no insertion fix); the Core-level \
+                                 capability/error repairs are mechanized over ingested Core",
+                            ));
+                        }
+                    }
                 }
             };
             let input = SourceFile::new(&self.db, f.path.clone(), f.kind, repaired.clone());
@@ -703,14 +723,43 @@ enum Direction {
     Callees,
 }
 
-/// Render a [`DiagInfo`] in the `spec/03` §2 wire shape. Spans are `null` (not
-/// threaded through the front end yet — §2 span scope-honesty); every other
-/// field is populated, and each fix's `newText` is always present.
+/// Apply a fix's resolved edits to source text, replacing each edit's byte span
+/// with its `new_text`. Edits are applied right-to-left (highest start byte
+/// first) so earlier offsets stay valid (MARV-12).
+fn apply_src_edits(text: &str, edits: &[marv_db::EditInfo]) -> Result<String, RpcError> {
+    let mut spans: Vec<(usize, usize, &str)> = Vec::with_capacity(edits.len());
+    for e in edits {
+        let s = e
+            .span
+            .as_ref()
+            .ok_or_else(|| RpcError::app("fix edit has no resolved span"))?;
+        spans.push((s.start_byte as usize, s.end_byte as usize, &e.new_text));
+    }
+    spans.sort_by(|a, b| b.0.cmp(&a.0));
+    let mut buf = text.to_string();
+    for (start, end, new_text) in spans {
+        if start > end
+            || end > buf.len()
+            || !buf.is_char_boundary(start)
+            || !buf.is_char_boundary(end)
+        {
+            return Err(RpcError::app("fix edit span out of range"));
+        }
+        buf.replace_range(start..end, new_text);
+    }
+    Ok(buf)
+}
+
+/// Render a [`DiagInfo`] in the `spec/03` §2 wire shape. For source files the
+/// `span` is the enclosing definition's header (MARV-12); it is `null` for
+/// Core-ingested files (no source text). A fix edit carries its resolved span
+/// where the front end can derive one (e.g. the `MissingCapability` parameter
+/// point), else `null`; `newText` is always present.
 fn diag_to_json(file: &SnapFile, d: &DiagInfo) -> Value {
     json!({
         "code": d.code,
         "severity": d.severity,
-        "span": file_span_null(file),
+        "span": span_json(&file.path, d.span.as_ref()),
         "message": d.message,
         "related": d.related.iter()
             .map(|m| json!({"span": Value::Null, "message": m}))
@@ -719,17 +768,26 @@ fn diag_to_json(file: &SnapFile, d: &DiagInfo) -> Value {
             "title": fx.title,
             "confidence": fx.confidence,
             "edits": fx.edits.iter()
-                .map(|t| json!({"span": Value::Null, "newText": t}))
+                .map(|e| json!({"span": span_json(&file.path, e.span.as_ref()), "newText": e.new_text}))
                 .collect::<Vec<_>>(),
         })).collect::<Vec<_>>(),
     })
 }
 
-/// The diagnostic span is always `null` today, but we still record which file it
-/// belongs to in a sibling field elsewhere; kept as a function so the day spans
-/// land there is exactly one place to fill in.
-fn file_span_null(_file: &SnapFile) -> Value {
-    Value::Null
+/// Render an optional [`SrcSpan`] in the `spec/03` §2 wire shape — a file plus a
+/// UTF-8 byte interval and the `{line, col}` rendering of each endpoint — or
+/// `null` when there is no span.
+fn span_json(file: &str, span: Option<&SrcSpan>) -> Value {
+    match span {
+        Some(s) => json!({
+            "file": file,
+            "startByte": s.start_byte,
+            "endByte": s.end_byte,
+            "start": {"line": s.start_line, "col": s.start_col},
+            "end": {"line": s.end_line, "col": s.end_col},
+        }),
+        None => Value::Null,
+    }
 }
 
 /// Drive the server over a line-delimited JSON-RPC stream (one request object

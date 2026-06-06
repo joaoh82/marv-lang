@@ -16,12 +16,76 @@
 //! grain is the file, which already gives the milestone's "edit one file,
 //! recompute only it" property.
 
+use std::collections::HashMap;
+
 use marv_core::ir::*;
 use marv_core::{lower_module, DefEntry, LoweredModule};
-use marv_syntax::{ast, format_module, parse, Item, Module};
-use marv_types::{check_def, effect_row, World};
+use marv_syntax::{ast, format_module, parse_with_spans, Item, ItemSpan, Module};
+use marv_types::{check_def, effect_row, Code, World};
 
 use crate::corespec::CoreModuleSpec;
+
+/// A real source span (MARV-12): a UTF-8 byte interval plus the 0-based
+/// `{line, col}` rendering of each endpoint (`spec/03` §2). `col` is a byte
+/// offset within its line, matching `start_byte`/`end_byte`.
+///
+/// These are *source* spans threaded from the lexer/parser through to the
+/// distilled analysis; the Core IR itself stays span-free (it is the names-erased
+/// content identity, `spec/02` §F). A diagnostic's span is its definition's
+/// header — the grain real spans reach today (per-expression spans would require
+/// a Core→source map that the identity model deliberately omits).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, salsa::Update)]
+pub struct SrcSpan {
+    pub start_byte: u32,
+    pub end_byte: u32,
+    pub start_line: u32,
+    pub start_col: u32,
+    pub end_line: u32,
+    pub end_col: u32,
+}
+
+/// Maps byte offsets to 0-based `{line, col}` over one source file.
+struct LineIndex {
+    /// Byte offset at which each line starts (line 0 starts at byte 0).
+    line_starts: Vec<u32>,
+}
+
+impl LineIndex {
+    fn new(text: &str) -> Self {
+        let mut line_starts = vec![0u32];
+        for (i, b) in text.bytes().enumerate() {
+            if b == b'\n' {
+                line_starts.push(i as u32 + 1);
+            }
+        }
+        LineIndex { line_starts }
+    }
+
+    /// The 0-based `(line, col)` of a byte offset (`col` is the byte offset into
+    /// the line).
+    fn position(&self, byte: u32) -> (u32, u32) {
+        // The line is the greatest start not exceeding `byte`.
+        let line = match self.line_starts.binary_search(&byte) {
+            Ok(l) => l,
+            Err(l) => l - 1,
+        };
+        (line as u32, byte - self.line_starts[line])
+    }
+
+    /// Build a [`SrcSpan`] from a `(start_byte, end_byte)` pair.
+    fn span(&self, (lo, hi): (u32, u32)) -> SrcSpan {
+        let (start_line, start_col) = self.position(lo);
+        let (end_line, end_col) = self.position(hi);
+        SrcSpan {
+            start_byte: lo,
+            end_byte: hi,
+            start_line,
+            start_col,
+            end_line,
+            end_col,
+        }
+    }
+}
 
 /// How a workspace file is ingested (`spec/03` §3.1). See [`crate::corespec`] for
 /// why Core ingestion exists alongside source.
@@ -86,9 +150,10 @@ pub struct DefInfo {
     pub ensures: usize,
     /// This definition alone, canonically formatted (`marv/canonical` def scope).
     pub canonical: String,
-    /// Byte offset of the definition's header in source, for `marv/typeAt`
-    /// (`None` for Core-ingested files, which have no source text).
-    pub decl_byte: Option<u32>,
+    /// Real source span of the definition's header — keyword(s) through name
+    /// (MARV-12), for `marv/typeAt` and as the anchor for this def's diagnostics.
+    /// `None` for Core-ingested files, which have no source text.
+    pub span: Option<SrcSpan>,
 }
 
 #[derive(Debug, Clone, PartialEq, salsa::Update)]
@@ -97,9 +162,10 @@ pub struct ParamInfo {
     pub ty: String,
 }
 
-/// A diagnostic distilled to its wire-relevant fields. Spans are absent — the
-/// AST/Core carry none yet (`spec/03` §2 span scope-honesty), so the wire form
-/// renders them as `null`.
+/// A diagnostic distilled to its wire-relevant fields. For source files `span` is
+/// the enclosing definition's header (MARV-12); it is `None` for Core-ingested
+/// files (no source text). Related locations and fix edits carry resolved spans
+/// where the front end can derive them.
 #[derive(Debug, Clone, PartialEq, salsa::Update)]
 pub struct DiagInfo {
     pub code: String,
@@ -107,6 +173,8 @@ pub struct DiagInfo {
     pub message: String,
     /// Qualified name of the definition this diagnostic was raised in.
     pub def: Option<String>,
+    /// The diagnostic's source span (the def header), or `None` for Core files.
+    pub span: Option<SrcSpan>,
     /// Messages of related locations.
     pub related: Vec<String>,
     pub fixes: Vec<FixInfo>,
@@ -115,10 +183,19 @@ pub struct DiagInfo {
 #[derive(Debug, Clone, PartialEq, salsa::Update)]
 pub struct FixInfo {
     pub title: String,
-    /// The `newText` of each edit (insertion points are unresolved — spans not
-    /// threaded yet — so only the inserted text is meaningful).
-    pub edits: Vec<String>,
+    pub edits: Vec<EditInfo>,
     pub confidence: f32,
+}
+
+/// One edit of a [`FixInfo`]: the text to insert/replace and, where the front end
+/// can resolve it, the source span it lands at (MARV-12). A `None` span means the
+/// insertion point is not mechanically derivable (e.g. a Core-ingested file, or a
+/// fix whose location the def-granular spans do not pin down); `new_text` is
+/// always meaningful.
+#[derive(Debug, Clone, PartialEq, salsa::Update)]
+pub struct EditInfo {
+    pub span: Option<SrcSpan>,
+    pub new_text: String,
 }
 
 /// Module-qualify a definition name.
@@ -147,6 +224,10 @@ pub struct VerifyDef {
     pub qualified: String,
     pub def: Def,
     pub params: Vec<String>,
+    /// Real source span of the definition's header (MARV-12), so `marv/verify`
+    /// can report a `relatedSpan` pointing at the contract's definition. `None`
+    /// for Core-ingested files.
+    pub span: Option<SrcSpan>,
 }
 
 /// Recover the full Core definitions of a file for verification (`marv/verify`).
@@ -156,20 +237,28 @@ pub struct VerifyDef {
 pub fn verify_inputs(kind: SourceKind, text: &str) -> Result<(String, Vec<VerifyDef>), String> {
     match kind {
         SourceKind::Source => {
-            let module = parse(text).map_err(|e| format!("parse error: {e}"))?;
+            let (module, item_spans) =
+                parse_with_spans(text).map_err(|e| format!("parse error: {e}"))?;
             let module_path = module.name.join(".");
             let lowered = lower_module(&module).map_err(|e| format!("lower error: {e}"))?;
+            let line_index = LineIndex::new(text);
+            let spans_by_name: HashMap<&str, &ItemSpan> =
+                item_spans.iter().map(|s| (s.name.as_str(), s)).collect();
             let defs = lowered
                 .defs
                 .into_iter()
                 .map(|e| {
                     let params = source_fn_params(&module, &e.name);
                     let qualified = qualify(&module_path, &e.name);
+                    let span = spans_by_name
+                        .get(e.name.as_str())
+                        .map(|s| line_index.span(s.header));
                     VerifyDef {
                         name: e.name,
                         qualified,
                         def: e.def,
                         params,
+                        span,
                     }
                 })
                 .collect();
@@ -189,6 +278,7 @@ pub fn verify_inputs(kind: SourceKind, text: &str) -> Result<(String, Vec<Verify
                         qualified,
                         def: d.def,
                         params: d.params,
+                        span: None,
                     }
                 })
                 .collect();
@@ -212,8 +302,8 @@ fn source_fn_params(module: &Module, name: &str) -> Vec<String> {
 // ---- source pipeline ----------------------------------------------------
 
 fn analyze_source(text: &str) -> FileAnalysis {
-    let module = match parse(text) {
-        Ok(m) => m,
+    let (module, item_spans) = match parse_with_spans(text) {
+        Ok(ms) => ms,
         Err(e) => return parse_failed(text.to_string(), format!("parse error: {e}")),
     };
     let module_path = module.name.join(".");
@@ -229,16 +319,33 @@ fn analyze_source(text: &str) -> FileAnalysis {
     // converges because rows only grow and are bounded by the program's errors.
     let world = world_with_propagated_effects(&lowered);
 
+    // Real source spans (MARV-12): map each definition to its parsed item span,
+    // and convert byte offsets to {line, col} via a line index over the file.
+    let line_index = LineIndex::new(text);
+    let spans_by_name: HashMap<&str, &ItemSpan> =
+        item_spans.iter().map(|s| (s.name.as_str(), s)).collect();
+
     let mut defs = Vec::with_capacity(lowered.defs.len());
     let mut diagnostics = Vec::new();
     for entry in &lowered.defs {
         let qualified = qualify(&module_path, &entry.name);
+        let item_span = spans_by_name.get(entry.name.as_str()).copied();
+        let header = item_span.map(|s| line_index.span(s.header));
+        // The capability fix inserts a leading parameter just inside `(`; that
+        // is a resolved zero-width insertion point for a `MissingCapability` fix.
+        let cap_edit = item_span
+            .and_then(|s| s.param_insert)
+            .map(|p| line_index.span((p, p)));
         for d in check_def(&world, &entry.def, Some(&entry.name)) {
-            diagnostics.push(diag_to_info(&d, Some(qualified.clone())));
+            let edit_span = if d.code == Code::MissingCapability {
+                cap_edit
+            } else {
+                None
+            };
+            diagnostics.push(diag_to_info(&d, Some(qualified.clone()), header, edit_span));
         }
         let row = effect_row(&world, &entry.def);
-        let (params, ret, is_pure, def_canonical, decl_byte) =
-            source_signature(&module, &entry.name, text);
+        let (params, ret, is_pure, def_canonical) = source_signature(&module, &entry.name);
         defs.push(DefInfo {
             name: entry.name.clone(),
             qualified,
@@ -254,7 +361,7 @@ fn analyze_source(text: &str) -> FileAnalysis {
             requires: entry.def.requires.len(),
             ensures: entry.def.ensures.len(),
             canonical: def_canonical,
-            decl_byte,
+            span: header,
         });
     }
 
@@ -271,11 +378,7 @@ fn analyze_source(text: &str) -> FileAnalysis {
 /// canonical text, and source byte offset from the AST. Types are rendered in
 /// their *surface* spelling (`Fs`, `str`, `&i32`) rather than the names-erased
 /// Core form.
-fn source_signature(
-    module: &Module,
-    name: &str,
-    text: &str,
-) -> (Vec<ParamInfo>, String, bool, String, Option<u32>) {
+fn source_signature(module: &Module, name: &str) -> (Vec<ParamInfo>, String, bool, String) {
     for item in &module.items {
         match item {
             Item::Fn(f) if f.name == name => {
@@ -292,14 +395,7 @@ fn source_signature(
                     .as_ref()
                     .map(surface_ty)
                     .unwrap_or_else(|| "()".into());
-                let decl = find_decl_byte(text, "fn", name);
-                return (
-                    params,
-                    ret,
-                    f.is_pure,
-                    one_def_canonical(module, item),
-                    decl,
-                );
+                return (params, ret, f.is_pure, one_def_canonical(module, item));
             }
             Item::Struct(s) if s.name == name => {
                 let params = s
@@ -310,19 +406,17 @@ fn source_signature(
                         ty: surface_ty(&fld.ty),
                     })
                     .collect();
-                let decl = find_decl_byte(text, "struct", name);
                 return (
                     params,
                     name.to_string(),
                     true,
                     one_def_canonical(module, item),
-                    decl,
                 );
             }
             _ => {}
         }
     }
-    (Vec::new(), "()".into(), false, String::new(), None)
+    (Vec::new(), "()".into(), false, String::new())
 }
 
 /// Render an item by itself in canonical form (a module containing only it,
@@ -339,14 +433,6 @@ fn one_def_canonical(module: &Module, item: &Item) -> String {
         Some((_header, rest)) => rest.to_string(),
         None => full,
     }
-}
-
-/// The byte offset where `<kw> <name>` (optionally `pure fn`/`linear struct`)
-/// begins in source — a best-effort anchor for `marv/typeAt` until real spans
-/// are threaded.
-fn find_decl_byte(text: &str, kw: &str, name: &str) -> Option<u32> {
-    let needle = format!("{kw} {name}");
-    text.find(&needle).map(|i| i as u32)
 }
 
 fn surface_ty(t: &ast::Type) -> String {
@@ -388,7 +474,8 @@ fn analyze_core(text: &str) -> FileAnalysis {
     for d in &spec.defs {
         let qualified = qualify(&module_path, &d.name);
         for diag in check_def(&world, &d.def, Some(&d.name)) {
-            diagnostics.push(diag_to_info(&diag, Some(qualified.clone())));
+            // Core-ingested files have no source text, so no spans to attach.
+            diagnostics.push(diag_to_info(&diag, Some(qualified.clone()), None, None));
         }
         let row = effect_row(&world, &d.def);
         let (param_tys, ret_ty, _eff) = peel_arrow(&d.def.ty);
@@ -419,7 +506,7 @@ fn analyze_core(text: &str) -> FileAnalysis {
             requires: d.def.requires.len(),
             ensures: d.def.ensures.len(),
             canonical: String::new(),
-            decl_byte: None,
+            span: None,
         });
     }
 
@@ -538,19 +625,36 @@ fn core_json(body: &Option<Core>) -> String {
     serde_json::to_string(body).unwrap_or_else(|_| "null".to_string())
 }
 
-fn diag_to_info(d: &marv_types::Diagnostic, def: Option<String>) -> DiagInfo {
+/// Distil a checker [`Diagnostic`] to its wire fields. `span` is the enclosing
+/// definition's header span (`None` for Core files); `edit_span` is the resolved
+/// insertion point for this diagnostic's fix edits where one is derivable (the
+/// `MissingCapability` parameter-list point), else `None`.
+fn diag_to_info(
+    d: &marv_types::Diagnostic,
+    def: Option<String>,
+    span: Option<SrcSpan>,
+    edit_span: Option<SrcSpan>,
+) -> DiagInfo {
     DiagInfo {
         code: d.code.as_str().to_string(),
         severity: d.severity.as_str().to_string(),
         message: d.message.clone(),
         def,
+        span,
         related: d.related.iter().map(|r| r.message.clone()).collect(),
         fixes: d
             .fixes
             .iter()
             .map(|f| FixInfo {
                 title: f.title.clone(),
-                edits: f.edits.iter().map(|e| e.new_text.clone()).collect(),
+                edits: f
+                    .edits
+                    .iter()
+                    .map(|e| EditInfo {
+                        span: edit_span,
+                        new_text: e.new_text.clone(),
+                    })
+                    .collect(),
                 confidence: f.confidence,
             })
             .collect(),

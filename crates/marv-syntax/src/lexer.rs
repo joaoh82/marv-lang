@@ -7,11 +7,22 @@
 //! `(x)` reads as two block elements, not as the call `foo(x)`, because a `Nl`
 //! sits between them and the expression parser stops at it.
 //!
-//! Leading newlines and `//` line comments are dropped. Doc comments (`///`) are
-//! not part of identity (`spec/02` §D) and are likewise dropped in M0.
+//! Leading newlines and `//` line comments are dropped. **Doc comments (`///`)**
+//! are kept — they lex to a [`Tok::Doc`] carrying the comment text and attach to
+//! the following item in the AST (`spec/02` §D). They remain excluded from a
+//! definition's content hash (`spec/02` §F — not part of identity); only the
+//! formatter and the AST preserve them.
+//!
+//! ## Spans (MARV-12)
+//!
+//! [`lex_spanned`] returns, alongside the token stream, a parallel vector of
+//! `(start_byte, end_byte)` UTF-8 byte ranges — one per token. The parser carries
+//! these through so a definition's header, signature, and capability-insertion
+//! point have real source offsets, which the checker's diagnostics, `marv/typeAt`,
+//! `marv/verify`, and `marv/applyFix` then report (`spec/03` §2). They are *source*
+//! spans only; the Core IR still carries none (it is the names-erased identity).
 
-/// A lexical token. Spans are intentionally omitted in M0 — the front end's job
-/// here is the round-trip property, not diagnostics (those arrive in M2).
+/// A lexical token.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Tok {
     // Keywords (the M0 subset of `spec/02` §A `keyword`).
@@ -44,6 +55,11 @@ pub enum Tok {
     Int(i64),
     Str(String),
     Char(char),
+
+    /// A doc comment line (`/// text`), carrying the text after `///` with a
+    /// single leading space stripped and trailing whitespace trimmed. Attaches
+    /// to the item that follows it (`spec/02` §D); excluded from content hashes.
+    Doc(String),
 
     // Punctuation / delimiters.
     LParen,
@@ -134,18 +150,29 @@ fn is_ident_continue(c: char) -> bool {
     c == '_' || c.is_ascii_alphanumeric()
 }
 
-/// Tokenize `src` into a flat token stream terminated by [`Tok::Eof`].
-pub fn lex(src: &str) -> Result<Vec<Tok>, LexError> {
+/// The token stream plus a parallel vector of `(start_byte, end_byte)` byte
+/// ranges — one entry per token (see [`lex_spanned`]).
+pub type SpannedTokens = (Vec<Tok>, Vec<(u32, u32)>);
+
+/// Tokenize `src`, returning the token stream and a parallel vector of
+/// `(start_byte, end_byte)` UTF-8 byte ranges — one entry per token, including
+/// the terminating [`Tok::Eof`] (a zero-width span at end of input). The parser
+/// threads these so definitions carry real source spans (MARV-12).
+pub fn lex_spanned(src: &str) -> Result<SpannedTokens, LexError> {
     let chars: Vec<char> = src.chars().collect();
+    // Byte offset of each char (and the total at the end), so a token spanning
+    // char indices `[a, b)` has byte range `(byte_of[a], byte_of[b])`.
+    let mut byte_of: Vec<u32> = Vec::with_capacity(chars.len() + 1);
+    let mut b = 0u32;
+    for c in &chars {
+        byte_of.push(b);
+        b += c.len_utf8() as u32;
+    }
+    byte_of.push(b);
+
     let mut i = 0;
     let mut out: Vec<Tok> = Vec::new();
-
-    // Push a `Nl`, collapsing runs and never emitting a leading newline.
-    let push_nl = |out: &mut Vec<Tok>| {
-        if !out.is_empty() && out.last() != Some(&Tok::Nl) {
-            out.push(Tok::Nl);
-        }
-    };
+    let mut spans: Vec<(u32, u32)> = Vec::new();
 
     while i < chars.len() {
         let c = chars[i];
@@ -158,29 +185,54 @@ pub fn lex(src: &str) -> Result<Vec<Tok>, LexError> {
                 i += 1; // handle the matching '\n' (if any) on its own
             }
             '\n' => {
-                push_nl(&mut out);
+                // Push a `Nl`, collapsing runs and never emitting a leading one.
+                if !out.is_empty() && out.last() != Some(&Tok::Nl) {
+                    out.push(Tok::Nl);
+                    spans.push((byte_of[i], byte_of[i + 1]));
+                }
                 i += 1;
             }
+            // A doc comment `/// text` (but not `////…`, which is an ordinary
+            // comment): keep it as a `Doc` token. `//` and `////+` are dropped.
+            '/' if is_doc_comment(&chars, i) => {
+                let start = i;
+                i += 3; // past `///`
+                while i < chars.len() && chars[i] != '\n' {
+                    i += 1;
+                }
+                let raw: String = chars[start + 3..i].iter().collect();
+                // Strip a single leading space and trailing whitespace so the
+                // text round-trips through the canonical `/// text` spelling.
+                let text = raw.strip_prefix(' ').unwrap_or(&raw).trim_end().to_string();
+                out.push(Tok::Doc(text));
+                spans.push((byte_of[start], byte_of[i]));
+            }
             '/' if chars.get(i + 1) == Some(&'/') => {
-                // Line comment (covers `//` and `///`): skip to end of line; the
-                // newline itself is handled on the next iteration.
+                // Ordinary line comment (`//` or `////…`): skip to end of line;
+                // the newline itself is handled on the next iteration.
                 while i < chars.len() && chars[i] != '\n' {
                     i += 1;
                 }
             }
             '"' => {
+                let start = i;
                 let (s, next) = lex_string(&chars, i)?;
                 out.push(Tok::Str(s));
+                spans.push((byte_of[start], byte_of[next]));
                 i = next;
             }
             '\'' => {
+                let start = i;
                 let (c, next) = lex_char(&chars, i)?;
                 out.push(Tok::Char(c));
+                spans.push((byte_of[start], byte_of[next]));
                 i = next;
             }
             c if c.is_ascii_digit() => {
+                let start = i;
                 let (n, next) = lex_int(&chars, i)?;
                 out.push(Tok::Int(n));
+                spans.push((byte_of[start], byte_of[next]));
                 i = next;
             }
             c if is_ident_start(c) => {
@@ -191,17 +243,31 @@ pub fn lex(src: &str) -> Result<Vec<Tok>, LexError> {
                 }
                 let word: String = chars[start..i].iter().collect();
                 out.push(keyword(&word).unwrap_or(Tok::Ident(word)));
+                spans.push((byte_of[start], byte_of[i]));
             }
             _ => {
+                let start = i;
                 let (tok, next) = lex_punct(&chars, i)?;
                 out.push(tok);
+                spans.push((byte_of[start], byte_of[next]));
                 i = next;
             }
         }
     }
 
     out.push(Tok::Eof);
-    Ok(out)
+    spans.push((b, b));
+    debug_assert_eq!(out.len(), spans.len());
+    Ok((out, spans))
+}
+
+/// Whether the `/` at index `i` opens a doc comment: exactly `///` not followed
+/// by a fourth `/` (so `////…` is an ordinary comment, matching Rust).
+fn is_doc_comment(chars: &[char], i: usize) -> bool {
+    chars.get(i) == Some(&'/')
+        && chars.get(i + 1) == Some(&'/')
+        && chars.get(i + 2) == Some(&'/')
+        && chars.get(i + 3) != Some(&'/')
 }
 
 /// Lex a string literal starting at the opening `"` (index `start`). Returns the

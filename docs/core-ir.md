@@ -47,6 +47,9 @@ tests pin down:
 - A definition's own name is **not** part of its identity (`add` and `plus` with
   identical bodies hash the same), but a *called* function's name **is** (calling
   `neg` vs `negate` differs).
+- Source spans and `///` **doc comments** are **not** part of identity either
+  (`spec/02` §F) — they live in the AST/source layer, so adding or rewording a
+  doc block on a definition leaves its hash unchanged (MARV-12).
 - Structurally identical structs deduplicate (field *names* are erased; field
   order and `linear`-ness are significant).
 

@@ -7,16 +7,19 @@
 //! declared set, a non-exhaustive `match`, an unused/duplicated `linear` value,
 //! and an escaping reference.
 //!
-//! ## Spans are optional (scope honesty)
+//! ## Spans are optional (the checker runs over span-free Core)
 //!
-//! `spec/02` §F rule 4 excludes source spans from the Core IR, and the M0 AST
-//! does not carry spans either, so a check run over Core today has *no* byte
-//! offsets to attach. [`Diagnostic::span`] and [`Edit::span`] are therefore
-//! [`Option`]: the diagnostic's `code`/`message`/`fixes` are always populated,
-//! and the byte-precise insertion point of an edit fills in once the front end
-//! threads spans through lowering (a documented future wiring, mirroring the M1
-//! "scope honesty" note). The `new_text` of every fix is always present, so an
-//! agent already learns *what* to insert.
+//! `spec/02` §F rule 4 excludes source spans from the Core IR, so the checker —
+//! which runs over Core — has no byte offsets of its own to attach.
+//! [`Diagnostic::span`] and [`Edit::span`] are therefore [`Option`] and the
+//! checker leaves them `None`; the `code`/`message`/`fixes` are always populated.
+//!
+//! Real source spans *are* surfaced to agents, but they are stamped one layer up:
+//! the `marv-db` analysis pass has both the parser's [`marv_syntax::ItemSpan`]s
+//! and the diagnostics, so it attaches each diagnostic to its definition's header
+//! span and resolves a fix's insertion point where one is mechanically derivable
+//! (MARV-12). Spans are therefore **definition-granular** — the grain real spans
+//! reach without a Core→source map the identity model deliberately omits.
 
 use std::fmt;
 
@@ -58,10 +61,10 @@ pub struct Span {
     pub end: Position,
 }
 
-/// A text edit (`spec/03` §2): replace the text in `span` with `new_text`. A
-/// `None` span is an insertion/replacement whose location is not yet known to
-/// the checker (see the module docs on span scope honesty); `new_text` is always
-/// meaningful.
+/// A text edit (`spec/03` §2): replace the text in `span` with `new_text`. The
+/// checker emits a `None` span (it runs over span-free Core); the `marv-db`
+/// analysis pass resolves the insertion point where one is derivable (see the
+/// module docs). `new_text` is always meaningful.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Edit {
     pub span: Option<Span>,

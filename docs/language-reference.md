@@ -23,8 +23,10 @@ subset). See [`spec/01`](../spec/01-design-spec.md) §1.
 ## 2. Lexical & surface
 
 - Files are UTF-8, extension `.mv`. **[impl]**
-- Comments: `//` line, `///` doc. No block comments. (Doc comments are currently dropped by
-  the formatter — see the roadmap.) **[impl]**
+- Comments: `//` line, `///` doc. No block comments. **[impl]** — `///` doc comments attach to
+  the item below them, are preserved by the canonical formatter (normalized to one `/// text`
+  line each), and are excluded from a definition's content hash (`spec/02` §F). `//` and `////…`
+  are ordinary comments and are dropped.
 - Bindings: `let` (immutable), `var` (mutable). There is no `null`. **[impl]** — `var`
   reassignment (`x = e`), field updates (`p.x = e`), and struct literals all parse, lower, and
   run (see §4). Assigning a `let` (or a parameter) is a compile error.

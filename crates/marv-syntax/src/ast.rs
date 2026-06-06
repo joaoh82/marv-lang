@@ -50,6 +50,49 @@ pub enum Item {
     Fn(FnDecl),
 }
 
+impl Item {
+    /// The declaration's source name.
+    pub fn name(&self) -> &str {
+        match self {
+            Item::Struct(d) => &d.name,
+            Item::Enum(d) => &d.name,
+            Item::Error(d) => &d.name,
+            Item::Fn(d) => &d.name,
+        }
+    }
+
+    /// The doc-comment lines attached to this item (see [`ErrorDecl::docs`]).
+    pub fn docs(&self) -> &[String] {
+        match self {
+            Item::Struct(d) => &d.docs,
+            Item::Enum(d) => &d.docs,
+            Item::Error(d) => &d.docs,
+            Item::Fn(d) => &d.docs,
+        }
+    }
+}
+
+/// Real source spans for one top-level item, in UTF-8 byte offsets (MARV-12).
+///
+/// These are produced by [`crate::parse_with_spans`] and live *outside* the AST
+/// proper, so adding them never disturbs the `parse ∘ format == id` round-trip
+/// (which compares ASTs) nor the Core content hash (which never sees source
+/// text). They let the checker's diagnostics, `marv/typeAt`, `marv/verify`, and
+/// `marv/applyFix` report and resolve real offsets (`spec/03` §2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ItemSpan {
+    /// The item's source name, e.g. `"clamp"`. Matches the lowered `DefEntry`.
+    pub name: String,
+    /// Byte range of the declaration header — from the leading keyword/modifier
+    /// (`pure fn`, `linear struct`, `enum`, `error`) through the name. The anchor
+    /// a diagnostic or `typeAt` points at.
+    pub header: (u32, u32),
+    /// Byte offset just *inside* the parameter list's opening `(`, i.e. where a
+    /// new leading parameter is inserted (the `MissingCapability` fix's resolved
+    /// insertion point). `None` for non-`fn` items.
+    pub param_insert: Option<u32>,
+}
+
 /// `error Name { Variant, Variant, ... }` (`spec/02` §B `error_decl`,
 /// `spec/01` §6). An error type is an enum-like sum whose variants are bare
 /// (payload-free) names; a function's *error set* is inferred from the errors
@@ -57,6 +100,10 @@ pub enum Item {
 /// Variants are kept in declaration order, which fixes their tag.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ErrorDecl {
+    /// Doc-comment lines (`///`) immediately preceding the declaration, in order,
+    /// each without its `///` prefix. Preserved by the formatter but excluded from
+    /// the Core content hash (`spec/02` §F — not part of identity).
+    pub docs: Vec<String>,
     pub name: String,
     /// Variant names in declaration order; always non-empty (the grammar
     /// requires at least one).
@@ -66,6 +113,8 @@ pub struct ErrorDecl {
 /// `[linear] struct Name { field: Type, ... }`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StructDecl {
+    /// Doc-comment lines preceding the declaration (see [`ErrorDecl::docs`]).
+    pub docs: Vec<String>,
     pub linear: bool,
     pub name: String,
     pub fields: Vec<Field>,
@@ -83,6 +132,8 @@ pub struct Field {
 /// tag (`spec/02` §C — `Match` branches are ordered by variant tag).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EnumDecl {
+    /// Doc-comment lines preceding the declaration (see [`ErrorDecl::docs`]).
+    pub docs: Vec<String>,
     pub name: String,
     /// Generic type parameter names, e.g. `["T"]` for `enum Option[T]`. Empty
     /// when the enum is monomorphic.
@@ -106,6 +157,8 @@ pub struct Variant {
 /// expressions in the ordinary expression language (lowered to `Pred`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FnDecl {
+    /// Doc-comment lines preceding the declaration (see [`ErrorDecl::docs`]).
+    pub docs: Vec<String>,
     pub is_pure: bool,
     pub name: String,
     /// Generic type parameter names, e.g. `["T"]` for `fn is_some[T](...)`.

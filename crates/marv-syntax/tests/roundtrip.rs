@@ -157,10 +157,26 @@ fn gen_struct(rng: &mut Rng) -> StructDecl {
         })
         .collect();
     StructDecl {
+        docs: gen_docs(rng),
         linear,
         name,
         fields,
     }
+}
+
+/// A 0–3 line doc-comment block drawn from a clean phrase pool (no leading or
+/// trailing whitespace, so it round-trips through the canonical `/// text` form).
+fn gen_docs(rng: &mut Rng) -> Vec<String> {
+    const DOC_LINES: &[&str] = &[
+        "Documents this item.",
+        "A second line of prose.",
+        "",
+        "Returns the clamped value.",
+        "See `spec/01`.",
+    ];
+    (0..rng.below(4))
+        .map(|_| rng.pick(DOC_LINES).to_string())
+        .collect()
 }
 
 fn gen_fn(rng: &mut Rng) -> FnDecl {
@@ -182,6 +198,7 @@ fn gen_fn(rng: &mut Rng) -> FnDecl {
     // Contracts have their own targeted round-trip test (`contracts.rs`); the
     // fuzzer leaves them empty so it does not need a boolean-expression generator.
     FnDecl {
+        docs: gen_docs(rng),
         is_pure,
         name,
         generics,
