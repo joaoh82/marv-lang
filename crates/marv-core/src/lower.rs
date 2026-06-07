@@ -218,6 +218,33 @@ pub struct InterfaceInfo {
     pub name: String,
     /// The interface's method names, in declaration order.
     pub methods: Vec<String>,
+    /// Whether this interface is a **capability** (`spec/01` §5). A capability
+    /// interface is a *non-generic* interface: its method calls on a value of
+    /// the interface type lower to [`Core::Perform`] / narrowing rather than to
+    /// impl-dispatched ordinary calls. Generic interfaces (`Ord[T]`) are bounded
+    /// polymorphism and stay `false`. This is the single signal the rest of the
+    /// toolchain (`marv-types`' [`World`](../../marv_types/struct.World.html), the
+    /// backends) uses to recognise a capability type.
+    pub is_capability: bool,
+    /// Per-method lowered signatures, in declaration order — the operand and
+    /// result types a [`Core::Perform`] site is checked against. The first
+    /// parameter of each is the receiver (`&Self`/`Self`); consumers drop it to
+    /// recover the operation's operand types.
+    pub method_sigs: Vec<InterfaceMethod>,
+}
+
+/// One method of an [`InterfaceInfo`], with its types lowered to Core
+/// [`Type`]s. For a capability interface this is the source of an operation's
+/// [`OpSig`](../../marv_types/struct.OpSig.html).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InterfaceMethod {
+    pub name: String,
+    /// Parameter types in declaration order, *including* the receiver as
+    /// `params[0]`.
+    pub params: Vec<Type>,
+    /// The declared return type (a capability narrowing op returns another
+    /// capability type; `()` / `!T` otherwise).
+    pub ret: Type,
 }
 
 /// Metadata for a coherent `impl` (`spec/01` §3.4): the interface it implements,
@@ -471,6 +498,27 @@ struct MonoReg {
     /// from the full per-module [`ImplInfo`] list; this map keeps the last entry
     /// for dispatch.
     impls: HashMap<(String, String), ImplEntry>,
+    /// Capability interfaces by name (`spec/01` §5): a *non-generic* interface
+    /// whose method calls lower to [`Core::Perform`] / narrowing. Used to detect
+    /// a capability receiver at a method-call site and to recover the operation's
+    /// index and (narrowed) return type.
+    cap_ifaces: HashMap<String, CapIface>,
+}
+
+/// A capability interface in the registry: its methods, in declaration order, so
+/// a method name resolves to an [`OpId`] and a `let`-binding to a narrowing call
+/// recovers the narrowed capability's type.
+#[derive(Debug, Clone)]
+struct CapIface {
+    methods: Vec<CapMethod>,
+}
+
+/// One capability operation: its name (to find its [`OpId`] = position) and its
+/// surface return type (for narrowing-result inference in [`Lowerer::type_of_expr`]).
+#[derive(Debug, Clone)]
+struct CapMethod {
+    name: String,
+    ret: Option<SType>,
 }
 
 /// A generic function the registry can re-lower for each instantiation.
@@ -508,9 +556,29 @@ impl MonoReg {
                         );
                     }
                     Item::Interface(iface) => {
-                        for meth in &iface.methods {
-                            reg.method_iface
-                                .insert(meth.name.clone(), iface.name.clone());
+                        if iface.generics.is_empty() {
+                            // A capability interface (`spec/01` §5): record its
+                            // operations so calls on a value of this type lower to
+                            // `Perform`. It is *not* registered in `method_iface`
+                            // (there is no impl to dispatch to).
+                            reg.cap_ifaces.insert(
+                                iface.name.clone(),
+                                CapIface {
+                                    methods: iface
+                                        .methods
+                                        .iter()
+                                        .map(|m| CapMethod {
+                                            name: m.name.clone(),
+                                            ret: m.ret.clone(),
+                                        })
+                                        .collect(),
+                                },
+                            );
+                        } else {
+                            for meth in &iface.methods {
+                                reg.method_iface
+                                    .insert(meth.name.clone(), iface.name.clone());
+                            }
                         }
                     }
                     Item::Impl(imp) => {
@@ -709,9 +777,33 @@ impl Lowerer {
                 }
                 Item::Interface(iface) => {
                     push_def(&mut defs, iface.name.clone(), lower_interface(), None);
+                    // An interface's method signatures are lowered with its own
+                    // type parameters in scope (generic interfaces keep
+                    // `Type::Var`); a *non-generic* interface is a capability
+                    // (`spec/01` §5), whose method calls become `Perform`.
+                    let gnames = generic_names(&iface.generics);
+                    let method_sigs = iface
+                        .methods
+                        .iter()
+                        .map(|m| InterfaceMethod {
+                            name: m.name.clone(),
+                            params: m
+                                .params
+                                .iter()
+                                .map(|p| self.lower_type(&p.ty, &gnames))
+                                .collect(),
+                            ret: m
+                                .ret
+                                .as_ref()
+                                .map(|t| self.lower_type(t, &gnames))
+                                .unwrap_or(Type::Unit),
+                        })
+                        .collect();
                     interfaces.push(InterfaceInfo {
                         name: iface.name.clone(),
                         methods: iface.methods.iter().map(|s| s.name.clone()).collect(),
+                        is_capability: iface.generics.is_empty(),
+                        method_sigs,
                     });
                 }
                 Item::Impl(imp) => {
@@ -1008,11 +1100,23 @@ impl Lowerer {
             .as_ref()
             .map(|t| self.lower_type(t, &gnames))
             .unwrap_or(Type::Unit);
-        // M1 records declared purity only: `pure fn` ⇒ empty row; for a plain
-        // `fn` the row is left empty as a placeholder — effect/error inference is
-        // M2. The innermost arrow/lambda carries the row; partial-application
-        // arrows are pure.
-        let effects = EffectRow::empty();
+        // The declared **capability** row is the set of capability-typed
+        // parameters (`spec/01` §5 — power enters only through a capability
+        // parameter). `pure fn` asserts the empty row regardless. The error set
+        // stays inferred (a `@error-union` marker in the return type, not the
+        // row), so only caps are recorded here. The innermost arrow/lambda
+        // carries the row; partial-application arrows are pure.
+        let mut effects = EffectRow::empty();
+        if !f.is_pure {
+            for p in &f.params {
+                if let Some(cap) = self.cap_name_of(&self.subst_surface(&p.ty)) {
+                    let h = symbol_hash(&cap);
+                    if !effects.caps.contains(&h) {
+                        effects.caps.push(h);
+                    }
+                }
+            }
+        }
 
         let last = param_ctys.len() - 1;
         let mut lam = body_core;
@@ -1447,6 +1551,9 @@ impl Lowerer {
                     let node = self.emit_ctor(&c, args, env, b)?;
                     return Ok(b.push(node));
                 }
+                if let Some(node) = self.perform_call(callee, args, env, b)? {
+                    return Ok(b.push(node));
+                }
                 let (func, eff_args) = self.call_parts(callee, args, env, b)?;
                 let mut cur = func;
                 for arg_e in eff_args {
@@ -1539,6 +1646,9 @@ impl Lowerer {
                 }
                 if let Some(c) = self.callee_ctor(callee, env) {
                     return self.emit_ctor(&c, args, env, b);
+                }
+                if let Some(node) = self.perform_call(callee, args, env, b)? {
+                    return Ok(node);
                 }
                 let (func, eff_args) = self.call_parts(callee, args, env, b)?;
                 let n = eff_args.len();
@@ -2096,6 +2206,65 @@ impl Lowerer {
             .map(|x| x.atom.clone())
     }
 
+    // ---- capabilities (`spec/01` §5) -----------------------------------
+
+    /// The capability interface name a surface type denotes, if it is one. A
+    /// reference to a capability (`&Fs`) still authorizes that capability, so any
+    /// `&`/`&mut` is peeled first.
+    fn cap_name_of(&self, ty: &SType) -> Option<String> {
+        match peel_ref_ty(ty.clone()) {
+            SType::Named(p) if p.len() == 1 && self.mono.cap_ifaces.contains_key(&p[0]) => {
+                Some(p[0].clone())
+            }
+            _ => None,
+        }
+    }
+
+    /// Resolve a method call `recv.method(..)` whose receiver has surface type
+    /// `recv_ty` to a capability operation: the capability's name, the operation
+    /// index ([`OpId`]), and the operation's surface return type (for narrowing
+    /// inference). `None` when the receiver is not a capability or the method is
+    /// not one of its operations.
+    fn cap_method(&self, recv_ty: &SType, method: &str) -> Option<(String, u32, Option<SType>)> {
+        let cap = self.cap_name_of(recv_ty)?;
+        let iface = self.mono.cap_ifaces.get(&cap)?;
+        let idx = iface.methods.iter().position(|m| m.name == method)?;
+        Some((cap, idx as u32, iface.methods[idx].ret.clone()))
+    }
+
+    /// Lower a capability method call `recv.op(args)` to a [`Core::Perform`]
+    /// (`spec/01` §5): the receiver is the capability value, the remaining
+    /// arguments are the operands, and a narrowing op (`io.fs()`) yields a
+    /// narrowed capability value. Returns `None` when `callee` is not a
+    /// capability method call, leaving the ordinary call path to handle it.
+    fn perform_call(
+        &self,
+        callee: &Expr,
+        args: &[Expr],
+        env: &[Binding],
+        b: &mut Builder,
+    ) -> Result<Option<Core>, LowerError> {
+        let Expr::Field(recv, method) = callee else {
+            return Ok(None);
+        };
+        let Some(recv_ty) = self.type_of_expr(recv, env) else {
+            return Ok(None);
+        };
+        let Some((_cap, op, _ret)) = self.cap_method(&recv_ty, method) else {
+            return Ok(None);
+        };
+        let cap_atom = self.emit_atom(recv, env, b)?;
+        let mut arg_atoms = Vec::with_capacity(args.len());
+        for a in args {
+            arg_atoms.push(self.emit_atom(a, env, b)?);
+        }
+        Ok(Some(Core::Perform {
+            cap: cap_atom,
+            op: OpId(op),
+            args: arg_atoms,
+        }))
+    }
+
     // ---- types & projection --------------------------------------------
 
     /// Lower a surface type. `generics` are the type-parameter names in scope
@@ -2230,13 +2399,18 @@ impl Lowerer {
                     .find(|f| f.name == *field)
                     .map(|f| f.ty.clone())
             }
-            Expr::Call(callee, _) => {
-                if let Expr::Var(fname) = &**callee {
-                    self.fn_rets.get(fname).cloned().flatten()
-                } else {
-                    None
+            Expr::Call(callee, _) => match &**callee {
+                Expr::Var(fname) => self.fn_rets.get(fname).cloned().flatten(),
+                // A capability narrowing op (`io.fs()`) has the operation's
+                // declared return type, so `let fs = io.fs()` types `fs` as the
+                // narrowed capability and its later method calls also lower to
+                // `Perform`.
+                Expr::Field(recv, method) => {
+                    let rt = self.type_of_expr(recv, env)?;
+                    self.cap_method(&rt, method).and_then(|(_, _, ret)| ret)
                 }
-            }
+                _ => None,
+            },
             // A struct literal has the named struct's type, so a binding to it
             // (`let p = Point { .. }`) resolves field projections on `p`.
             Expr::Struct { path, .. } => Some(SType::Named(path.clone())),

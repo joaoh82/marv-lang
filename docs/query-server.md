@@ -103,16 +103,15 @@ Three boundaries are worth stating plainly, continuing the M1/M2 notes:
    Core→source map). Core-ingested files have no source text, so their spans stay
    `null`. The `code`, `message`, and each fix's `newText` are always present.
 
-2. **Driving the capability rules needs Core ingestion.** The M0 front end emits
-   no `perform`/`raise`/enum/`linear` forms, so a capability or error-set misuse
-   cannot be *written* in `.mv` source yet (see `checker.md`). Because the
-   protocol is agent-facing and agents hold Core directly, a snapshot file may be
-   ingested as a Core module (`spec/03` §3.1). This is what lets the spec's
-   missing-`Fs` example run end to end through the *real* checker. The same
-   `applyFix` over a Core file makes the declaration honest — it sets the
-   definition's declared effect row to what its body actually exercises
-   (`marv_types::effect_row`), the structured equivalent of inserting `fs: Fs`
-   into a signature.
+2. **Capability rules now fire from source, too.** Capability `perform`/narrowing
+   and `error`/`raise` are expressible in `.mv` source (MARV-3, MARV-6), so a
+   capability or error-set misuse — e.g. a `pure fn` that calls a capability
+   method — is reported as `E0110` directly from source (see `checker.md`).
+   Because the protocol is agent-facing and agents may hold Core directly, a
+   snapshot file can still be ingested as a Core module (`spec/03` §3.1) to drive
+   the same checker over hand-authored IR. `applyFix` over either form makes the
+   declaration honest — adding the missing capability parameter, the structured
+   equivalent of inserting `fs: Fs` into a signature.
 
 3. **The prose example's `E0307` is `E0110`.** `spec/03` §6 fixes the real error
    numbering by check family (capabilities are `E011x`); the `E0307` in the §4.1

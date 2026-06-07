@@ -44,10 +44,11 @@ The integer/boolean core the M0/M1 front end can express and lower:
 
 Every scalar lives in a 64-bit register in *both* backends, so their wrapping
 arithmetic matches — the property that makes the differential test meaningful.
-Constructs with no surface form yet (aggregate runtime layout, `perform`,
-first-class closures, floats) are interpreted where the interpreter can, and the
-Cranelift backend returns an honest `unsupported` rather than emitting wrong
-code. New constructs land in *both* backends together so agreement is preserved.
+Constructs the Cranelift backend cannot lower (aggregate runtime layout,
+`perform` — now expressible from source, MARV-6 — first-class closures, floats)
+are interpreted where the interpreter can, and Cranelift returns an honest
+`unsupported` rather than emitting wrong code. New constructs land in *both*
+backends together so agreement is preserved.
 
 ## Capabilities are injected, never ambient
 
@@ -79,7 +80,9 @@ the results are equal to each other and to a hand-computed golden value:
 The negative case is `uses_ungranted_cap.core.json`: a Core-IR snapshot whose
 `leak(fs: Fs, path: str)` body `perform`s `Fs` while declaring the empty
 (`pure`) effect row. The real M2 checker reports `E0110` (missing capability),
-so `marv build` refuses it — it can never reach codegen. Run it yourself:
+so `marv build` refuses it — it can never reach codegen. The same diagnostic now
+fires *from source* — a `pure fn` that calls a capability method (e.g.
+`fs.read(path)`) is rejected before codegen (MARV-6). Run it yourself:
 
 ```sh
 marv build tests/run/uses_ungranted_cap.core.json   # E0110, exits non-zero

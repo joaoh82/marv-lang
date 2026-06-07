@@ -122,6 +122,34 @@ impl World {
     pub fn from_modules(ms: &[LoweredModule]) -> Self {
         let mut w = World::new();
         for m in ms {
+            // Capability interfaces (`spec/01` §5): a non-generic interface whose
+            // method calls lower to `Perform`. Each becomes a [`CapDecl`] keyed by
+            // its *bare* name's symbol hash — exactly the hash a `Type::Nominal`
+            // reference to the interface lowers to (interface names are never
+            // module-qualified) — so `synth_perform` resolves it. The receiver
+            // (`params[0]`) is dropped: an operation's operands are the remaining
+            // parameters.
+            for iface in &m.interfaces {
+                if !iface.is_capability {
+                    continue;
+                }
+                let ops = iface
+                    .method_sigs
+                    .iter()
+                    .map(|s| OpSig {
+                        params: s.params.iter().skip(1).cloned().collect(),
+                        ret: s.ret.clone(),
+                        errors: Vec::new(),
+                    })
+                    .collect();
+                w.caps.insert(
+                    symbol_hash(&iface.name),
+                    CapDecl {
+                        name: iface.name.clone(),
+                        ops,
+                    },
+                );
+            }
             let prefix = m.module.join(".");
             for entry in &m.defs {
                 let qualified = if prefix.is_empty() {
@@ -224,6 +252,49 @@ impl World {
     /// Whether `h` names a known capability type.
     pub fn is_cap(&self, h: &Hash) -> bool {
         self.caps.contains_key(h)
+    }
+
+    /// The set of capabilities a holder of `declared` is authorized to exercise:
+    /// the declared capabilities themselves plus everything reachable from them by
+    /// **narrowing** (`spec/01` §5 — attenuation). An operation whose result type
+    /// is itself a capability (`io.fs() -> Fs`) is a narrowing edge, so holding
+    /// `Io` authorizes the `Fs`/`Net`/… it can narrow to (transitively). Used by
+    /// the effect-row subsumption check so a body that narrows a held capability
+    /// is not flagged for a capability it never received ambiently.
+    pub fn authorized_caps(&self, declared: &[Hash]) -> std::collections::HashSet<Hash> {
+        let mut reachable: std::collections::HashSet<Hash> = std::collections::HashSet::new();
+        let mut stack: Vec<Hash> = declared.to_vec();
+        while let Some(h) = stack.pop() {
+            if !reachable.insert(h) {
+                continue;
+            }
+            if let Some(decl) = self.caps.get(&h) {
+                for op in &decl.ops {
+                    if let Type::Nominal { def, .. } = &op.ret {
+                        if self.caps.contains_key(def) && !reachable.contains(def) {
+                            stack.push(*def);
+                        }
+                    }
+                }
+            }
+        }
+        reachable
+    }
+
+    /// If capability `cap_name`'s operation `op` is a **narrowing** op — its
+    /// result type is itself a capability — return that narrowed capability's
+    /// display name. Used by the interpreter to give `let fs = io.fs()` a narrowed
+    /// capability value (`spec/01` §5) rather than a unit. `None` for an ordinary
+    /// (non-narrowing) operation or an unknown cap/op.
+    pub fn cap_op_narrows(&self, cap_name: &str, op: u32) -> Option<String> {
+        let decl = self.caps.values().find(|c| c.name == cap_name)?;
+        let sig = decl.ops.get(op as usize)?;
+        if let Type::Nominal { def, .. } = &sig.ret {
+            if let Some(narrowed) = self.caps.get(def) {
+                return Some(narrowed.name.clone());
+            }
+        }
+        None
     }
 
     /// The error declaration for a hash, if known.

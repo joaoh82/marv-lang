@@ -477,14 +477,21 @@ impl Program {
                     .iter()
                     .map(|a| self.eval_atom(a, env))
                     .collect::<Result<Vec<_>, _>>()?;
+                // A narrowing op (`io.fs()`) yields the narrowed capability value,
+                // so a later `fs.read(..)` performs against it (`spec/01` §5);
+                // every op is still recorded as an effect. Any other modeled host
+                // op returns unit — richer host behavior (real I/O) is layered in
+                // as the capability surface grows.
+                let narrowed = self.world.cap_op_narrows(&name, op.0);
                 eff.push(Effect {
                     cap: name,
                     op: op.0,
                     args,
                 });
-                // A modeled host op returns unit; richer host behavior (real I/O)
-                // is layered in as the capability surface grows.
-                Ok(Value::Unit)
+                match narrowed {
+                    Some(n) => Ok(Value::Cap(n)),
+                    None => Ok(Value::Unit),
+                }
             }
 
             Core::Raise { error, .. } => Err(RunError::Uncaught(self.world.error_name(error))),

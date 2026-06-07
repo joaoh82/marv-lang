@@ -1,0 +1,9 @@
+mod read_file
+import std.io (Io)
+
+/// Narrow the root capability to `Fs`, then read a file's bytes. The signature
+/// proves this can touch the filesystem and nothing else.
+fn main(io: Io, path: str) -> ![]u8 {
+    let fs = io.fs()
+    fs.read(path)
+}

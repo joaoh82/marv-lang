@@ -107,15 +107,18 @@ Two boundaries are worth stating plainly, in the spirit of the M1 scope note:
    Core-ingested files have no source text, so their spans stay `null`. The
    `code`, `message`, and fix `title`/`new_text` are always populated regardless.
 
-2. **Which rules the front end can reach.** The front end now emits `fn`/`struct`/`enum`
-   over arithmetic, `if`, `match`, calls, enum constructors, field access, **struct literals
-   and field/`var` assignment** (lowered to `Ctor`/`Proj`), and **index reads** (`Prim{Index}`)
-   — but no `perform`, `raise`, or `linear` consumption yet, and every lowered arrow currently
-   carries the empty effect row. So from real `.mv` source the reachable diagnostics today are
-   the type (`E0101`/`E0102`/`E0103`), returned-reference, struct-field-reference, **`match`
-   exhaustiveness (`E0130`)**, and — since MARV-4 — `Ctor` field-type and `Prim` index/operand
-   (`BadPrimOperand`) ones. The capability, error-set, and linear-consumption rules are
-   still exercised over hand-written Core IR (see `tests/rules.rs`). **The checker itself is
-   complete over the whole Core IR**, independent of which surface forms the parser accepts
-   yet; the remaining rules light up automatically as later milestones widen the grammar
-   (effect rows, `error`/`!T`, `?`, `linear` consumers).
+2. **Which rules the front end can reach.** The front end now emits `fn`/`struct`/`enum`/
+   `interface`/`impl` over arithmetic, `if`, `match`, calls, enum constructors, field access,
+   **struct literals and field/`var` assignment** (lowered to `Ctor`/`Proj`), **index reads**
+   (`Prim{Index}`), **`error`/`!T`/`?`** (lowered to `Raise` with inferred error sets, MARV-3),
+   and — since MARV-6 — **capability `perform` and narrowing**: a method call on a value of a
+   (non-generic) capability `interface` lowers to `Core::Perform`, a non-`pure` function's
+   declared effect row is the set of its capability parameters, and the body's inferred row is
+   checked against it (narrowing authorizes what a held capability attenuates to). So the
+   capability rules are now reachable from real `.mv` source — `E0110` (missing capability),
+   plus `E0111`/`E0112` over constructed Core — alongside the type (`E0101`/`E0102`/`E0103`),
+   returned-reference, struct-field-reference, **`match` exhaustiveness (`E0130`)**, `Ctor`
+   field-type, and `Prim` index/operand (`BadPrimOperand`) families. Linear *consumption* is
+   still exercised over hand-written Core IR (see `tests/rules.rs`); `linear` capabilities are a
+   follow-up. **The checker itself is complete over the whole Core IR**, independent of which
+   surface forms the parser accepts.

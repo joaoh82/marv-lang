@@ -9,12 +9,12 @@
 //! same triple — module path, definitions, and the [`World`] they resolve
 //! against — which `check`/`build`/`run` then consume identically.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use marv_core::ir::Def;
-use marv_core::lower_module;
+use marv_core::lower_modules;
 use marv_db::{qualify, CoreModuleSpec};
-use marv_syntax::parse;
+use marv_syntax::{parse, Module};
 use marv_types::{check_bounds, check_def, Diagnostic, Severity, World};
 
 /// A loaded program: everything `check`/`build`/`run` need, independent of
@@ -61,7 +61,7 @@ pub fn load(path: &str) -> Result<Loaded, LoadError> {
     if is_core_file(path) {
         load_core(&src)
     } else if path.ends_with(".mv") {
-        load_source(&src)
+        load_source(&src, Path::new(path))
     } else {
         Err(LoadError::UnknownKind(path.to_string()))
     }
@@ -76,21 +76,34 @@ fn is_core_file(path: &str) -> bool {
     name.ends_with(".core.json")
 }
 
-fn load_source(src: &str) -> Result<Loaded, LoadError> {
+fn load_source(src: &str, path: &Path) -> Result<Loaded, LoadError> {
     let module = parse(src).map_err(|e| LoadError::Front(format!("parse error: {e}")))?;
     let module_path = module.name.join(".");
-    let lowered =
-        lower_module(&module).map_err(|e| LoadError::Front(format!("lower error: {e}")))?;
-    let world = World::from_module(&lowered);
-    // Parameter names per def (source order), recovered from the AST.
-    let param_names = lowered
+
+    // Resolve `import std.*` to its source modules so capability interfaces (and
+    // any other std declarations) are in scope, and lower the whole set together
+    // (`lower_modules` shares one constructor/interface/cap registry across it).
+    // This is the minimal cross-module resolution MARV-6 needs; the persistent
+    // on-disk store and general module graph are MARV-14.
+    let std_modules = resolve_std_imports(&module, path)?;
+    let mut all: Vec<Module> = Vec::with_capacity(1 + std_modules.len());
+    all.push(module.clone());
+    all.extend(std_modules);
+
+    let lowered = lower_modules(&all).map_err(|e| LoadError::Front(format!("lower error: {e}")))?;
+    let world = World::from_modules(&lowered);
+    // Interface-bound and coherence checks over the whole set's generics metadata.
+    let bound_diags = check_bounds(&lowered);
+
+    // The user's file is module 0; `check`/`run` operate on its definitions
+    // (the std modules are resolved-but-trusted library code).
+    let main = lowered.into_iter().next().expect("main module was lowered");
+    let param_names = main
         .defs
         .iter()
         .map(|e| fn_param_names(&module, &e.name))
         .collect();
-    // Interface-bound and coherence checks over the module's generics metadata.
-    let bound_diags = check_bounds(std::slice::from_ref(&lowered));
-    let defs = lowered.defs.into_iter().map(|e| (e.name, e.def)).collect();
+    let defs = main.defs.into_iter().map(|e| (e.name, e.def)).collect();
     Ok(Loaded {
         module_path,
         defs,
@@ -98,6 +111,101 @@ fn load_source(src: &str) -> Result<Loaded, LoadError> {
         world,
         bound_diags,
     })
+}
+
+/// Resolve every `import std.*` in `main` to its parsed source module, following
+/// std→std imports transitively. Returns the std modules to lower alongside the
+/// user's file. A non-`std` import is left unresolved (general cross-module
+/// linking is MARV-14). Errors if the program imports std but no `std/` directory
+/// can be found, or a named std module is missing.
+fn resolve_std_imports(main: &Module, path: &Path) -> Result<Vec<Module>, LoadError> {
+    let wanted: Vec<Vec<String>> = main
+        .imports
+        .iter()
+        .map(|i| i.path.clone())
+        .filter(|p| p.first().map(|s| s == "std").unwrap_or(false))
+        .collect();
+    if wanted.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let std_dir = find_std_dir(path).ok_or_else(|| {
+        LoadError::Front(
+            "program imports `std`, but no `std/` directory was found (set MARV_STD)".to_string(),
+        )
+    })?;
+
+    // Parse every std source file once, indexing by its declared module path.
+    let mut by_path: std::collections::HashMap<Vec<String>, Module> =
+        std::collections::HashMap::new();
+    let entries = std::fs::read_dir(&std_dir)
+        .map_err(|e| LoadError::Io(format!("{}: {e}", std_dir.display())))?;
+    for entry in entries.flatten() {
+        let p = entry.path();
+        if p.extension().and_then(|s| s.to_str()) != Some("mv") {
+            continue;
+        }
+        let src = std::fs::read_to_string(&p)
+            .map_err(|e| LoadError::Io(format!("{}: {e}", p.display())))?;
+        let m = parse(&src)
+            .map_err(|e| LoadError::Front(format!("parse error in {}: {e}", p.display())))?;
+        by_path.insert(m.name.clone(), m);
+    }
+
+    // Transitively select the imported std modules (BFS over std→std imports). An
+    // imported std module with no source file is *skipped*, not an error: general
+    // cross-module resolution is MARV-14, so an unresolved name stays opaque to the
+    // checker exactly as it did before std linking (e.g. `import std.collections`).
+    let mut selected: Vec<Module> = Vec::new();
+    let mut seen: std::collections::HashSet<Vec<String>> = std::collections::HashSet::new();
+    let mut queue = wanted;
+    while let Some(mp) = queue.pop() {
+        if !seen.insert(mp.clone()) {
+            continue;
+        }
+        let Some(m) = by_path.get(&mp) else {
+            continue;
+        };
+        for imp in &m.imports {
+            if imp.path.first().map(|s| s == "std").unwrap_or(false) {
+                queue.push(imp.path.clone());
+            }
+        }
+        selected.push(m.clone());
+    }
+    Ok(selected)
+}
+
+/// Locate the `std/` source directory: the `MARV_STD` environment variable if
+/// set, otherwise the nearest ancestor of the source file that contains a `std/`
+/// directory with `.mv` files.
+fn find_std_dir(path: &Path) -> Option<PathBuf> {
+    if let Ok(dir) = std::env::var("MARV_STD") {
+        let p = PathBuf::from(dir);
+        if p.is_dir() {
+            return Some(p);
+        }
+    }
+    let start = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let mut dir = start.parent();
+    while let Some(d) = dir {
+        let cand = d.join("std");
+        if cand.is_dir()
+            && std::fs::read_dir(&cand)
+                .map(|mut it| {
+                    it.any(|e| {
+                        e.ok()
+                            .map(|e| e.path().extension().and_then(|s| s.to_str()) == Some("mv"))
+                            .unwrap_or(false)
+                    })
+                })
+                .unwrap_or(false)
+        {
+            return Some(cand);
+        }
+        dir = d.parent();
+    }
+    None
 }
 
 /// The parameter names of a named function in the AST (empty for non-functions).

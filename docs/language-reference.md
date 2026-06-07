@@ -146,23 +146,28 @@ Today's loop lowering covers **straight-line** bodies (assignments and nested lo
 whose tail is an `if`/`match`/`return` — which would need to thread carried `var`s through a
 branch join — is rejected for now; lift the branch out or restructure as straight-line updates.
 
-## 5. Effects & capabilities **[core]** (surface: **[design]**)
+## 5. Effects & capabilities **[impl]**
 
 Side effects are not ambient. A function obtains the power to perform an effect only by
 receiving a **capability** parameter, and its **effect row** records which it uses (inferred
-in the body, written in signatures). `pure` asserts the empty row.
+in the body, written in signatures as the capability parameters). `pure` asserts the empty row.
 
 ```marv
 fn read_config(fs: Fs, path: str) -> !Config { … }   // can do FS I/O, nothing else
 pure fn clamp(x: i32, lo: i32, hi: i32) -> i32 { … }  // no capabilities, no I/O, no allocation
 ```
 
-Standard capabilities: `Io` (root) and narrower `Fs`, `Net`, `Clock`, `Rand`, `Env`, `Alloc`
-(see [`std/`](../std)). Capabilities are **unforgeable** — received or narrowed, never
-constructed. The checker enforces capability provenance and effect/error subsumption today
-over Core; performing a capability lowers to `Core::Perform`, which surface syntax does not
-yet emit (you can express it via `*.core.json`). On WebAssembly a capability is a host import
-the page chooses to provide — see [platform support](platform-support.md).
+A **capability is a non-generic `interface`** (`std/capabilities.mv`). A method call on a value
+of such a type lowers to `Core::Perform`: `io.fs()` **narrows** the root to an `Fs` value (you
+may narrow, never construct — capabilities are **unforgeable**), and `fs.read(path)` /
+`out.write(text)` **perform** an operation. The effect row is inferred from those sites and
+checked against the function's capability parameters, where a held capability authorizes its
+**narrowing closure** (holding `Io` authorizes `Fs`/`Net`/… ). A `pure fn` — or a function that
+reaches a capability it never received — that performs is `MissingCapability` (E0110). Standard
+capabilities: `Io` (root) and narrower `Fs`, `Net`, `Clock`, `Rand`, `Alloc` (see
+[`std/`](../std)). On WebAssembly a capability is a host import the page chooses to provide —
+see [platform support](platform-support.md). (Generic interfaces like `Ord[T]` are bounded
+polymorphism, not capabilities; `linear` capabilities and cross-*module* linking are roadmap.)
 
 ## 6. Errors: inferred sets **[impl]**
 
@@ -255,8 +260,9 @@ is visible in the signature, requires a `SAFETY:` justification comment, and is 
 
 ## What you can actually write today
 
-The parser accepts: `mod`/`import`, `struct`/`enum`/`fn` (incl. `pure fn`, generic parameter
-lists), `let`/`var` bindings, assignment (`x = e`, `p.x = e`), `if`/`else(-if)`, `match`
+The parser accepts: `mod`/`import`, `struct`/`enum`/`fn`/`interface`/`impl` (incl. `pure fn`,
+generic parameter lists with bounds, and capability interfaces whose method calls `perform`),
+`let`/`var` bindings, assignment (`x = e`, `p.x = e`), `if`/`else(-if)`, `match`
 (constructor + `_` patterns, payload binding), enum constructor application, struct literals
 (`Name { f: e, … }`), index reads (`a[i]`), `len(x)`, `char` literals (`'a'`) and `as` casts
 (`(n as u8)`), array/slice types (`[N]T`, `[]T`), `while`/`for` loops with `invariant` clauses,
@@ -266,6 +272,7 @@ operators (`+ - * / % == != < <= > >= and or`), the prefix unary operators
 function calls and recursion, field
 projection, and `requires`/`ensures` contracts. That is enough for the
 [`examples/`](../examples) that run end to end (`factorial`, `arithmetic`, `clamp`, `color`,
-`mutation`, `loops`, `casts`, …), the `std/` prelude (`option`, `result`), and the M4/M6 gates.
+`mutation`, `loops`, `casts`, `hello`, `read_file`, …), the `std/` prelude (`option`, `result`,
+`ord`, `capabilities`), and the M4/M6 gates.
 Everything still marked **[core]**/**[design]** above is the surface roadmap — tracked in the
-project tracker, ordered errors → generics (checking) → capabilities → collections.
+project tracker, with collections, `linear` capabilities, and cross-module linking next.

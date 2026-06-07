@@ -21,7 +21,7 @@ where each one sits and what must land first. Each task references back here.
 | ~~**MARV-2** `while`/`for` loops → `Core::Loop`~~ ✅ done | 1 · Surface (spine) | ~~MARV-4~~ ✅ | 11 | high |
 | ~~**MARV-3** error handling (`error`, `!T`, `?`, error-set inference)~~ ✅ done | 1 · Surface (spine) | ~~MARV-1~~ ✅ | 6 | high |
 | ~~**MARV-5** generics + interfaces/impl (monomorphization)~~ ✅ done | 1 · Surface | ~~MARV-1~~ ✅ | 6 | medium |
-| **MARV-6** capabilities/`perform` from source | 1 · Surface | MARV-5, MARV-3 | — | medium |
+| ~~**MARV-6** capabilities/`perform` from source~~ ✅ done | 1 · Surface | ~~MARV-5~~ ✅, ~~MARV-3~~ ✅ | — | medium |
 | ~~**MARV-7** scalars & collections (str/char, slices/arrays, `as`)~~ ✅ done | 1 · Surface | — (pairs w/ 4) | — | medium |
 | **MARV-8** reachability-pruned compilation | 2 · Backends | — *(independent)* | — | medium |
 | **MARV-9** aggregate/enum codegen (interp + Cranelift + WASM) | 2 · Backends | MARV-1, MARV-4 | 10 | medium |
@@ -88,6 +88,23 @@ via `marv_types::resolve_impls` and the `marv resolve-impl` CLI subcommand. `std
 `examples/generics.mv` runs on the interpreter (`max(3, 7)` → `7`). Generic *values* still run on
 the interpreter only until aggregate/enum codegen lands (MARV-9); per-call-site type-argument
 inference is best-effort over surface types (literals default `i32`).
+· **MARV-6** capabilities/`perform` from source (`spec/01` §5): a **capability is a non-generic
+`interface`** (`Io`, `Fs`, `Stream`, …; generic interfaces like `Ord[T]` stay bounded
+polymorphism). A method call on a value of such a type lowers to `Core::Perform` — `io.fs()`
+**narrows** to an `Fs` value, `fs.read(path)`/`out.write(text)` **perform** an operation — with the
+`OpId` = the method's position and the operands = the non-receiver arguments. A non-`pure`
+function's **declared effect row is the set of its capability parameters**; the body's row is
+**inferred** from its `Perform` sites and checked against it, where a held capability **authorizes
+its narrowing closure** (holding `Io` authorizes the `Fs`/`Net`/… it can narrow to), so a `pure fn`
+that performs — or any function reaching a capability it never received — is `MissingCapability`
+(E0110) *from source*. The interpreter injects granted caps at the entry boundary and a narrowing
+op returns the narrowed capability value; the CLI resolves `import std.*` to the `std/` sources
+(transitively) so the capability interfaces are in scope (`MARV_STD` overrides discovery — full
+cross-module linking is MARV-14). `std/capabilities.mv` parses/checks; `examples/hello.mv`
+(`io.stdout().write(...)`) and `examples/read_file.mv` (`io.fs()` → `fs.read`) check, infer their
+rows, and run under `marv run --grant Io`. Cranelift n/a (rejects `Perform`); WASM lowers a
+`perform` to a host import but capability *narrowing* on WASM, and `linear` capabilities (a `Conn`
+that must be `close`d), are follow-ups.
 
 ## Recommended order
 
@@ -100,8 +117,8 @@ MARV-1 enums+match ✅  →  MARV-4 construction/mutation ✅  →  MARV-2 loops
 Each turns the language from "integer functions" into something progressively more real, and
 they unblock the rest. Then:
 
-- **Surface breadth:** ~~MARV-7~~ ✅, ~~MARV-5 generics~~ ✅ → MARV-6 capabilities-from-source
-  (which closes the last big gap between the design and what real `.mv` can express).
+- **Surface breadth:** ~~MARV-7~~ ✅, ~~MARV-5 generics~~ ✅, ~~MARV-6 capabilities-from-source~~ ✅
+  (which closed the last big gap between the design and what real `.mv` can express).
 - **Compounds on the surface:** MARV-9 aggregate codegen (after 1 + 4) → MARV-10; and
   MARV-11 verification expansion (after 2).
 - **Longer horizon:** MARV-13 more self-hosting, MARV-14 persistent store.

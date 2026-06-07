@@ -9,7 +9,6 @@ mod std.io
 /// may perform. A concrete host (a native runtime, or a WASM host import set —
 /// see `marv-codegen-wasm`) supplies the implementations the page/process
 /// chooses to grant.
-
 /// `Io` is the root capability. Everything else is narrowed from it, so handing
 /// a function only `Fs` (not `Io`) provably bounds it to the filesystem.
 interface Io {
@@ -21,15 +20,16 @@ interface Io {
     fn stdout(io: &Io) -> Stream
 }
 
-/// A byte sink/source (e.g. standard output).
+/// A text/byte output stream (e.g. standard output). Stage-0 writes a `str`;
+/// a byte-slice overload arrives with the collection surface.
 interface Stream {
-    fn write(s: &Stream, bytes: &[]u8) -> ! ()
+    fn write(s: &Stream, text: str) -> !
 }
 
 /// Filesystem access.
 interface Fs {
     fn read(fs: &Fs, path: str) -> ![]u8
-    fn write(fs: &Fs, path: str, bytes: &[]u8) -> ! ()
+    fn write(fs: &Fs, path: str, bytes: &[]u8) -> !
 }
 
 /// Network access. A function without a `Net` parameter provably cannot reach
@@ -39,11 +39,13 @@ interface Net {
     fn connect(net: &Net, host: str, port: u16) -> !Conn
 }
 
-/// An open network connection.
-linear interface Conn {
+/// An open network connection. A connection must be `close`d exactly once;
+/// enforcing that with a `linear interface` awaits linear-capability support
+/// (tracked as a follow-up), so it is a plain capability interface for now.
+interface Conn {
     fn send(conn: &mut Conn, bytes: &[]u8) -> !usize
     fn recv(conn: &mut Conn, buf: &mut []u8) -> !usize
-    fn close(conn: Conn) -> ! ()
+    fn close(conn: Conn) -> !
 }
 
 /// A clock (monotonic time, in nanoseconds).

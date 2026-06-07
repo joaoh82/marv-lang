@@ -3,11 +3,14 @@
 The prelude lives in [`std/`](../std), written in marv. It declares the core data types and
 the capability interfaces every program links against (`spec/01` §§3, 5, 6).
 
-> **Status.** These are *reference declarations* in the spec's surface syntax (`enum`,
-> `interface`, generics, `?`/`!` sugar) — surface the M0 parser does not yet accept (like
-> `examples/hello.mv`/`report.mv`). They become live as the front-end surface grows (enums →
-> generics → capabilities-from-source) and the content store links them by hash. Until then,
-> the capability *model* is fully real over the Core IR and on WebAssembly (host imports).
+> **Status.** The capability interfaces are now **live from source** (MARV-6): `std/`
+> parses, lowers, and checks, and a program that `import std.io (Io)` and calls
+> `io.stdout().write(...)` or narrows `io.fs()` checks its inferred effect row and runs under
+> `marv run --grant` (the CLI resolves `import std.*` to these files — see
+> [`cli.md`](cli.md)). Enums, generics, and `?`/`!` sugar are likewise real. Still pending:
+> cross-*module* error-set propagation and the persistent content store that links defs by
+> hash (MARV-14), and `linear` capabilities (so a `Conn` must be `close`d). The capability
+> *model* is also exercised over the Core IR and on WebAssembly (host imports).
 
 ## Data types
 
@@ -56,10 +59,10 @@ supplies the implementations the process/page chooses to grant.
 | Capability | Role | Representative operations |
 |------------|------|---------------------------|
 | `Io` | Root capability; everything narrows from it | `fs() -> Fs`, `net() -> Net`, `clock() -> Clock`, `rand() -> Rand`, `alloc() -> Alloc`, `stdout() -> Stream` |
-| `Stream` | A byte sink/source | `write(bytes: &[]u8) -> !()` |
-| `Fs` | Filesystem | `read(path: str) -> ![]u8`, `write(path, bytes) -> !()` |
+| `Stream` | A text/byte output stream | `write(text: str) -> !` |
+| `Fs` | Filesystem | `read(path: str) -> ![]u8`, `write(path, bytes) -> !` |
 | `Net` | Network | `get(url) -> ![]u8`, `connect(host, port) -> !Conn` |
-| `Conn` | Open connection (`linear`) | `send`, `recv`, `close` |
+| `Conn` | Open connection | `send`, `recv`, `close` |
 | `Clock` | Monotonic time | `now() -> i64` |
 | `Rand` | Randomness | `next_u64() -> u64` |
 | `Alloc` | Allocator | `alloc(bytes: usize) -> ![]u8` |
