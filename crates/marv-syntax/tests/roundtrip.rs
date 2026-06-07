@@ -140,10 +140,61 @@ fn gen_import(rng: &mut Rng) -> Import {
 }
 
 fn gen_item(rng: &mut Rng) -> Item {
-    if rng.chance(1, 2) {
-        Item::Struct(gen_struct(rng))
+    match rng.below(4) {
+        0 => Item::Struct(gen_struct(rng)),
+        1 => Item::Interface(gen_interface(rng)),
+        2 => Item::Impl(gen_impl(rng)),
+        _ => Item::Fn(gen_fn(rng)),
+    }
+}
+
+fn gen_interface(rng: &mut Rng) -> InterfaceDecl {
+    let mut generics = gen_generics(rng);
+    if generics.is_empty() {
+        generics.push(Generic {
+            name: "T".to_string(),
+            bound: None,
+        });
+    }
+    let methods = (0..rng.below(3)).map(|_| gen_fn_sig(rng)).collect();
+    InterfaceDecl {
+        docs: gen_docs(rng),
+        name: rng.pick(TYPE_NAMES).to_string(),
+        generics,
+        methods,
+    }
+}
+
+fn gen_fn_sig(rng: &mut Rng) -> FnSig {
+    let params = (0..rng.below(4))
+        .map(|_| Param {
+            name: rng.pick(IDENTS).to_string(),
+            ty: gen_type(rng, 2),
+        })
+        .collect();
+    let ret = if rng.chance(1, 2) {
+        Some(gen_type(rng, 2))
     } else {
-        Item::Fn(gen_fn(rng))
+        None
+    };
+    FnSig {
+        docs: gen_docs(rng),
+        name: rng.pick(FN_NAMES).to_string(),
+        generics: gen_generics(rng),
+        params,
+        ret,
+    }
+}
+
+fn gen_impl(rng: &mut Rng) -> ImplDecl {
+    let arg_count = 1 + rng.below(2);
+    let args = (0..arg_count).map(|_| gen_type(rng, 2)).collect();
+    let methods = (0..rng.below(3)).map(|_| gen_fn(rng)).collect();
+    ImplDecl {
+        docs: gen_docs(rng),
+        interface: gen_path(rng, TYPE_NAMES, 1, 2),
+        args,
+        methods,
     }
 }
 
@@ -160,6 +211,7 @@ fn gen_struct(rng: &mut Rng) -> StructDecl {
         docs: gen_docs(rng),
         linear,
         name,
+        generics: gen_generics(rng),
         fields,
     }
 }
@@ -210,11 +262,23 @@ fn gen_fn(rng: &mut Rng) -> FnDecl {
     }
 }
 
-/// A 0–2 element generic parameter list, drawn from a small single-letter pool.
-fn gen_generics(rng: &mut Rng) -> Vec<String> {
+/// A 0–2 element generic parameter list, drawn from a small single-letter pool,
+/// each with an occasional interface bound (`T: Ord`).
+fn gen_generics(rng: &mut Rng) -> Vec<Generic> {
     const GENERIC_NAMES: &[&str] = &["T", "E", "K", "V"];
     (0..rng.below(3))
-        .map(|i| GENERIC_NAMES[i as usize % GENERIC_NAMES.len()].to_string())
+        .map(|i| {
+            let name = GENERIC_NAMES[i as usize % GENERIC_NAMES.len()].to_string();
+            let bound = if rng.chance(1, 3) {
+                Some(Bound {
+                    path: gen_path(rng, TYPE_NAMES, 1, 2),
+                    args: Vec::new(),
+                })
+            } else {
+                None
+            };
+            Generic { name, bound }
+        })
         .collect()
 }
 

@@ -196,6 +196,11 @@ impl World {
                             },
                         );
                     }
+                    // An `interface` declares only abstract signatures — not a
+                    // callable value, so it registers nothing. Its method bodies
+                    // live in `impl`s, which lower to ordinary `Fn` defs (caught by
+                    // the `_` arm below as globals).
+                    DefKind::Interface => {}
                     _ => {
                         w.globals.insert(h, entry.def.ty.clone());
                     }

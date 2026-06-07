@@ -55,6 +55,9 @@ COMMANDS:
                                entry's value parameters are filled from [args...]
                                in order.
     verify [--def NAME] <file> Discharge `requires`/`ensures` contracts via SMT.
+    resolve-impl <file>        Report each generic instantiation and which
+                               coherent `impl` its bounded type arguments select
+                               (the `marv/resolveImpl` report, `spec/01` §3.4).
     commit [--store DIR] <file>
                                Freeze a file's definitions into the content-
                                addressed store (default .marv/), update the
@@ -84,6 +87,7 @@ fn main() -> ExitCode {
         "check" => cmd_check(rest),
         "build" => cmd_build(rest),
         "run" => cmd_run(rest),
+        "resolve-impl" => cmd_resolve_impl(rest),
         "verify" => cmd_verify(rest),
         "commit" => cmd_commit(rest),
         other => {
@@ -91,6 +95,78 @@ fn main() -> ExitCode {
             eprint!("{USAGE}");
             ExitCode::FAILURE
         }
+    }
+}
+
+// ---- resolve-impl -------------------------------------------------------
+
+/// `marv resolve-impl <file>` — the `marv/resolveImpl` report (`spec/01` §3.4):
+/// for every generic instantiation the program requests, print which coherent
+/// `impl` each of its bounded type arguments resolves to, and which method
+/// definition each interface method dispatches to. Also surfaces any unsatisfied
+/// bound / coherence diagnostics.
+fn cmd_resolve_impl(args: &[String]) -> ExitCode {
+    let Some(file) = args.iter().find(|a| !a.starts_with("--")) else {
+        eprintln!("marv resolve-impl: expected a file");
+        return ExitCode::FAILURE;
+    };
+    if !file.ends_with(".mv") {
+        eprintln!("marv resolve-impl: expected a `.mv` source file");
+        return ExitCode::FAILURE;
+    }
+    let src = match std::fs::read_to_string(file) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("marv resolve-impl: {file}: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let module = match marv_syntax::parse(&src) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("marv resolve-impl: parse error: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let lowered = match marv_core::lower_module(&module) {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("marv resolve-impl: lower error: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let modules = std::slice::from_ref(&lowered);
+
+    let resolutions = marv_types::resolve_impls(modules);
+    if resolutions.is_empty() {
+        println!("{file}: no generic instantiations");
+    }
+    for r in &resolutions {
+        println!("{} (instantiates `{}`)", r.instance, r.generic);
+        if r.selections.is_empty() {
+            println!("    (no bounded type parameters)");
+        }
+        for sel in &r.selections {
+            println!(
+                "    {}: {} = {}  ->  impl {}[{}]",
+                sel.param, sel.interface, sel.type_key, sel.interface, sel.type_key
+            );
+            for (meth, def) in &sel.methods {
+                println!("        {meth} -> {def}");
+            }
+        }
+    }
+
+    // Report (but do not stop on) unsatisfied bounds / coherence violations.
+    let mut bad = false;
+    for (_, d) in marv_types::check_bounds(modules) {
+        bad = true;
+        eprintln!("{}[{}] {}", d.severity.as_str(), d.code.as_str(), d.message);
+    }
+    if bad {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
     }
 }
 

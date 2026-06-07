@@ -261,30 +261,170 @@ impl Parser {
             Tok::Struct => Ok(Item::Struct(self.parse_struct(false, docs)?)),
             Tok::Enum => Ok(Item::Enum(self.parse_enum(docs)?)),
             Tok::Error => Ok(Item::Error(self.parse_error_decl(docs)?)),
+            Tok::Interface => Ok(Item::Interface(self.parse_interface(docs)?)),
+            Tok::Impl => Ok(Item::Impl(self.parse_impl(docs)?)),
             other => Err(ParseError::new(format!(
-                "expected an item (`fn`, `pure fn`, `struct`, `linear struct`, `enum`, `error`), \
-                 found {other:?}"
+                "expected an item (`fn`, `pure fn`, `struct`, `linear struct`, `enum`, `error`, \
+                 `interface`, `impl`), found {other:?}"
             ))),
         }
     }
 
-    /// Parse a generic parameter list `[A, B, ...]`, or `Vec::new()` when none is
-    /// present. The opening `[` must be the very next token. Bounds
-    /// (`generic = ident , [ ":" , bound ]`) are not yet modeled — only the
-    /// parameter names are kept.
-    fn parse_generics(&mut self) -> PResult<Vec<String>> {
+    /// Parse a generic parameter list `[A, B: Bound, ...]`, or `Vec::new()` when
+    /// none is present. The opening `[` must be the very next token. Each entry is
+    /// a name with an optional interface bound (`generic = ident , [ ":" , bound
+    /// ]`, `spec/02` §B).
+    fn parse_generics(&mut self) -> PResult<Vec<Generic>> {
         if !self.eat(&Tok::LBracket) {
             return Ok(Vec::new());
         }
-        let mut names = vec![self.ident()?];
+        let mut generics = vec![self.parse_generic()?];
         while self.eat(&Tok::Comma) {
             if self.peek() == &Tok::RBracket {
                 break; // tolerate a trailing comma
             }
-            names.push(self.ident()?);
+            generics.push(self.parse_generic()?);
         }
         self.expect(Tok::RBracket)?;
-        Ok(names)
+        Ok(generics)
+    }
+
+    /// Parse a single generic parameter `ident [ ":" bound ]` (`spec/02` §B
+    /// `generic`).
+    fn parse_generic(&mut self) -> PResult<Generic> {
+        let name = self.ident()?;
+        let bound = if self.eat(&Tok::Colon) {
+            Some(self.parse_bound()?)
+        } else {
+            None
+        };
+        Ok(Generic { name, bound })
+    }
+
+    /// Parse an interface bound `path [ "[" type { "," type } "]" ]` (`spec/02`
+    /// §B `bound`). The optional bracketed list carries any *extra* type arguments
+    /// beyond the constrained parameter.
+    fn parse_bound(&mut self) -> PResult<Bound> {
+        let path = self.parse_path()?;
+        let mut args = Vec::new();
+        if self.eat(&Tok::LBracket) {
+            args.push(self.parse_type()?);
+            while self.eat(&Tok::Comma) {
+                if self.peek() == &Tok::RBracket {
+                    break; // trailing comma
+                }
+                args.push(self.parse_type()?);
+            }
+            self.expect(Tok::RBracket)?;
+        }
+        Ok(Bound { path, args })
+    }
+
+    /// Parse `interface Name[generics] { fn_sig* }` (`spec/02` §B
+    /// `interface_decl`). Method signatures have no body and no contracts; each
+    /// sits on its own line.
+    fn parse_interface(&mut self, docs: Vec<String>) -> PResult<InterfaceDecl> {
+        self.expect(Tok::Interface)?;
+        let name_hi = self.cur_span().1;
+        let name = self.ident()?;
+        self.name_hi = name_hi;
+        let generics = self.parse_generics()?;
+        self.expect(Tok::LBrace)?;
+
+        let mut methods = Vec::new();
+        loop {
+            let mdocs = self.take_docs();
+            if self.peek() == &Tok::RBrace {
+                break;
+            }
+            methods.push(self.parse_fn_sig(mdocs)?);
+        }
+        self.skip_nl();
+        self.expect(Tok::RBrace)?;
+        Ok(InterfaceDecl {
+            docs,
+            name,
+            generics,
+            methods,
+        })
+    }
+
+    /// Parse one abstract method signature inside an interface (`spec/02` §B
+    /// `fn_sig = "fn" ident [generics] "(" [params] ")" ["->" type]`). No body, no
+    /// contracts.
+    fn parse_fn_sig(&mut self, docs: Vec<String>) -> PResult<FnSig> {
+        self.expect(Tok::Fn)?;
+        let name = self.ident()?;
+        let generics = self.parse_generics()?;
+        self.expect(Tok::LParen)?;
+        let mut params = Vec::new();
+        if self.peek() != &Tok::RParen {
+            params.push(self.parse_param()?);
+            while self.eat(&Tok::Comma) {
+                if self.peek() == &Tok::RParen {
+                    break; // trailing comma
+                }
+                params.push(self.parse_param()?);
+            }
+        }
+        self.expect(Tok::RParen)?;
+        let ret = if self.eat(&Tok::Arrow) {
+            Some(self.parse_type()?)
+        } else {
+            None
+        };
+        Ok(FnSig {
+            docs,
+            name,
+            generics,
+            params,
+            ret,
+        })
+    }
+
+    /// Parse `impl Path[type, ...] { fn_decl* }` (`spec/02` §B `impl_decl`). The
+    /// bracketed type list is mandatory (the concrete type(s) implemented for);
+    /// methods are full function declarations.
+    fn parse_impl(&mut self, docs: Vec<String>) -> PResult<ImplDecl> {
+        self.expect(Tok::Impl)?;
+        let interface = self.parse_path()?;
+        self.name_hi = self.cur_span().0;
+        self.expect(Tok::LBracket)?;
+        let mut args = vec![self.parse_type()?];
+        while self.eat(&Tok::Comma) {
+            if self.peek() == &Tok::RBracket {
+                break; // trailing comma
+            }
+            args.push(self.parse_type()?);
+        }
+        self.expect(Tok::RBracket)?;
+        self.expect(Tok::LBrace)?;
+
+        let mut methods = Vec::new();
+        loop {
+            let mdocs = self.take_docs();
+            match self.peek() {
+                Tok::RBrace => break,
+                Tok::Pure => {
+                    self.bump();
+                    methods.push(self.parse_fn(true, mdocs)?);
+                }
+                Tok::Fn => methods.push(self.parse_fn(false, mdocs)?),
+                other => {
+                    return Err(ParseError::new(format!(
+                        "expected a method (`fn` or `pure fn`) or `}}` in `impl`, found {other:?}"
+                    )))
+                }
+            }
+        }
+        self.skip_nl();
+        self.expect(Tok::RBrace)?;
+        Ok(ImplDecl {
+            docs,
+            interface,
+            args,
+            methods,
+        })
     }
 
     fn parse_enum(&mut self, docs: Vec<String>) -> PResult<EnumDecl> {
@@ -368,6 +508,7 @@ impl Parser {
         let name_hi = self.cur_span().1;
         let name = self.ident()?;
         self.name_hi = name_hi;
+        let generics = self.parse_generics()?;
         self.expect(Tok::LBrace)?;
         self.skip_nl();
 
@@ -388,6 +529,7 @@ impl Parser {
             docs,
             linear,
             name,
+            generics,
             fields,
         })
     }

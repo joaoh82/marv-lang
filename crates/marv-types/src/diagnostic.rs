@@ -200,6 +200,12 @@ pub enum Code {
     /// A second-class reference escapes its call frame (stored in an aggregate,
     /// returned, or captured) — forbidden by the memory model (`spec/01` §4).
     EscapingReference,
+    /// A generic type argument does not satisfy its parameter's interface bound:
+    /// no `impl` of that interface exists for the concrete type (`spec/01` §3.4).
+    UnsatisfiedBound,
+    /// Two `impl`s exist for the same interface and type — coherence requires
+    /// exactly one (`spec/01` §3.4).
+    ConflictingImpl,
 }
 
 impl Code {
@@ -219,6 +225,8 @@ impl Code {
             Code::LinearDuplicated => "E0141",
             Code::LinearNotAllPaths => "E0142",
             Code::EscapingReference => "E0150",
+            Code::UnsatisfiedBound => "E0160",
+            Code::ConflictingImpl => "E0161",
         }
     }
 
@@ -253,6 +261,12 @@ impl Code {
                 "a `linear` value is consumed on some control paths but not all"
             }
             Code::EscapingReference => "a second-class reference escapes its call frame",
+            Code::UnsatisfiedBound => {
+                "a generic type argument does not implement its parameter's interface bound"
+            }
+            Code::ConflictingImpl => {
+                "two impls exist for the same interface and type (coherence requires one)"
+            }
         }
     }
 
@@ -272,6 +286,8 @@ impl Code {
             Code::LinearDuplicated,
             Code::LinearNotAllPaths,
             Code::EscapingReference,
+            Code::UnsatisfiedBound,
+            Code::ConflictingImpl,
         ]
     }
 }

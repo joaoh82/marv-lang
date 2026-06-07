@@ -78,6 +78,13 @@ agent may key behaviour on it. The full set is `marv_types::Code::catalog()`.
 | `E0141` | a `linear` value is consumed more than once along some path |
 | `E0142` | a `linear` value is consumed on some control paths but not all |
 | `E0150` | a second-class reference escapes its call frame |
+| `E0160` | a generic type argument does not implement its parameter's interface bound (no `impl`) |
+| `E0161` | two impls exist for the same interface and type (coherence requires one) |
+
+The `E016x` codes (MARV-5) come from monomorphization (`spec/01` §§3.3–3.4): they
+are raised over a module's generics/impl metadata, not its Core, so they fire for
+every generic *instantiation* whose bounded type argument has no coherent `impl`,
+and for any duplicate `impl Iface[Type]`.
 
 ### Acceptance gate (met)
 

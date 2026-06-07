@@ -27,11 +27,13 @@
 //! [`Type::Nominal`] via [`symbol_hash`] (see its docs for why M1 keys on the
 //! resolved name rather than the target's own content hash).
 
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 
 use marv_syntax::{
-    ArmBody, BinOp, Block, Else, EnumDecl, Expr, Field, FieldInit, FieldPat, FnDecl, IfExpr, Item,
-    LValue, MatchExpr, Module, Pattern, Stmt, StructDecl, Tail, Type as SType, UnOp,
+    generic_names, ArmBody, BinOp, Block, Else, EnumDecl, Expr, Field, FieldInit, FieldPat, FnDecl,
+    IfExpr, Item, LValue, MatchExpr, Module, Pattern, Stmt, StructDecl, Tail, Type as SType, UnOp,
 };
 
 use crate::hash::symbol_hash;
@@ -186,61 +188,168 @@ pub struct DefEntry {
     pub enum_variants: Option<Vec<VariantInfo>>,
 }
 
-/// A whole module lowered to Core: its definitions in source order.
+/// A whole module lowered to Core: its definitions in source order, plus the
+/// generics/interface/impl metadata the checker uses for bound checking and
+/// `marv/resolveImpl` reporting (`spec/01` §§3.3–3.4). The metadata lives
+/// alongside the names-erased [`Def`]s because bound satisfaction, coherence, and
+/// impl selection are properties of the *surface* program, not of any single
+/// Core definition.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoweredModule {
     pub module: Vec<String>,
     pub defs: Vec<DefEntry>,
+    /// Interfaces declared in this module (name + method names).
+    pub interfaces: Vec<InterfaceInfo>,
+    /// Coherent impls declared in this module: which interface, for which type,
+    /// and the qualified names of the method defs the impl provides.
+    pub impls: Vec<ImplInfo>,
+    /// Generic-function instantiations requested from this module's code, each
+    /// recording the concrete type argument(s) and the bound(s) that must hold
+    /// (`spec/01` §3.4 — coherent, deterministic resolution). The checker
+    /// validates each against the impl set and reports the selected impl.
+    pub instantiations: Vec<Instantiation>,
 }
 
-/// Lower a parsed module to Core, hashing each definition.
+/// Metadata for an `interface` declaration (`spec/01` §3.4): its name and the
+/// method names it declares. Names survive here because the names-erased [`Def`]
+/// cannot carry them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InterfaceInfo {
+    pub name: String,
+    /// The interface's method names, in declaration order.
+    pub methods: Vec<String>,
+}
+
+/// Metadata for a coherent `impl` (`spec/01` §3.4): the interface it implements,
+/// a canonical key for the concrete type it implements it *for*, and the
+/// qualified names of the method definitions it supplies (method → def name).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImplInfo {
+    pub interface: String,
+    /// Canonical type key the impl is for, e.g. `"i32"` (see [`type_key`]).
+    pub type_key: String,
+    /// Method name → fully-qualified def name of the impl method (so a caller can
+    /// be told exactly which definition a call resolves to).
+    pub methods: Vec<(String, String)>,
+}
+
+/// One requested instantiation of a generic function at concrete type arguments
+/// (`spec/01` §3.3). Records what the checker needs to verify the interface
+/// bounds and report the selected impl.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Instantiation {
+    /// The generic function's source name (e.g. `"max"`).
+    pub generic: String,
+    /// The specialized def's source name (e.g. `"max@i32"`).
+    pub instance: String,
+    /// One entry per generic type parameter, in order.
+    pub args: Vec<TypeArg>,
+}
+
+/// A single resolved generic type parameter at an instantiation: the parameter
+/// name, the canonical key of the concrete type bound to it, and the interface it
+/// was required to satisfy (if the parameter carried a bound).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypeArg {
+    pub param: String,
+    pub type_key: String,
+    /// The interface the parameter is bounded by, if any (`T: Ord` → `"Ord"`).
+    pub bound: Option<String>,
+}
+
+/// Lower a parsed module to Core, hashing each definition and **monomorphizing**
+/// every generic-function instantiation its code requests (`spec/01` §§3.3–3.4).
 ///
 /// Enum *constructor* and `match` resolution sees only the enums declared in this
 /// module. To lower a module that constructs or matches an enum imported from
 /// another file (e.g. `std/result.mv` using `Option`), lower them together with
-/// [`lower_modules`], which shares one constructor registry across the set.
+/// [`lower_modules`], which shares one constructor/interface/impl registry across
+/// the set.
 pub fn lower_module(m: &Module) -> Result<LoweredModule, LowerError> {
-    let reg = EnumReg::from_modules(std::slice::from_ref(m));
-    lower_with_registry(m, &reg)
+    Ok(lower_modules(std::slice::from_ref(m))?
+        .into_iter()
+        .next()
+        .unwrap())
 }
 
-/// Lower several parsed modules that share a constructor namespace (a prelude
-/// plus its dependents). A single [`EnumReg`] is built from *all* of them first,
-/// so a `match` or constructor in one module resolves variants declared in
-/// another. Each module is lowered independently and returned in input order.
+/// Lower several parsed modules that share a namespace (a prelude plus its
+/// dependents). A single [`EnumReg`] and [`MonoReg`] are built from *all* of them
+/// first, so a `match`, constructor, generic call, or interface method in one
+/// module resolves declarations in another. Each module is lowered, then a
+/// monomorphization fixpoint generates a specialized def for every distinct
+/// generic instantiation requested anywhere in the set; each specialized def is
+/// appended to the module that *defines* the generic (so its internal references
+/// resolve). Modules are returned in input order.
 pub fn lower_modules(ms: &[Module]) -> Result<Vec<LoweredModule>, LowerError> {
-    let reg = EnumReg::from_modules(ms);
-    ms.iter().map(|m| lower_with_registry(m, &reg)).collect()
-}
+    let enum_reg = EnumReg::from_modules(ms);
+    let mono = MonoReg::from_modules(ms);
+    let pending = Rc::new(RefCell::new(Pending::default()));
 
-fn lower_with_registry(m: &Module, reg: &EnumReg) -> Result<LoweredModule, LowerError> {
-    let lw = Lowerer::new(m, reg.clone());
-    let mut defs = Vec::with_capacity(m.items.len());
-    for item in &m.items {
-        let (name, def, enum_variants) = match item {
-            Item::Fn(f) => (f.name.clone(), lw.lower_fn(f)?, None),
-            Item::Struct(s) => (s.name.clone(), lw.lower_struct(s), None),
-            Item::Enum(e) => {
-                let (def, variants) = lw.lower_enum(e);
-                (e.name.clone(), def, Some(variants))
-            }
-            Item::Error(e) => {
-                let (def, variants) = lw.lower_error(e);
-                (e.name.clone(), def, Some(variants))
-            }
+    // Phase 1 — base lowering of every module (generic fns keep `Type::Var`;
+    // `impl` methods become uniquely-named concrete defs; generic *call sites*
+    // record an instantiation request and reference the specialized symbol).
+    let mut lowered: Vec<LoweredModule> = Vec::with_capacity(ms.len());
+    for m in ms {
+        let lw = Lowerer::new(
+            m,
+            enum_reg.clone(),
+            mono.clone(),
+            pending.clone(),
+            HashMap::new(),
+            None,
+        );
+        lowered.push(lw.lower_base(m)?);
+    }
+
+    // Phase 2 — monomorphization fixpoint. Drain the request queue, generating one
+    // specialized def per request by re-lowering the generic's declaration with
+    // its type parameters bound to the concrete arguments and its interface-method
+    // calls dispatched to the resolved coherent impl. Generating an instance may
+    // request further instances (a generic that calls another generic).
+    loop {
+        let req = pending.borrow_mut().queue.pop();
+        let Some(req) = req else { break };
+        let gf = mono
+            .generics
+            .get(&req.generic)
+            .expect("requested generic is in the registry");
+        let gm = &ms[gf.module_index];
+        let subst: HashMap<String, SType> = req.subst.iter().cloned().collect();
+        let spec = SpecCtx {
+            bounds: req
+                .spec_bounds
+                .iter()
+                .map(|(_, iface, key)| (iface.clone(), key.clone()))
+                .collect(),
         };
+        let lw = Lowerer::new(
+            gm,
+            enum_reg.clone(),
+            mono.clone(),
+            pending.clone(),
+            subst,
+            Some(spec),
+        );
+        let def = lw.lower_fn(&gf.decl)?;
         let hash = def.content_hash();
-        defs.push(DefEntry {
-            name,
+        let target = lowered
+            .iter_mut()
+            .find(|l| l.module == gm.name)
+            .expect("the generic's defining module was lowered");
+        target.defs.push(DefEntry {
+            name: req.instance_name.clone(),
             def,
             hash,
-            enum_variants,
+            enum_variants: None,
+        });
+        target.instantiations.push(Instantiation {
+            generic: req.generic.clone(),
+            instance: req.instance_name.clone(),
+            args: req.args_meta.clone(),
         });
     }
-    Ok(LoweredModule {
-        module: m.name.clone(),
-        defs,
-    })
+
+    Ok(lowered)
 }
 
 /// A constructor reference resolved against the [`EnumReg`]: which enum it
@@ -346,6 +455,123 @@ impl EnumReg {
     }
 }
 
+/// The cross-module registry of generics, interfaces, and coherent impls that
+/// drives monomorphization (`spec/01` §§3.3–3.4). Built once from every module in
+/// the set before any lowering, then cloned into each [`Lowerer`].
+#[derive(Debug, Clone, Default)]
+struct MonoReg {
+    /// Generic-function source name → where it is defined and its declaration
+    /// (so a specialized copy can be re-lowered). Names are assumed unique across
+    /// the module set.
+    generics: HashMap<String, GenericFn>,
+    /// Interface-method name → the interface that declares it (for dispatch).
+    method_iface: HashMap<String, String>,
+    /// The coherent impl table: (interface, concrete type key) → the impl entry.
+    /// Coherence (one impl per interface-per-type) is *reported* by the checker
+    /// from the full per-module [`ImplInfo`] list; this map keeps the last entry
+    /// for dispatch.
+    impls: HashMap<(String, String), ImplEntry>,
+}
+
+/// A generic function the registry can re-lower for each instantiation.
+#[derive(Debug, Clone)]
+struct GenericFn {
+    module_index: usize,
+    module_path: String,
+    decl: FnDecl,
+}
+
+/// A resolved impl in the dispatch table: the module that defines its methods and
+/// the map from interface-method name to the mangled source name of the impl's
+/// definition for that method.
+#[derive(Debug, Clone)]
+struct ImplEntry {
+    module: String,
+    methods: HashMap<String, String>,
+}
+
+impl MonoReg {
+    fn from_modules(ms: &[Module]) -> Self {
+        let mut reg = MonoReg::default();
+        for (i, m) in ms.iter().enumerate() {
+            let mp = m.name.join(".");
+            for item in &m.items {
+                match item {
+                    Item::Fn(f) if !f.generics.is_empty() => {
+                        reg.generics.insert(
+                            f.name.clone(),
+                            GenericFn {
+                                module_index: i,
+                                module_path: mp.clone(),
+                                decl: f.clone(),
+                            },
+                        );
+                    }
+                    Item::Interface(iface) => {
+                        for meth in &iface.methods {
+                            reg.method_iface
+                                .insert(meth.name.clone(), iface.name.clone());
+                        }
+                    }
+                    Item::Impl(imp) => {
+                        let iface = imp.interface.last().cloned().unwrap_or_default();
+                        let key = type_key_args(&imp.args);
+                        let mut methods = HashMap::new();
+                        for meth in &imp.methods {
+                            methods.insert(
+                                meth.name.clone(),
+                                impl_method_name(&meth.name, &iface, &key),
+                            );
+                        }
+                        reg.impls.insert(
+                            (iface, key),
+                            ImplEntry {
+                                module: mp.clone(),
+                                methods,
+                            },
+                        );
+                    }
+                    _ => {}
+                }
+            }
+        }
+        reg
+    }
+}
+
+/// A monomorphization request: re-lower generic `generic` at the recorded
+/// substitution, naming the result `instance_name` (deduplicated by the queue).
+#[derive(Debug, Clone)]
+struct InstanceReq {
+    generic: String,
+    instance_name: String,
+    /// Generic parameter name → concrete surface type, in parameter order.
+    subst: Vec<(String, SType)>,
+    /// Only the *bounded* parameters: `(param, interface, type_key)`, used to
+    /// dispatch interface-method calls in the specialized body.
+    spec_bounds: Vec<(String, String, String)>,
+    /// Per-parameter metadata for the checker's bound check (all parameters).
+    args_meta: Vec<TypeArg>,
+}
+
+/// The shared, mutable monomorphization work queue: pending requests plus the set
+/// of instance names already requested (so each distinct instantiation is
+/// generated exactly once).
+#[derive(Debug, Default)]
+struct Pending {
+    queue: Vec<InstanceReq>,
+    seen: HashSet<String>,
+}
+
+/// The interface-dispatch context for lowering a specialized (monomorphic) body:
+/// the bound interfaces and the concrete type key each is satisfied at, so a call
+/// to an interface method resolves to the coherent impl.
+#[derive(Debug, Clone, Default)]
+struct SpecCtx {
+    /// `(interface, type_key)` pairs from the instantiation's bounds.
+    bounds: Vec<(String, String)>,
+}
+
 /// A local binding in scope during lowering: the atom it resolves to (with its
 /// `Var` carrying a de Bruijn *level*) and its best-known surface type, used to
 /// resolve field-projection indices.
@@ -404,10 +630,27 @@ struct Lowerer {
     fn_rets: HashMap<String, Option<SType>>,
     /// Constructor / enum registry (may span several modules; see [`EnumReg`]).
     reg: EnumReg,
+    /// Generics / interfaces / impls registry, shared across modules.
+    mono: MonoReg,
+    /// The shared monomorphization work queue (interior-mutable so the immutable
+    /// lowering methods can record instantiation requests as they descend).
+    pending: Rc<RefCell<Pending>>,
+    /// Active type-parameter substitution. Empty for ordinary (base) lowering;
+    /// populated when re-lowering a specialized generic instance (`T` → concrete).
+    subst: HashMap<String, SType>,
+    /// Interface-dispatch context, set only when lowering a specialized body.
+    spec: Option<SpecCtx>,
 }
 
 impl Lowerer {
-    fn new(m: &Module, reg: EnumReg) -> Self {
+    fn new(
+        m: &Module,
+        reg: EnumReg,
+        mono: MonoReg,
+        pending: Rc<RefCell<Pending>>,
+        subst: HashMap<String, SType>,
+        spec: Option<SpecCtx>,
+    ) -> Self {
         let mut local_items = HashSet::new();
         let mut structs = HashMap::new();
         let mut fn_rets = HashMap::new();
@@ -421,7 +664,7 @@ impl Lowerer {
                     local_items.insert(f.name.clone());
                     fn_rets.insert(f.name.clone(), f.ret.clone());
                 }
-                Item::Enum(_) | Item::Error(_) => {}
+                Item::Enum(_) | Item::Error(_) | Item::Interface(_) | Item::Impl(_) => {}
             }
         }
         Lowerer {
@@ -430,7 +673,73 @@ impl Lowerer {
             structs,
             fn_rets,
             reg,
+            mono,
+            pending,
+            subst,
+            spec,
         }
+    }
+
+    /// Lower every item of a module's *base* form (no instances yet), collecting
+    /// the interface/impl metadata the checker needs. Generic functions lower with
+    /// `Type::Var` (kept so the generic body type-checks once); their concrete
+    /// instances are generated later by the monomorphization fixpoint
+    /// ([`lower_modules`]). `impl` methods become uniquely-named concrete defs.
+    fn lower_base(&self, m: &Module) -> Result<LoweredModule, LowerError> {
+        let mut defs = Vec::with_capacity(m.items.len());
+        let mut interfaces = Vec::new();
+        let mut impls = Vec::new();
+        for item in &m.items {
+            match item {
+                Item::Fn(f) => {
+                    let def = self.lower_fn(f)?;
+                    push_def(&mut defs, f.name.clone(), def, None);
+                }
+                Item::Struct(s) => {
+                    let def = self.lower_struct(s);
+                    push_def(&mut defs, s.name.clone(), def, None);
+                }
+                Item::Enum(e) => {
+                    let (def, variants) = self.lower_enum(e);
+                    push_def(&mut defs, e.name.clone(), def, Some(variants));
+                }
+                Item::Error(e) => {
+                    let (def, variants) = self.lower_error(e);
+                    push_def(&mut defs, e.name.clone(), def, Some(variants));
+                }
+                Item::Interface(iface) => {
+                    push_def(&mut defs, iface.name.clone(), lower_interface(), None);
+                    interfaces.push(InterfaceInfo {
+                        name: iface.name.clone(),
+                        methods: iface.methods.iter().map(|s| s.name.clone()).collect(),
+                    });
+                }
+                Item::Impl(imp) => {
+                    let iface = imp.interface.last().cloned().unwrap_or_default();
+                    let key = type_key_args(&imp.args);
+                    let mut method_names = Vec::new();
+                    for meth in &imp.methods {
+                        let mangled = impl_method_name(&meth.name, &iface, &key);
+                        let def = self.lower_fn(meth)?;
+                        method_names
+                            .push((meth.name.clone(), qualify_name(&self.module_path, &mangled)));
+                        push_def(&mut defs, mangled, def, None);
+                    }
+                    impls.push(ImplInfo {
+                        interface: iface,
+                        type_key: key,
+                        methods: method_names,
+                    });
+                }
+            }
+        }
+        Ok(LoweredModule {
+            module: m.name.clone(),
+            defs,
+            interfaces,
+            impls,
+            instantiations: Vec::new(),
+        })
     }
 
     /// Module-qualify a value reference if it names an in-module item; otherwise
@@ -443,17 +752,151 @@ impl Lowerer {
         }
     }
 
+    // ---- monomorphization (`spec/01` §§3.3–3.4) -------------------------
+
+    /// When lowering a specialized body, resolve an interface-method `name` to the
+    /// global of the coherent impl selected for the bound it satisfies (`spec/01`
+    /// §3.4). Returns `None` outside a specialized body, for a non-interface name,
+    /// or when no matching impl exists (the checker reports the unsatisfied bound).
+    fn spec_dispatch(&self, name: &str) -> Option<Atom> {
+        let spec = self.spec.as_ref()?;
+        let iface = self.mono.method_iface.get(name)?;
+        for (bound_iface, key) in &spec.bounds {
+            if bound_iface == iface {
+                if let Some(entry) = self.mono.impls.get(&(iface.clone(), key.clone())) {
+                    if let Some(src) = entry.methods.get(name) {
+                        return Some(Atom::Global(symbol_hash(&qualify_name(&entry.module, src))));
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// If `name` is a generic function, infer its concrete type arguments from the
+    /// call's argument types, record a monomorphization request (deduplicated), and
+    /// return the global of the specialized instance (`spec/01` §3.3). Returns
+    /// `None` when `name` is not generic or its type arguments cannot all be
+    /// inferred (the call then lowers as an ordinary, un-specialized reference).
+    fn resolve_generic_call(&self, name: &str, args: &[Expr], env: &[Binding]) -> Option<Atom> {
+        let gf = self.mono.generics.get(name)?;
+        if gf.decl.params.len() != args.len() {
+            return None;
+        }
+        let gnames: HashSet<String> = generic_names(&gf.decl.generics).into_iter().collect();
+        // Solve the substitution by unifying each declared parameter type with the
+        // inferred argument type.
+        let mut map: HashMap<String, SType> = HashMap::new();
+        for (p, a) in gf.decl.params.iter().zip(args) {
+            let at = self.infer_type(a, env)?;
+            unify(&p.ty, &at, &gnames, &mut map);
+        }
+        // Every generic parameter must be solved to specialize.
+        let mut subst = Vec::new();
+        let mut keys = Vec::new();
+        let mut spec_bounds = Vec::new();
+        let mut args_meta = Vec::new();
+        for g in &gf.decl.generics {
+            let concrete = map.get(&g.name)?.clone();
+            let key = type_key(&concrete);
+            let bound = g
+                .bound
+                .as_ref()
+                .map(|b| b.path.last().cloned().unwrap_or_default());
+            if let Some(iface) = &bound {
+                spec_bounds.push((g.name.clone(), iface.clone(), key.clone()));
+            }
+            args_meta.push(TypeArg {
+                param: g.name.clone(),
+                type_key: key.clone(),
+                bound,
+            });
+            keys.push(key);
+            subst.push((g.name.clone(), concrete));
+        }
+        let instance_name = format!("{}@{}", name, keys.join(","));
+        let dedup = format!("{}::{}", gf.module_path, instance_name);
+        {
+            let mut pending = self.pending.borrow_mut();
+            if pending.seen.insert(dedup) {
+                pending.queue.push(InstanceReq {
+                    generic: name.to_string(),
+                    instance_name: instance_name.clone(),
+                    subst,
+                    spec_bounds,
+                    args_meta,
+                });
+            }
+        }
+        Some(Atom::Global(symbol_hash(&qualify_name(
+            &gf.module_path,
+            &instance_name,
+        ))))
+    }
+
+    /// Apply the active type-parameter substitution to a surface type (a no-op
+    /// when no substitution is active). Used to give a specialized instance's
+    /// parameters their concrete surface types.
+    fn subst_surface(&self, t: &SType) -> SType {
+        if self.subst.is_empty() {
+            return t.clone();
+        }
+        match t {
+            SType::Named(p) if p.len() == 1 => match self.subst.get(&p[0]) {
+                Some(c) => self.subst_surface(c),
+                None => t.clone(),
+            },
+            SType::Named(_) | SType::Unit => t.clone(),
+            SType::Generic { path, args } => SType::Generic {
+                path: path.clone(),
+                args: args.iter().map(|a| self.subst_surface(a)).collect(),
+            },
+            SType::Slice(e) => SType::Slice(Box::new(self.subst_surface(e))),
+            SType::Array { len, elem } => SType::Array {
+                len: *len,
+                elem: Box::new(self.subst_surface(elem)),
+            },
+            SType::Ref { mutable, inner } => SType::Ref {
+                mutable: *mutable,
+                inner: Box::new(self.subst_surface(inner)),
+            },
+            SType::ErrorUnion(o) => {
+                SType::ErrorUnion(o.as_ref().map(|t| Box::new(self.subst_surface(t))))
+            }
+            SType::Optional(t) => SType::Optional(Box::new(self.subst_surface(t))),
+        }
+    }
+
+    /// Best-effort surface type of a call argument, for generic type inference: the
+    /// usual [`Self::type_of_expr`], falling back to the literal/`()` types so a
+    /// call like `max(3, 7)` solves `T = i32`.
+    fn infer_type(&self, e: &Expr, env: &[Binding]) -> Option<SType> {
+        if let Some(t) = self.type_of_expr(e, env) {
+            return Some(t);
+        }
+        Some(match e {
+            // An unconstrained integer literal defaults to `i32` for inference.
+            Expr::Int(_) => SType::Named(vec!["i32".to_string()]),
+            Expr::Bool(_) => SType::Named(vec!["bool".to_string()]),
+            Expr::Char(_) => SType::Named(vec!["char".to_string()]),
+            Expr::Str(_) => SType::Named(vec!["str".to_string()]),
+            Expr::Unit => SType::Unit,
+            _ => return None,
+        })
+    }
+
     // ---- definitions ----------------------------------------------------
 
     fn lower_struct(&self, s: &StructDecl) -> Def {
         // Field *names* are not part of identity (`spec/02` §F): a struct's
         // content is its ordered field types. `linear` is captured by wrapping.
-        // Structs carry no generics in the surface AST, so the generic scope is
-        // empty.
+        // A generic struct's type parameters are in scope for its field types
+        // (`struct Pair[T] { a: T, b: T }`), lowering to `Type::Var`.
+        let gnames = generic_names(&s.generics);
         let field_tys: Vec<Type> = s
             .fields
             .iter()
-            .map(|f| self.lower_type(&f.ty, &[]))
+            .map(|f| self.lower_type(&f.ty, &gnames))
             .collect();
         let prod = Type::Tuple(field_tys);
         let ty = if s.linear {
@@ -476,13 +919,14 @@ impl Lowerer {
     /// alpha-equivalent enums hash identically; the variant *names* travel
     /// alongside as non-hashed [`VariantInfo`].
     fn lower_enum(&self, e: &EnumDecl) -> (Def, Vec<VariantInfo>) {
+        let gnames = generic_names(&e.generics);
         let mut variant_tys: Vec<Type> = Vec::with_capacity(e.variants.len());
         let mut info: Vec<VariantInfo> = Vec::with_capacity(e.variants.len());
         for v in &e.variants {
             let fields: Vec<Type> = v
                 .fields
                 .iter()
-                .map(|t| self.lower_type(t, &e.generics))
+                .map(|t| self.lower_type(t, &gnames))
                 .collect();
             variant_tys.push(Type::Tuple(fields.clone()));
             info.push(VariantInfo {
@@ -529,24 +973,28 @@ impl Lowerer {
     fn lower_fn(&self, f: &FnDecl) -> Result<Def, LowerError> {
         // A nullary function is curried application over a single `()` param, so
         // synthesize one (unnamed, hence never referenced) when there are none.
+        let gnames = generic_names(&f.generics);
         let synth_unit = f.params.is_empty();
         let param_ctys: Vec<Type> = if synth_unit {
             vec![Type::Unit]
         } else {
             f.params
                 .iter()
-                .map(|p| self.lower_type(&p.ty, &f.generics))
+                .map(|p| self.lower_type(&p.ty, &gnames))
                 .collect()
         };
 
-        // Params occupy de Bruijn levels 0..n; the body lowers at depth n.
+        // Params occupy de Bruijn levels 0..n; the body lowers at depth n. When
+        // re-lowering a specialized instance, the binding's surface type is the
+        // *substituted* (concrete) one so nested generic calls infer the right
+        // type arguments and projections resolve.
         let mut env: Vec<Binding> = Vec::new();
         if !synth_unit {
             for (i, p) in f.params.iter().enumerate() {
                 env.push(Binding {
                     name: p.name.clone(),
                     atom: Atom::Var(i as u32),
-                    ty: Some(p.ty.clone()),
+                    ty: Some(self.subst_surface(&p.ty)),
                     // Parameters are passed by value and are not reassignable.
                     mutable: false,
                 });
@@ -558,7 +1006,7 @@ impl Lowerer {
         let ret_ty = f
             .ret
             .as_ref()
-            .map(|t| self.lower_type(t, &f.generics))
+            .map(|t| self.lower_type(t, &gnames))
             .unwrap_or(Type::Unit);
         // M1 records declared purity only: `pure fn` ⇒ empty row; for a plain
         // `fn` the row is left empty as a placeholder — effect/error inference is
@@ -1594,10 +2042,37 @@ impl Lowerer {
     ) -> Result<(Atom, Vec<&'a Expr>), LowerError> {
         match callee {
             Expr::Field(recv, method) => {
-                let func = Atom::Global(symbol_hash(&self.qualify_value(method)));
+                // A method call `recv.m(args)` desugars to `m(recv, args)`. If `m`
+                // is an interface method and we are lowering a specialized body,
+                // dispatch it to the resolved coherent impl.
+                let func = self
+                    .spec_dispatch(method)
+                    .unwrap_or_else(|| Atom::Global(symbol_hash(&self.qualify_value(method))));
                 let mut eff: Vec<&Expr> = Vec::with_capacity(args.len() + 1);
                 eff.push(recv);
                 eff.extend(args.iter());
+                Ok((func, eff))
+            }
+            Expr::Var(name) if self.resolve_local(name, env).is_none() => {
+                // A free-function call to a bare name. Two monomorphization hooks
+                // fire here (`spec/01` §§3.3–3.4), before the ordinary path:
+                //   1. an interface method, when lowering a specialized body, is
+                //      dispatched to the resolved coherent impl;
+                //   2. a generic function is instantiated at the inferred concrete
+                //      type arguments, recording a request and referencing the
+                //      specialized symbol.
+                let func = if let Some(d) = self.spec_dispatch(name) {
+                    d
+                } else if let Some(g) = self.resolve_generic_call(name, args, env) {
+                    g
+                } else {
+                    self.emit_atom(callee, env, b)?
+                };
+                let eff: Vec<&Expr> = if args.is_empty() {
+                    vec![&UNIT_ARG]
+                } else {
+                    args.iter().collect()
+                };
                 Ok((func, eff))
             }
             _ => {
@@ -1625,12 +2100,18 @@ impl Lowerer {
 
     /// Lower a surface type. `generics` are the type-parameter names in scope
     /// (from the enclosing `fn`/`enum`); a bare name matching one becomes a
-    /// [`Type::Var`] de Bruijn index (its position in the list).
+    /// [`Type::Var`] de Bruijn index (its position in the list). When a
+    /// type-parameter substitution is active (re-lowering a specialized instance),
+    /// a bound parameter resolves to its *concrete* type instead, so the instance
+    /// carries no `Type::Var`.
     fn lower_type(&self, t: &SType, generics: &[String]) -> Type {
         match t {
             SType::Unit => Type::Unit,
             SType::Named(path) => {
                 if path.len() == 1 {
+                    if let Some(concrete) = self.subst.get(&path[0]) {
+                        return self.lower_type(concrete, generics);
+                    }
                     if let Some(i) = generics.iter().position(|g| g == &path[0]) {
                         return Type::Var(i as u32);
                     }
@@ -1871,6 +2352,125 @@ fn error_union_marker() -> Type {
     Type::Nominal {
         def: symbol_hash("@error-union"),
         args: Vec::new(),
+    }
+}
+
+/// Push a lowered definition onto a base module's def list, computing its hash.
+fn push_def(
+    defs: &mut Vec<DefEntry>,
+    name: String,
+    def: Def,
+    enum_variants: Option<Vec<VariantInfo>>,
+) {
+    let hash = def.content_hash();
+    defs.push(DefEntry {
+        name,
+        def,
+        hash,
+        enum_variants,
+    });
+}
+
+/// Lower an `interface` declaration to a [`DefKind::Interface`] [`Def`]. An
+/// interface declares abstract signatures only (`spec/01` §3.4); it carries no
+/// runnable body, and its method *types* are not part of any value's identity, so
+/// the Def is a minimal placeholder. Bound checking and impl resolution work over
+/// the [`InterfaceInfo`]/[`ImplInfo`] metadata, not this Def.
+fn lower_interface() -> Def {
+    Def {
+        kind: DefKind::Interface,
+        ty: Type::Unit,
+        requires: Vec::new(),
+        ensures: Vec::new(),
+        body: None,
+    }
+}
+
+/// The mangled source name of an impl method: `method$Interface$typekey` (e.g.
+/// `cmp$Ord$i32`). `$` cannot appear in a source identifier, so a mangled name
+/// never collides with a user definition. The matching dispatch site
+/// ([`Lowerer::spec_dispatch`]) and the registry ([`MonoReg`]) compute the same
+/// name, so a call resolves to exactly this def.
+fn impl_method_name(method: &str, interface: &str, type_key: &str) -> String {
+    format!("{method}${interface}${type_key}")
+}
+
+/// Module-qualify a name: `module.name`, or just `name` at the empty root module.
+fn qualify_name(module: &str, name: &str) -> String {
+    if module.is_empty() {
+        name.to_string()
+    } else {
+        format!("{module}.{name}")
+    }
+}
+
+/// A canonical, deterministic key for a surface type, used both to mangle
+/// instance/impl names and to match an instantiation's type argument against the
+/// impl table (`spec/01` §3.4 — deterministic resolution). The exact spelling is
+/// internal; only its stability and injectivity matter.
+fn type_key(t: &SType) -> String {
+    match t {
+        SType::Unit => "()".to_string(),
+        SType::Named(p) => p.join("."),
+        SType::Generic { path, args } => {
+            format!("{}[{}]", path.join("."), type_key_args(args))
+        }
+        SType::Slice(e) => format!("[]{}", type_key(e)),
+        SType::Array { len, elem } => format!("[{len}]{}", type_key(elem)),
+        SType::Ref { mutable, inner } => {
+            let kw = if *mutable { "&mut " } else { "&" };
+            format!("{kw}{}", type_key(inner))
+        }
+        SType::ErrorUnion(Some(t)) => format!("!{}", type_key(t)),
+        SType::ErrorUnion(None) => "!".to_string(),
+        SType::Optional(t) => format!("?{}", type_key(t)),
+    }
+}
+
+/// The comma-joined [`type_key`]s of a type-argument list (an `impl`'s concrete
+/// types, or a generic instantiation's arguments).
+fn type_key_args(args: &[SType]) -> String {
+    args.iter().map(type_key).collect::<Vec<_>>().join(",")
+}
+
+/// Solve a generic type-parameter substitution by structurally matching a
+/// declared parameter type `pat` against an inferred argument type `arg`,
+/// recording each generic name's binding in `map`. References are peeled on both
+/// sides so `&T` against `&i32` (or against `i32`) still solves `T = i32`.
+/// Unsolvable positions are simply skipped; the caller treats any unsolved
+/// generic parameter as "cannot specialize".
+fn unify(pat: &SType, arg: &SType, generics: &HashSet<String>, map: &mut HashMap<String, SType>) {
+    match pat {
+        SType::Named(p) if p.len() == 1 && generics.contains(&p[0]) => {
+            map.entry(p[0].clone())
+                .or_insert_with(|| peel_ref_ty(arg.clone()));
+        }
+        SType::Ref { inner, .. } => unify(inner, &peel_ref_ty(arg.clone()), generics, map),
+        SType::Slice(pe) => {
+            if let SType::Slice(ae) = peel_ref_ty(arg.clone()) {
+                unify(pe, &ae, generics, map);
+            }
+        }
+        SType::Array { elem: pe, .. } => {
+            if let SType::Array { elem: ae, .. } = peel_ref_ty(arg.clone()) {
+                unify(pe, &ae, generics, map);
+            }
+        }
+        SType::Generic { args: pargs, .. } => {
+            if let SType::Generic { args: aargs, .. } = peel_ref_ty(arg.clone()) {
+                for (pa, aa) in pargs.iter().zip(&aargs) {
+                    unify(pa, aa, generics, map);
+                }
+            }
+        }
+        SType::Optional(pe) => {
+            if let SType::Optional(ae) = peel_ref_ty(arg.clone()) {
+                unify(pe, &ae, generics, map);
+            }
+        }
+        // Concrete leaves (`Named` non-generic, `Unit`, error unions) constrain
+        // nothing.
+        _ => {}
     }
 }
 

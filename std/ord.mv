@@ -1,0 +1,60 @@
+mod std.ord
+
+/// The result of a total comparison: less-than, equal, or greater-than. The
+/// return type of `Ord.cmp` (`spec/01` §3.4).
+enum Ordering {
+    Lt,
+    Eq,
+    Gt,
+}
+
+/// Total ordering over a type `T`. A coherent `impl` supplies `cmp` for each
+/// concrete type; a generic function bounds a type parameter with `T: Ord` to use
+/// it (`spec/01` §3.3–3.4). Resolution is deterministic and reportable via
+/// `marv/resolveImpl`.
+interface Ord[T] {
+    fn cmp(a: T, b: T) -> Ordering
+}
+
+impl Ord[i32] {
+    fn cmp(a: i32, b: i32) -> Ordering {
+        if (a < b) {
+            Ordering.Lt
+        } else if (a > b) {
+            Ordering.Gt
+        } else {
+            Ordering.Eq
+        }
+    }
+}
+
+impl Ord[i64] {
+    fn cmp(a: i64, b: i64) -> Ordering {
+        if (a < b) {
+            Ordering.Lt
+        } else if (a > b) {
+            Ordering.Gt
+        } else {
+            Ordering.Eq
+        }
+    }
+}
+
+/// The greater of two `Ord` values (the second when equal). A generic function
+/// with an interface bound, monomorphized per concrete `T` at each call site.
+fn max[T: Ord](a: T, b: T) -> T {
+    match cmp(a, b) {
+        Ordering.Lt => b,
+        Ordering.Eq => b,
+        Ordering.Gt => a,
+    }
+}
+
+/// The lesser of two `Ord` values (the first when equal).
+fn min[T: Ord](a: T, b: T) -> T {
+    match cmp(a, b) {
+        Ordering.Lt => a,
+        Ordering.Eq => a,
+        Ordering.Gt => b,
+    }
+}

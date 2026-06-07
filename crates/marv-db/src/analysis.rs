@@ -725,6 +725,9 @@ fn world_with_propagated_effects(lowered: &LoweredModule) -> World {
         let module = LoweredModule {
             module: lowered.module.clone(),
             defs: work.clone(),
+            interfaces: lowered.interfaces.clone(),
+            impls: lowered.impls.clone(),
+            instantiations: lowered.instantiations.clone(),
         };
         let world = World::from_module(&module);
         let mut changed = false;

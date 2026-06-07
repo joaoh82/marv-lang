@@ -36,10 +36,12 @@
 //!   error-set / exhaustiveness / linearity rules that have no M0 surface form
 //!   yet.
 
+pub mod bounds;
 pub mod check;
 pub mod diagnostic;
 pub mod world;
 
+pub use bounds::{check_bounds, resolve_impl_for, resolve_impls, ImplResolution, ImplSelection};
 pub use check::{check_def, effect_row};
 pub use diagnostic::{Code, Diagnostic, Edit, Fix, Position, Related, Severity, Span};
 pub use world::{
@@ -62,5 +64,12 @@ pub fn check_module(m: &LoweredModule) -> Vec<Diagnostic> {
     for entry in &m.defs {
         diags.extend(check_def(&world, &entry.def, Some(&entry.name)));
     }
+    // Interface-bound and coherence checks run over the module's generics/impl
+    // metadata, not its Core (`spec/01` §§3.3–3.4).
+    diags.extend(
+        check_bounds(std::slice::from_ref(m))
+            .into_iter()
+            .map(|(_, d)| d),
+    );
     diags
 }

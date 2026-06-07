@@ -18,6 +18,7 @@ fixture source for the test suite. As of M4 the integer/boolean subset is
 | [`mutation.mv`](mutation.mv) | **Runnable:** construction + mutation (MARV-4) — a `struct` literal `Point { x: …, y: … }`, a `var` accumulator reassigned with `total = …`, and an in-place field update `q.x = …`. `marv run --entry main examples/mutation.mv` yields `45`; mutating the copy `q` leaves the original untouched (mutable value semantics, `spec/01` §4). |
 | [`loops.mv`](loops.mv) | **Runnable (MARV-2):** `while` loops carrying `var`s across iterations, with a Tier-1 `invariant` (`sum_to`, `pow`, `count_down`). `marv run --entry sum_to examples/loops.mv 5` yields `15`; it runs identically on the interpreter, Cranelift JIT, and WASM (differential corpus). |
 | [`casts.mv`](casts.mv) | **Runnable (MARV-7):** `char` literals (`'\n'`), `as` casts (`(n as u8)`, widening + narrowing), the fixed-array type `[N]T`, and `len(str)`. Integer casts truncate/wrap to width identically on the interpreter, Cranelift, and WASM (`tests/run/casts.mv`); a constant that overflows its narrowing target (`256 as u8`) fails `marv check` with `E0104`. |
+| [`generics.mv`](generics.mv) | **Runnable (MARV-5):** generics + an `interface`/`impl` with a bound. `max[T: Ord](a, b)` calls the interface method `cmp`; `main` calls `max(3, 7)`, which **monomorphizes** to `max@i32` and **dispatches** `cmp` to the coherent `impl Ord[i32]`. `marv run --entry main examples/generics.mv` yields `7`; `marv resolve-impl examples/generics.mv` reports the selected impl; instantiating at a type with no impl (e.g. `max(true, false)`) fails `marv check` with `E0160`. |
 
 `hello` and `report` use features still beyond the parser, so `marv fmt`
 normalizes them with its whitespace fallback for now. `geometry.mv`, `clamp.mv`,
@@ -26,11 +27,15 @@ normalizes them with its whitespace fallback for now. `geometry.mv`, `clamp.mv`,
 exercises the parser itself (`clamp.mv` joined this set in M6, when
 `requires`/`ensures` clauses became parseable; `color.mv` joined when surface
 `enum`/`match` landed — note the formatter does not yet preserve `///` doc
-comments, so these carry none). `factorial.mv`, `arithmetic.mv`, `color.mv`, `mutation.mv`, and
-`loops.mv` additionally lie inside the *executable* subset, so the interpreter runs them
-(`marv run`); the integer ones (`factorial`, `arithmetic`, `loops`) also run on the
-Cranelift JIT (`marv build --run`) and WebAssembly (`marv build --target
-wasm-component`, then via wasmtime or the browser demo in [`../web/`](../web)).
+comments, so these carry none; `generics.mv` joined when surface `interface`/`impl`
+and generic bounds landed in MARV-5). `factorial.mv`, `arithmetic.mv`, `color.mv`,
+`mutation.mv`, `loops.mv`, and `generics.mv` additionally lie inside the *executable*
+subset, so the interpreter runs them (`marv run`); the integer ones (`factorial`,
+`arithmetic`, `loops`) also run on the Cranelift JIT (`marv build --run`) and
+WebAssembly (`marv build --target wasm-component`, then via wasmtime or the browser
+demo in [`../web/`](../web)). `generics.mv` constructs an `enum` (`Ordering`), so —
+like `color.mv` — it runs on the interpreter only until aggregate codegen lands
+(MARV-9).
 
 ## Invariant: examples stay canonical
 
