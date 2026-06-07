@@ -102,7 +102,10 @@ fn interface_is_recorded_and_carries_no_type_var() {
         .any(|(meth, def)| meth == "cmp" && def == "demo.cmp$Ord$i32"));
     // The specialized instance carries no `Type::Var` (it is fully concrete).
     let inst = def(&m, "max@i32");
-    assert!(!ty_has_var(&inst.def.ty), "instance arrow still has Type::Var");
+    assert!(
+        !ty_has_var(&inst.def.ty),
+        "instance arrow still has Type::Var"
+    );
 }
 
 #[test]
@@ -163,10 +166,8 @@ fn cross_module_generic_instance_lands_in_the_defining_module() {
         .unwrap()
         .to_path_buf();
     let ord = parse(&std::fs::read_to_string(root.join("std/ord.mv")).unwrap()).expect("parse ord");
-    let app = parse(
-        "mod app\nimport std.ord (Ordering)\n\nfn main() -> i32 {\n    max(3, 7)\n}\n",
-    )
-    .expect("parse app");
+    let app = parse("mod app\nimport std.ord (Ordering)\n\nfn main() -> i32 {\n    max(3, 7)\n}\n")
+        .expect("parse app");
     let lowered = lower_modules(&[ord, app]).expect("lower prelude + app");
     let ord_mod = lowered
         .iter()
@@ -231,7 +232,10 @@ fn walk(c: &Core, out: &mut Vec<Hash>) {
         }
         Core::Ctor { fields, .. } => fields.iter().for_each(|a| atom(a, out)),
         Core::Proj { base, .. } => atom(base, out),
-        Core::Match { scrutinee, branches } => {
+        Core::Match {
+            scrutinee,
+            branches,
+        } => {
             atom(scrutinee, out);
             branches.iter().for_each(|b| walk(&b.body, out));
         }
@@ -243,7 +247,9 @@ fn walk(c: &Core, out: &mut Vec<Hash>) {
             args.iter().for_each(|a| atom(a, out));
         }
         Core::Raise { args, .. } => args.iter().for_each(|a| atom(a, out)),
-        Core::Loop { state, cond, body, .. } => {
+        Core::Loop {
+            state, cond, body, ..
+        } => {
             state.iter().for_each(|a| atom(a, out));
             walk(cond, out);
             walk(body, out);

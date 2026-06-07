@@ -66,6 +66,10 @@ pub fn check_module(m: &LoweredModule) -> Vec<Diagnostic> {
     }
     // Interface-bound and coherence checks run over the module's generics/impl
     // metadata, not its Core (`spec/01` §§3.3–3.4).
-    diags.extend(check_bounds(std::slice::from_ref(m)).into_iter().map(|(_, d)| d));
+    diags.extend(
+        check_bounds(std::slice::from_ref(m))
+            .into_iter()
+            .map(|(_, d)| d),
+    );
     diags
 }

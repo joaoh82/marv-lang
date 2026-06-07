@@ -118,10 +118,7 @@ pub fn check_bounds(modules: &[LoweredModule]) -> Vec<(String, Diagnostic)> {
                                 inst.generic, arg.param, arg.type_key, arg.type_key
                             ),
                         )
-                        .with_related(format!(
-                            "instantiated here as `{}`",
-                            inst.instance
-                        )),
+                        .with_related(format!("instantiated here as `{}`", inst.instance)),
                     ));
                 }
             }

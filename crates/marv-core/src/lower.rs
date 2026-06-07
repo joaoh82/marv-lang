@@ -266,7 +266,10 @@ pub struct TypeArg {
 /// [`lower_modules`], which shares one constructor/interface/impl registry across
 /// the set.
 pub fn lower_module(m: &Module) -> Result<LoweredModule, LowerError> {
-    Ok(lower_modules(std::slice::from_ref(m))?.into_iter().next().unwrap())
+    Ok(lower_modules(std::slice::from_ref(m))?
+        .into_iter()
+        .next()
+        .unwrap())
 }
 
 /// Lower several parsed modules that share a namespace (a prelude plus its
@@ -718,10 +721,8 @@ impl Lowerer {
                     for meth in &imp.methods {
                         let mangled = impl_method_name(&meth.name, &iface, &key);
                         let def = self.lower_fn(meth)?;
-                        method_names.push((
-                            meth.name.clone(),
-                            qualify_name(&self.module_path, &mangled),
-                        ));
+                        method_names
+                            .push((meth.name.clone(), qualify_name(&self.module_path, &mangled)));
                         push_def(&mut defs, mangled, def, None);
                     }
                     impls.push(ImplInfo {
@@ -2429,10 +2430,7 @@ fn type_key(t: &SType) -> String {
 /// The comma-joined [`type_key`]s of a type-argument list (an `impl`'s concrete
 /// types, or a generic instantiation's arguments).
 fn type_key_args(args: &[SType]) -> String {
-    args.iter()
-        .map(type_key)
-        .collect::<Vec<_>>()
-        .join(",")
+    args.iter().map(type_key).collect::<Vec<_>>().join(",")
 }
 
 /// Solve a generic type-parameter substitution by structurally matching a
@@ -2444,7 +2442,8 @@ fn type_key_args(args: &[SType]) -> String {
 fn unify(pat: &SType, arg: &SType, generics: &HashSet<String>, map: &mut HashMap<String, SType>) {
     match pat {
         SType::Named(p) if p.len() == 1 && generics.contains(&p[0]) => {
-            map.entry(p[0].clone()).or_insert_with(|| peel_ref_ty(arg.clone()));
+            map.entry(p[0].clone())
+                .or_insert_with(|| peel_ref_ty(arg.clone()));
         }
         SType::Ref { inner, .. } => unify(inner, &peel_ref_ty(arg.clone()), generics, map),
         SType::Slice(pe) => {
