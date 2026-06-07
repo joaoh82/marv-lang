@@ -73,6 +73,8 @@ fn format_item(item: &Item) -> String {
         Item::Enum(decl) => format_enum(decl),
         Item::Error(decl) => format_error(decl),
         Item::Fn(decl) => format_fn(decl),
+        Item::Interface(decl) => format_interface(decl),
+        Item::Impl(decl) => format_impl(decl),
     }
 }
 
@@ -83,14 +85,114 @@ fn format_error(decl: &ErrorDecl) -> String {
     format!("error {} {{ {} }}", decl.name, decl.variants.join(", "))
 }
 
-/// Format a generic parameter / argument list: `""` when empty, else
-/// `[A, B, ...]`.
-fn format_generics(names: &[String]) -> String {
-    if names.is_empty() {
+/// Format a generic parameter list: `""` when empty, else `[A, B: Bound, ...]`
+/// (`spec/02` §B `generics`).
+fn format_generics(generics: &[Generic]) -> String {
+    if generics.is_empty() {
         String::new()
     } else {
-        format!("[{}]", names.join(", "))
+        let parts: Vec<String> = generics.iter().map(format_generic).collect();
+        format!("[{}]", parts.join(", "))
     }
+}
+
+/// Format one generic parameter with its optional interface bound.
+fn format_generic(g: &Generic) -> String {
+    match &g.bound {
+        None => g.name.clone(),
+        Some(b) => format!("{}: {}", g.name, format_bound(b)),
+    }
+}
+
+/// Format an interface bound `Path` or `Path[args]` (`spec/02` §B `bound`).
+fn format_bound(b: &Bound) -> String {
+    let path = b.path.join(".");
+    if b.args.is_empty() {
+        path
+    } else {
+        let args: Vec<String> = b.args.iter().map(format_type).collect();
+        format!("{}[{}]", path, args.join(", "))
+    }
+}
+
+/// Indent every non-empty line of `text` by `level` four-space units. Used to
+/// place `interface`/`impl` members (formatted at column 0) inside their block.
+fn indent_lines(text: &str, level: usize) -> String {
+    let pad = indent(level);
+    text.lines()
+        .map(|l| {
+            if l.is_empty() {
+                String::new()
+            } else {
+                format!("{pad}{l}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Format an `interface` declaration (`spec/02` §B `interface_decl`): one method
+/// signature per line at 4-space indentation. An interface with no methods is
+/// `{}` on the signature line.
+fn format_interface(decl: &InterfaceDecl) -> String {
+    let mut s = format!("interface {}{}", decl.name, format_generics(&decl.generics));
+    if decl.methods.is_empty() {
+        s.push_str(" {}");
+        return s;
+    }
+    s.push_str(" {\n");
+    for m in &decl.methods {
+        let mut sig = format_docs(&m.docs);
+        sig.push_str(&format_fn_sig(m));
+        s.push_str(&indent_lines(&sig, 1));
+        s.push('\n');
+    }
+    s.push('}');
+    s
+}
+
+/// Format an abstract method signature inside an `interface` (`spec/02` §B
+/// `fn_sig`): no body, no contracts.
+fn format_fn_sig(sig: &FnSig) -> String {
+    let mut s = format!("fn {}{}(", sig.name, format_generics(&sig.generics));
+    let params: Vec<String> = sig
+        .params
+        .iter()
+        .map(|p| format!("{}: {}", p.name, format_type(&p.ty)))
+        .collect();
+    s.push_str(&params.join(", "));
+    s.push(')');
+    if let Some(ret) = &sig.ret {
+        s.push_str(" -> ");
+        s.push_str(&format_type(ret));
+    }
+    s
+}
+
+/// Format an `impl` block (`spec/02` §B `impl_decl`): each method is a full
+/// function declaration at 4-space indentation, methods separated by a blank
+/// line. An empty impl is `{}` on the header line.
+fn format_impl(decl: &ImplDecl) -> String {
+    let args: Vec<String> = decl.args.iter().map(format_type).collect();
+    let mut s = format!("impl {}[{}]", decl.interface.join("."), args.join(", "));
+    if decl.methods.is_empty() {
+        s.push_str(" {}");
+        return s;
+    }
+    s.push_str(" {\n");
+    let bodies: Vec<String> = decl
+        .methods
+        .iter()
+        .map(|m| {
+            let mut body = format_docs(&m.docs);
+            body.push_str(&format_fn(m));
+            indent_lines(&body, 1)
+        })
+        .collect();
+    s.push_str(&bodies.join("\n\n"));
+    s.push('\n');
+    s.push('}');
+    s
 }
 
 /// Format an `enum` declaration in canonical form: one variant per line, each
@@ -126,6 +228,7 @@ fn format_struct(decl: &StructDecl) -> String {
     }
     s.push_str("struct ");
     s.push_str(&decl.name);
+    s.push_str(&format_generics(&decl.generics));
     if decl.fields.is_empty() {
         s.push_str(" {}");
     } else {

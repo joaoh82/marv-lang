@@ -72,16 +72,26 @@ up only at the cast boundary; per-width **arithmetic** wrapping remains roadmap.
   see §6).
 - **function type** `fn(A) -> C`, optionally with an effect row `fn(A) -{Io}-> C`.
 
-### Aliases, constants, generics
+### Aliases, constants, generics **[impl]**
 `type Meters = f64`, `const MAX: u32 = 5`, `fn map[T, U](xs: []T, f: fn(T) -> U) -> []U`
-(explicit, monomorphized). Generic **parameter lists** on `fn`/`enum` and generic type
-**arguments** (`Option[T]`, `Result[T, E]`) now parse and lower — a bare parameter becomes a
-`Type::Var` de Bruijn index. Generic *checking* (instantiation, equality) and bounds
-(`[T: Ord]`) remain **[design]** (generics task).
+(explicit, monomorphized). Generic **parameter lists** with optional interface **bounds**
+(`fn sort[T: Ord]`) on `fn`/`struct`/`enum`, and generic type **arguments**
+(`Option[T]`, `Result[T, E]`) parse, format (round-trip), and lower — a bare parameter becomes
+a `Type::Var` de Bruijn index. At a generic **call site** the concrete type arguments are
+inferred from the argument types and the call is **monomorphized**: a specialized def is
+generated (e.g. `max@i32`) by substituting the type parameters, and the checker validates each
+bound against the available `impl`s (`E0160` when unsatisfied; `spec/01` §3.3). `type` aliases
+remain **[design]**.
 
-### Interfaces **[design]**
+### Interfaces & impls **[impl]**
 Bounded, coherent (one impl per type per interface), deterministically resolved. `interface
-Ord[T] { fn cmp(a: &T, b: &T) -> Ordering }` + `impl Ord[i32] { … }`.
+Ord[T] { fn cmp(a: T, b: T) -> Ordering }` + `impl Ord[i32] { … }` parse, format, and lower:
+an `impl`'s methods become uniquely-named concrete defs, and inside a monomorphized generic
+body an interface-method call **dispatches** to the coherent impl for the concrete type. Two
+impls for the same interface/type are rejected for coherence (`E0161`). The toolchain reports
+*which* impl a call selected via `marv resolve-impl` / `marv_types::resolve_impls` (`spec/01`
+§3.4). `std/ord.mv` is the worked example; `&T` method receivers and multi-method interfaces
+work, but per-method generic bounds beyond the interface's own parameter are minimal.
 
 ## 4. Memory model **[core]**
 

@@ -15,7 +15,7 @@ use marv_core::ir::Def;
 use marv_core::lower_module;
 use marv_db::{qualify, CoreModuleSpec};
 use marv_syntax::parse;
-use marv_types::{check_def, Diagnostic, Severity, World};
+use marv_types::{check_bounds, check_def, Diagnostic, Severity, World};
 
 /// A loaded program: everything `check`/`build`/`run` need, independent of
 /// whether it came from source or a Core snapshot.
@@ -27,6 +27,10 @@ pub struct Loaded {
     /// `verify` uses them to label counterexamples.
     pub param_names: Vec<Vec<String>>,
     pub world: World,
+    /// Interface-bound / coherence diagnostics from monomorphization
+    /// (`spec/01` §§3.3–3.4), already paired with a context name. Empty for a
+    /// Core snapshot (which carries no generics metadata).
+    pub bound_diags: Vec<(String, Diagnostic)>,
 }
 
 /// A failure to even load a file (before any checking).
@@ -84,12 +88,15 @@ fn load_source(src: &str) -> Result<Loaded, LoadError> {
         .iter()
         .map(|e| fn_param_names(&module, &e.name))
         .collect();
+    // Interface-bound and coherence checks over the module's generics metadata.
+    let bound_diags = check_bounds(std::slice::from_ref(&lowered));
     let defs = lowered.defs.into_iter().map(|e| (e.name, e.def)).collect();
     Ok(Loaded {
         module_path,
         defs,
         param_names,
         world,
+        bound_diags,
     })
 }
 
@@ -117,6 +124,7 @@ fn load_core(src: &str) -> Result<Loaded, LoadError> {
         defs,
         param_names,
         world,
+        bound_diags: Vec::new(),
     })
 }
 
@@ -132,6 +140,9 @@ impl Loaded {
                 out.push((qualified.clone(), d));
             }
         }
+        // Interface-bound / coherence diagnostics (monomorphization,
+        // `spec/01` §§3.3–3.4) come pre-paired with their context name.
+        out.extend(self.bound_diags.iter().cloned());
         out
     }
 }

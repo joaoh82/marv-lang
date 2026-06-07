@@ -31,6 +31,21 @@ pure fn is_ok[T, E](res: &Result[T, E]) -> bool
 pure fn ok[T, E](res: Result[T, E]) -> Option[T]
 ```
 
+### `std/ord.mv` — `interface Ord[T]`
+Total ordering (`spec/01` §3.4). The `Ordering` enum is the result of `cmp`; a coherent `impl`
+supplies `cmp` per concrete type (`Ord[i32]`, `Ord[i64]`), and the generic `max`/`min` bound a
+type parameter with `T: Ord`. A call like `max(3, 7)` **monomorphizes** to `max@i32` and
+**dispatches** `cmp` to `impl Ord[i32]`; `marv resolve-impl` reports the selection, and
+instantiating at a type with no `impl` fails `check` with `E0160`.
+
+```marv
+enum Ordering { Lt, Eq, Gt }
+interface Ord[T] { fn cmp(a: T, b: T) -> Ordering }
+impl Ord[i32] { fn cmp(a: i32, b: i32) -> Ordering { … } }
+fn max[T: Ord](a: T, b: T) -> T
+fn min[T: Ord](a: T, b: T) -> T
+```
+
 ## Capabilities
 
 `std/capabilities.mv` declares the standard capability types as interfaces — the operations a

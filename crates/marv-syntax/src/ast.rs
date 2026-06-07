@@ -41,23 +41,30 @@ pub struct Import {
     pub names: Option<Vec<String>>,
 }
 
-/// A top-level declaration. Covers `struct`, `enum`, `error`, and `fn`.
+/// A top-level declaration. Covers `struct`, `enum`, `error`, `fn`, `interface`,
+/// and `impl`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Item {
     Struct(StructDecl),
     Enum(EnumDecl),
     Error(ErrorDecl),
     Fn(FnDecl),
+    Interface(InterfaceDecl),
+    Impl(ImplDecl),
 }
 
 impl Item {
-    /// The declaration's source name.
+    /// The declaration's source name. For an `impl` this is the interface name it
+    /// implements (the `impl` block itself is anonymous; its methods carry their
+    /// own names).
     pub fn name(&self) -> &str {
         match self {
             Item::Struct(d) => &d.name,
             Item::Enum(d) => &d.name,
             Item::Error(d) => &d.name,
             Item::Fn(d) => &d.name,
+            Item::Interface(d) => &d.name,
+            Item::Impl(d) => d.interface.last().map(String::as_str).unwrap_or(""),
         }
     }
 
@@ -68,8 +75,84 @@ impl Item {
             Item::Enum(d) => &d.docs,
             Item::Error(d) => &d.docs,
             Item::Fn(d) => &d.docs,
+            Item::Interface(d) => &d.docs,
+            Item::Impl(d) => &d.docs,
         }
     }
+}
+
+/// One generic type parameter, optionally carrying an interface bound
+/// (`spec/02` §B `generic = ident , [ ":" , bound ]`). `T` is unbounded; `T: Ord`
+/// constrains `T` to types that implement the [`Bound`] interface.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Generic {
+    pub name: String,
+    pub bound: Option<Bound>,
+}
+
+/// An interface bound on a generic parameter (`spec/02` §B `bound = path , [ "["
+/// , type , { "," , type } , "]" ]`). `path` names the interface (e.g. `Ord`);
+/// `args` are any *extra* type arguments beyond the constrained parameter itself
+/// (empty for a single-parameter interface like `Ord[T]`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Bound {
+    pub path: Path,
+    pub args: Vec<Type>,
+}
+
+/// The parameter names of a generic list, dropping any bounds — what lowering's
+/// de Bruijn `Type::Var` resolution keys on.
+pub fn generic_names(generics: &[Generic]) -> Vec<String> {
+    generics.iter().map(|g| g.name.clone()).collect()
+}
+
+/// `interface Name[generics] { fn sig; ... }` (`spec/02` §B `interface_decl`,
+/// `spec/01` §3.4). An interface is bounded polymorphism: it declares abstract
+/// method signatures over its type parameter(s); concrete types supply bodies via
+/// an [`ImplDecl`]. The grammar requires a non-empty generic list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InterfaceDecl {
+    /// Doc-comment lines preceding the declaration (see [`ErrorDecl::docs`]).
+    pub docs: Vec<String>,
+    pub name: String,
+    /// Generic type parameter names, e.g. `["T"]` for `interface Ord[T]`. Always
+    /// non-empty (the grammar requires generics on an interface).
+    pub generics: Vec<Generic>,
+    /// The method signatures the interface declares (bodies live in `impl`s).
+    pub methods: Vec<FnSig>,
+}
+
+/// An abstract method signature inside an `interface` (`spec/02` §B `fn_sig`):
+/// like an [`FnDecl`] but with no body and no contract clauses.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FnSig {
+    /// Doc-comment lines preceding the signature (see [`ErrorDecl::docs`]).
+    pub docs: Vec<String>,
+    pub name: String,
+    /// Per-method generic parameters (rare; usually empty — the interface's own
+    /// type parameter does the work).
+    pub generics: Vec<Generic>,
+    pub params: Vec<Param>,
+    pub ret: Option<Type>,
+}
+
+/// `impl Interface[Type, ...] { fn ... }` (`spec/02` §B `impl_decl`,
+/// `spec/01` §3.4). A coherent (one per interface-per-type), explicit
+/// implementation of an interface for a concrete type. Its methods are ordinary
+/// functions whose signatures match the interface's, with the type parameter
+/// replaced by the impl's concrete type argument(s).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImplDecl {
+    /// Doc-comment lines preceding the declaration (see [`ErrorDecl::docs`]).
+    pub docs: Vec<String>,
+    /// The interface being implemented, e.g. `["Ord"]`.
+    pub interface: Path,
+    /// The concrete type argument(s) the interface is implemented for, e.g.
+    /// `[i32]` in `impl Ord[i32]`. Always non-empty (the grammar requires
+    /// brackets).
+    pub args: Vec<Type>,
+    /// The method bodies, as full function declarations.
+    pub methods: Vec<FnDecl>,
 }
 
 /// Real source spans for one top-level item, in UTF-8 byte offsets (MARV-12).
@@ -117,6 +200,9 @@ pub struct StructDecl {
     pub docs: Vec<String>,
     pub linear: bool,
     pub name: String,
+    /// Generic type parameters, e.g. `[T]` for `struct Pair[T]`. Empty when the
+    /// struct is monomorphic (`spec/02` §B `struct_decl`).
+    pub generics: Vec<Generic>,
     pub fields: Vec<Field>,
 }
 
@@ -135,9 +221,9 @@ pub struct EnumDecl {
     /// Doc-comment lines preceding the declaration (see [`ErrorDecl::docs`]).
     pub docs: Vec<String>,
     pub name: String,
-    /// Generic type parameter names, e.g. `["T"]` for `enum Option[T]`. Empty
-    /// when the enum is monomorphic.
-    pub generics: Vec<String>,
+    /// Generic type parameters, e.g. `[T]` for `enum Option[T]`. Empty when the
+    /// enum is monomorphic.
+    pub generics: Vec<Generic>,
     pub variants: Vec<Variant>,
 }
 
@@ -161,9 +247,9 @@ pub struct FnDecl {
     pub docs: Vec<String>,
     pub is_pure: bool,
     pub name: String,
-    /// Generic type parameter names, e.g. `["T"]` for `fn is_some[T](...)`.
+    /// Generic type parameters, e.g. `[T]` (or `[T: Ord]`) for `fn sort[T](...)`.
     /// Empty for a non-generic function.
-    pub generics: Vec<String>,
+    pub generics: Vec<Generic>,
     pub params: Vec<Param>,
     pub ret: Option<Type>,
     /// Preconditions, in source order (`requires` clauses).

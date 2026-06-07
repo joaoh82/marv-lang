@@ -40,5 +40,8 @@ pub mod pred;
 
 pub use hash::{content_hash, symbol_hash};
 pub use ir::*;
-pub use lower::{lower_module, lower_modules, DefEntry, LowerError, LoweredModule, VariantInfo};
+pub use lower::{
+    lower_module, lower_modules, DefEntry, ImplInfo, Instantiation, InterfaceInfo, LowerError,
+    LoweredModule, TypeArg, VariantInfo,
+};
 pub use pred::render_pred;

@@ -17,6 +17,7 @@ marv <command> [args]
 | `check`  | **working** (M2) | Type / effect / capability / error-set / reference / linearity checking. |
 | `build`  | **working** (M4 `native-cranelift`, M5 `wasm-component`) | Compile a target: Cranelift JIT or a WebAssembly module. |
 | `run`    | **working** (M4) | Interpret an entry point with an explicit capability grant set. |
+| `resolve-impl` | **working** (MARV-5) | Report each generic instantiation and which coherent `impl` its bounded type arguments select. |
 | `verify` | **working** (M6, Tier 2) | Discharge `requires`/`ensures` contracts via SMT. |
 | `commit` | **working** (M7) | Freeze definitions into the content-addressed store; report the lockfile delta. |
 
@@ -159,6 +160,29 @@ with capabilities as host imports; full component/WIT packaging is a later step.
 All three backends — interpreter, Cranelift, and WASM — are differentially tested
 for agreement on a corpus under [`../tests/run/`](../tests/run); the WASM sandbox
 also ships a browser demo. See [`run-and-codegen.md`](run-and-codegen.md).
+
+## `marv resolve-impl`
+
+```
+marv resolve-impl <file>
+```
+
+The `marv/resolveImpl` report (`spec/01` §3.4): for every generic instantiation
+the program requests, print which coherent `impl` each of its bounded type
+arguments resolves to, and the fully-qualified definition each interface method
+dispatches to. Also surfaces any unsatisfied-bound (`E0160`) or coherence
+(`E0161`) violations (exiting non-zero if present).
+
+```
+marv resolve-impl examples/generics.mv
+# generics.max@i32 (instantiates `max`)
+#     T: Ord = i32  ->  impl Ord[i32]
+#         cmp -> generics.cmp$Ord$i32
+```
+
+This makes monomorphization auditable: a human (or agent) can confirm exactly
+which implementation a generic call selected, with no global inference or orphan
+ambiguity.
 
 ## `marv verify`
 
