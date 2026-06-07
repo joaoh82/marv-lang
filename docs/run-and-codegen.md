@@ -40,15 +40,45 @@ The integer/boolean core the M0/M1 front end can express and lower:
   block with the carried `var`s as SSA block parameters in Cranelift, and as
   mutable locals under a `block { loop { … } }` in WASM. The carried-state tuple
   the body/loop produce is a compile-time register/local bundle (no heap), so
-  multi-variable loops work without aggregate layout.
+  multi-variable loops work without aggregate layout;
+- **aggregates and enums (MARV-9):** `struct`/tuple products and `enum` tagged
+  unions — `Ctor`, field `Proj`, and an n-way `Match` that binds a variant's
+  fields (`binds > 0`). See the representation below.
 
 Every scalar lives in a 64-bit register in *both* backends, so their wrapping
 arithmetic matches — the property that makes the differential test meaningful.
-Constructs the Cranelift backend cannot lower (aggregate runtime layout,
-`perform` — now expressible from source, MARV-6 — first-class closures, floats)
-are interpreted where the interpreter can, and Cranelift returns an honest
-`unsupported` rather than emitting wrong code. New constructs land in *both*
-backends together so agreement is preserved.
+Constructs the Cranelift backend cannot lower (`perform` — now expressible from
+source, MARV-6, and lowered by the WASM backend — first-class closures, floats,
+`len`/index over arrays) are interpreted where the interpreter can, and Cranelift
+returns an honest `unsupported` rather than emitting wrong code. New constructs
+land in *both* backends together so agreement is preserved.
+
+### Aggregate & enum representation (MARV-9)
+
+Every marv value is one machine word. A scalar *is* that word; an aggregate is a
+**pointer** to `(1 + arity)` contiguous `i64` words laid out as
+`[tag, field_0, …, field_{n-1}]` (`spec/02` §C). Products (`struct`/tuple) use
+tag 0; an `enum` variant uses its tag. The layout is **identical across all
+three backends** — the interpreter's tagged `Value::Agg`, Cranelift's heap
+block, and the WASM linear-memory block — so "interp == Cranelift == wasm" stays
+a checkable statement.
+
+- **Cranelift** boxes via a host `marv_rt_alloc` symbol; `Proj` is a load, and an
+  enum `Match` loads the tag from word 0 and dispatches through a `br_table`,
+  binding each arm's fields by loading them from the payload.
+- **WASM** boxes into a linear memory (one memory + a mutable bump-pointer global,
+  both module-internal so a *pure* module's import manifest is unchanged); the
+  enum `Match` is the same tag-load + dispatch over the payload.
+- Boxing is **lazy**: a `Ctor` is a compile-time register/local bundle and is
+  only spilled to the heap when it must cross a function boundary, be returned, or
+  be matched as a runtime value — so loops (whose carried state never escapes)
+  allocate nothing. The backend tells a scalar `bool` `Match` (the `if`/`else`
+  desugaring) from a boxed `enum` one by the scrutinee's *type*
+  (`marv_types::layout`), the one fact the type-erased Core does not carry.
+
+Neither backend reclaims (marv has no GC yet, `spec/01` §4): Cranelift leaks and
+WASM bump-allocates without freeing. This is fine for the short-lived programs
+the toolchain runs today; a real allocator/`Alloc` capability is later work.
 
 ## Capabilities are injected, never ambient
 
@@ -76,6 +106,10 @@ the results are equal to each other and to a hand-computed golden value:
 | `classify.mv`   | boolean `and`, comparisons |
 | `ops.mv`        | every arithmetic prim + comparisons in one body |
 | `loops.mv`      | `while` loops + `invariant` (`sum_to`, `pow`, `count_down`) — `Core::Loop` |
+| `casts.mv` / `unary.mv` | `as` width truncation/wrapping; prefix `-`/`not` |
+| `structs.mv`    | `struct` `Ctor`/`Proj`; a struct returned from and passed to a function (boxed across the boundary) — MARV-9 |
+| `color.mv`      | n-way `enum` `Match` (jump table on tag) over a boxed enum built behind a call and through `if`/`else` — MARV-9 |
+| `shapes.mv`     | payload-carrying variants + `Match` arms that bind fields (`binds > 0`) — MARV-9 |
 
 The negative case is `uses_ungranted_cap.core.json`: a Core-IR snapshot whose
 `leak(fs: Fs, path: str)` body `perform`s `Fs` while declaring the empty
@@ -99,10 +133,11 @@ marv run   examples/arithmetic.mv                            # 42  (entry defaul
 ## The WebAssembly backend (M5)
 
 `marv-codegen-wasm` is the third backend, emitting a WebAssembly module with
-`wasm-encoder`. It compiles the same integer/boolean subset as Cranelift, plus
-`Core::Perform`, and every scalar is an `i64` — so it stays in lockstep with the
-oracle. `marv build --target wasm-component <file> -o out.wasm` writes the module
-and prints its capability manifest.
+`wasm-encoder`. It compiles the same subset as Cranelift — including aggregates
+and enums over a linear-memory heap (MARV-9) — plus `Core::Perform`, and every
+scalar is an `i64`, so it stays in lockstep with the oracle. `marv build --target
+wasm-component <file> -o out.wasm` writes the module and prints its capability
+manifest.
 
 ### Capabilities are host imports
 
@@ -145,11 +180,13 @@ cd web && python3 -m http.server 8087   # then open http://localhost:8087/
 
 - **Done:** interpreter over the full Core IR (capability injection, effect
   logging, currying, recursion, `match`); a Cranelift JIT and a WebAssembly
-  backend over the integer/boolean subset; `marv run`, `marv build --target
+  backend over the integer/boolean subset **plus heap-boxed aggregates and enums
+  with field-binding `match`** (MARV-9); `marv run`, `marv build --target
   native-cranelift`, `marv build --target wasm-component`; the three-way
   differential gate (interpreter ↔ Cranelift ↔ wasm) and a browser sandbox demo.
-- **Next:** aggregates and enum `match` in the native/wasm backends;
-  ahead-of-time object/executable emission and an LLVM backend for release builds;
-  string/aggregate-typed capability operands (needs linear memory) and full
-  component-model / WIT packaging. The interpreter remains the oracle each backend
-  is differentially tested against.
+- **Next:** ahead-of-time object/executable emission and an LLVM backend for
+  release builds (MARV-10); a real allocator/garbage reclamation (both backends
+  currently leak — `spec/01` §4); array/slice literals with `len`/index codegen;
+  string/aggregate-typed capability operands and full component-model / WIT
+  packaging. The interpreter remains the oracle each backend is differentially
+  tested against.

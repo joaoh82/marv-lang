@@ -1,0 +1,31 @@
+mod demo
+
+enum Color {
+    Red,
+    Green,
+    Blue,
+}
+
+pure fn rank(c: Color) -> i64 {
+    match c {
+        Color.Red => 1,
+        Color.Green => 2,
+        Color.Blue => 3,
+    }
+}
+
+pure fn pick(n: i64) -> Color {
+    if (n == 0) {
+        Color.Red
+    } else {
+        if (n == 1) {
+            Color.Green
+        } else {
+            Color.Blue
+        }
+    }
+}
+
+pure fn rank_of(n: i64) -> i64 {
+    rank(pick(n))
+}

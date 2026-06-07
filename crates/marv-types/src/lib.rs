@@ -39,11 +39,13 @@
 pub mod bounds;
 pub mod check;
 pub mod diagnostic;
+pub mod layout;
 pub mod world;
 
 pub use bounds::{check_bounds, resolve_impl_for, resolve_impls, ImplResolution, ImplSelection};
 pub use check::{check_def, effect_row};
 pub use diagnostic::{Code, Diagnostic, Edit, Fix, Position, Related, Severity, Span};
+pub use layout::{atom_type, is_boxed, tuple_field_types, type_of, variant_fields};
 pub use world::{
     CapDecl, EnumDecl, ErrorDecl, OpSig, StructDecl, VariantDecl, World, WorldBuilder,
 };
