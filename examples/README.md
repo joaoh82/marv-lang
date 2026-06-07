@@ -8,9 +8,10 @@ fixture source for the test suite. As of M4 the integer/boolean subset is
 
 | File | Shows |
 |------|-------|
-| [`hello.mv`](hello.mv) | Capabilities as parameters — power enters only through `Io`. |
+| [`hello.mv`](hello.mv) | **Runnable (MARV-6):** capabilities & `perform` from source — `io.stdout()` narrows `Io` to a `Stream`, `out.write(...)` performs. `marv run --grant Io examples/hello.mv` logs the `Io`/`Stream` effects; without `--grant Io` it is refused. |
+| [`read_file.mv`](read_file.mv) | **Runnable (MARV-6):** capability **narrowing** — `io.fs()` attenuates `Io` to `Fs`, then `fs.read(path)` performs. `marv run --grant Io examples/read_file.mv /etc/hosts` records the `Io`→`Fs` narrowing and the read; the signature alone proves it touches only the filesystem. |
 | [`clamp.mv`](clamp.mv) | **Verifiable (M6):** a `pure` function with `requires`/`ensures` contracts. `marv verify examples/clamp.mv` proves it (Tier 2); `marv run` enforces it at runtime (Tier 1). |
-| [`report.mv`](report.mv) | `struct`/`error` decls, second-class `&` references, a loop `invariant`, effect rows, and inferred error sets. |
+| [`report.mv`](report.mv) | **Checks (MARV-6):** `struct`/`error` decls, second-class `&` references, a loop `invariant`, an inferred error set, and a real capability `perform` — `load_and_total(fs: Fs, …)` does `fs.read(path)?`. |
 | [`geometry.mv`](geometry.mv) | The **M0 parsed subset** end to end: `struct`/`linear struct`, `pure fn`, `&`/`&mut` params, `if`/`else`, fully-parenthesized binary operators. Round-trips through the real parser. |
 | [`factorial.mv`](factorial.mv) | **Runnable (M4):** recursion + an `if`. `marv run --entry factorial 6` and `marv build --run …` both yield `720`. |
 | [`arithmetic.mv`](arithmetic.mv) | **Runnable (M4):** a nullary `main` that calls two other functions — curried cross-function calls lowered to direct native calls. |
@@ -20,22 +21,20 @@ fixture source for the test suite. As of M4 the integer/boolean subset is
 | [`casts.mv`](casts.mv) | **Runnable (MARV-7):** `char` literals (`'\n'`), `as` casts (`(n as u8)`, widening + narrowing), the fixed-array type `[N]T`, and `len(str)`. Integer casts truncate/wrap to width identically on the interpreter, Cranelift, and WASM (`tests/run/casts.mv`); a constant that overflows its narrowing target (`256 as u8`) fails `marv check` with `E0104`. |
 | [`generics.mv`](generics.mv) | **Runnable (MARV-5):** generics + an `interface`/`impl` with a bound. `max[T: Ord](a, b)` calls the interface method `cmp`; `main` calls `max(3, 7)`, which **monomorphizes** to `max@i32` and **dispatches** `cmp` to the coherent `impl Ord[i32]`. `marv run --entry main examples/generics.mv` yields `7`; `marv resolve-impl examples/generics.mv` reports the selected impl; instantiating at a type with no impl (e.g. `max(true, false)`) fails `marv check` with `E0160`. |
 
-`hello` and `report` use features still beyond the parser, so `marv fmt`
-normalizes them with its whitespace fallback for now. `geometry.mv`, `clamp.mv`,
-`factorial.mv`, `arithmetic.mv`, and `color.mv` are inside the parsed subset, so
-`marv fmt` reprints them from the AST and the `examples_are_canonical` test
-exercises the parser itself (`clamp.mv` joined this set in M6, when
-`requires`/`ensures` clauses became parseable; `color.mv` joined when surface
-`enum`/`match` landed — note the formatter does not yet preserve `///` doc
-comments, so these carry none; `generics.mv` joined when surface `interface`/`impl`
-and generic bounds landed in MARV-5). `factorial.mv`, `arithmetic.mv`, `color.mv`,
-`mutation.mv`, `loops.mv`, and `generics.mv` additionally lie inside the *executable*
-subset, so the interpreter runs them (`marv run`); the integer ones (`factorial`,
-`arithmetic`, `loops`) also run on the Cranelift JIT (`marv build --run`) and
-WebAssembly (`marv build --target wasm-component`, then via wasmtime or the browser
-demo in [`../web/`](../web)). `generics.mv` constructs an `enum` (`Ordering`), so —
-like `color.mv` — it runs on the interpreter only until aggregate codegen lands
-(MARV-9).
+Every example now parses, formats, and checks through the **real** front end — the
+`examples_are_canonical` test reprints each from the AST (the formatter's whitespace
+fallback is no longer needed for any of them). `hello`, `read_file`, and `report` joined
+when capabilities & `perform` from source landed (MARV-6); `clamp.mv` joined in M6 with
+`requires`/`ensures`; `color.mv` when `enum`/`match` landed; `generics.mv` when
+`interface`/`impl` + generic bounds landed (MARV-5). `factorial.mv`, `arithmetic.mv`,
+`color.mv`, `mutation.mv`, `loops.mv`, and `generics.mv` additionally lie inside the
+*executable* subset, so the interpreter runs them (`marv run`); the integer ones
+(`factorial`, `arithmetic`, `loops`) also run on the Cranelift JIT (`marv build --run`)
+and WebAssembly (`marv build --target wasm-component`, then via wasmtime or the browser
+demo in [`../web/`](../web)). `hello`/`read_file` run on the interpreter under
+`marv run --grant Io` (capability ops are interpreter-modeled; Cranelift rejects
+`perform`). `generics.mv` constructs an `enum` (`Ordering`), so — like `color.mv` — it
+runs on the interpreter only until aggregate codegen lands (MARV-9).
 
 ## Invariant: examples stay canonical
 

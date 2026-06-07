@@ -1,6 +1,7 @@
 //! Interpreter behavior tests: pure evaluation through the real front end, and
-//! the capability-injection sandbox (`spec/03` §4.5) over hand-built Core (which
-//! the M0/M1 surface cannot yet express).
+//! the capability-injection sandbox (`spec/03` §4.5) — driven both over
+//! hand-built Core and, since MARV-6, from real `.mv` source that performs and
+//! narrows capabilities.
 
 use marv_core::ir::*;
 use marv_core::{lower_module, symbol_hash};
@@ -205,4 +206,68 @@ fn unknown_entry_is_an_error() {
         prog.run("nope", &[], &[]).unwrap_err(),
         RunError::NoSuchEntry("nope".to_string())
     );
+}
+
+/// Capabilities and narrowing driven from real `.mv` source (MARV-6, `spec/01`
+/// §5): `io.fs()` narrows the granted `Io` to an `Fs` value, against which
+/// `fs.read(path)` then performs — so granting only `Io` is enough, and both
+/// the narrowing op and the read are recorded as effects in order.
+#[test]
+fn narrowing_from_source_runs_with_only_the_root_granted() {
+    let src = "\
+mod demo
+
+interface Io {
+    fn fs(io: &Io) -> Fs
+}
+
+interface Fs {
+    fn read(fs: &Fs, path: str) -> ![]u8
+}
+
+fn main(io: Io, path: str) -> ![]u8 {
+    let fs = io.fs()
+    fs.read(path)
+}
+";
+    let prog = program_from_source(src);
+    let out = prog
+        .run("main", &["Io".to_string()], &["/etc/hosts".to_string()])
+        .expect("run with Io granted");
+    // Two effects, in order: the narrowing op on `Io`, then the read on `Fs`.
+    assert_eq!(out.effects.len(), 2);
+    assert_eq!(out.effects[0].cap, "Io");
+    assert_eq!(out.effects[1].cap, "Fs");
+    assert_eq!(out.effects[1].op, 0);
+    assert_eq!(
+        out.effects[1].args,
+        vec![Value::Str("/etc/hosts".to_string())]
+    );
+}
+
+/// Granting only the narrowed capability (not the root it is narrowed *from*)
+/// cannot satisfy an entry that receives the root: the value is never created.
+#[test]
+fn entry_root_capability_must_be_granted() {
+    let src = "\
+mod demo
+
+interface Io {
+    fn fs(io: &Io) -> Fs
+}
+
+interface Fs {
+    fn read(fs: &Fs, path: str) -> ![]u8
+}
+
+fn main(io: Io, path: str) -> ![]u8 {
+    let fs = io.fs()
+    fs.read(path)
+}
+";
+    let prog = program_from_source(src);
+    let err = prog
+        .run("main", &["Fs".to_string()], &["/etc/hosts".to_string()])
+        .unwrap_err();
+    assert_eq!(err, RunError::UngrantedCapability("Io".to_string()));
 }

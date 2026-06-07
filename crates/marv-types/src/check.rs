@@ -271,8 +271,12 @@ impl<'a> Checker<'a> {
     /// Report each capability and error the body infers but the signature does
     /// not declare, with the mechanical fix (`spec/03` §2).
     fn check_subsumption(&mut self, declared: &EffectRow, inferred: &EffectRow, errors_open: bool) {
+        // A held capability authorizes everything it can be *narrowed* to
+        // (`spec/01` §5), so subsumption is checked against the narrowing closure
+        // of the declared row, not just its literal entries.
+        let authorized = self.world.authorized_caps(&declared.caps);
         for cap in &inferred.caps {
-            if !declared.caps.contains(cap) {
+            if !authorized.contains(cap) {
                 let name = self.world.cap_name(cap);
                 let param = lowercase_first(&name);
                 self.emit(

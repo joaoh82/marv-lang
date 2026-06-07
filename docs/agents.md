@@ -68,8 +68,10 @@ marv verify <file> [--def NAME]                # SMT: proved / failed+counterexa
 marv commit <file> [--store .marv]             # freeze into the content-addressed store
 ```
 
-Both `.mv` source and `*.core.json` Core-IR snapshots are accepted (the latter is currently
-the only way to express capability `perform` and enums, until that surface lands).
+Both `.mv` source and `*.core.json` Core-IR snapshots are accepted. Enums and capability
+`perform`/narrowing are now expressible directly in `.mv` source (MARV-1, MARV-6); a source
+file that `import std.*` is resolved against the `std/` directory automatically. The
+`*.core.json` path remains for hand-authoring Core IR directly.
 
 ## The MCP server
 
@@ -168,10 +170,12 @@ The parser currently accepts: `mod`/`import`, `struct`/`fn` (incl. `pure fn`),
 literals + index reads + assignment (`lvalue = e`, `var`), `while`/`for` loops with
 `invariant`, `let`/`var`, `if`/`else`, the binary operators, the prefix unary operators
 (`-e`, `not e`, `&e`/`&mut e`), calls/recursion, field
-projection, generic parameter lists + type arguments, and `requires`/`ensures` contracts.
-Generics monomorphization, capabilities-from-source, and collection literals are on the
-surface roadmap — to use those features today, construct a `*.core.json` snapshot (see
-[`store.md`](store.md) and the `tests/run/*.core.json` fixtures) or check
+projection, generic parameter lists + type arguments, `interface`/`impl` with
+monomorphization, **capabilities & `perform` from source** (capability method calls →
+`Perform`, `io.fs()` narrowing, inferred-and-checked effect rows), and `requires`/`ensures`
+contracts. Collection literals, `linear` capabilities, and cross-module linking are the
+remaining surface roadmap — for anything not yet expressible, construct a `*.core.json`
+snapshot (see [`store.md`](store.md) and the `tests/run/*.core.json` fixtures) or check
 [`roadmap.md`](roadmap.md).
 
 See [`../spec/03-compiler-protocol.md`](../spec/03-compiler-protocol.md) for the full protocol

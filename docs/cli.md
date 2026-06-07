@@ -23,9 +23,18 @@ marv <command> [args]
 
 `check`, `build`, `run`, `verify`, and `commit` accept either a `.mv` **source** file (parsed and
 lowered through the front end) or a `*.core.json` **Core-IR snapshot**
-(`marv_db::CoreModuleSpec`) — currently the only way to express a body that
-`perform`s a capability, since the surface has no `perform` form yet
-(`spec/03` §3.1).
+(`marv_db::CoreModuleSpec`, `spec/03` §3.1). Capability use is now expressible in
+`.mv` source: a method call on a capability value (`io.stdout().write(...)`,
+`io.fs()`) lowers to a `Core::Perform` and its effect row is inferred and checked
+(MARV-6). `.core.json` remains useful for hand-authoring Core directly.
+
+**`import std.*` resolution.** When a source file imports a `std` module
+(e.g. `import std.io (Io)`), the CLI locates the `std/` source directory — the
+`MARV_STD` environment variable if set, else the nearest ancestor of the file that
+contains one — parses the imported modules (transitively), and lowers them
+alongside your file so the capability interfaces are in scope. General
+cross-module linking via the content store is MARV-14; this is the minimal
+resolution the capability surface needs.
 
 ## `marv fmt`
 
@@ -110,6 +119,8 @@ logged to stderr as `effect: <cap> op#<n> [<args>]`.
 ```sh
 marv run examples/factorial.mv --entry factorial 6     # prints 720
 marv run examples/arithmetic.mv                         # entry defaults to main → 42
+marv run --grant Io examples/hello.mv                   # logs: effect: Io op#5 / Stream op#0 ["hello, marv\n"]
+marv run examples/hello.mv                              # refused: capability `Io` not granted
 ```
 
 ## `marv build`

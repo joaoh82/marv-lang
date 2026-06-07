@@ -58,9 +58,12 @@ tests pin down:
 Two spec features are intentionally not in M1 and are documented at their call
 sites in the source:
 
-- **Effect/error-row inference.** Every lowered arrow currently carries the empty
-  row; a declared `pure fn` is therefore already exact, while a plain `fn` uses
-  the empty row as a placeholder. Inferring real capability/error rows is M2.
+- **Effect/error-row inference.** A non-`pure` function's lowered arrow now
+  carries the **capability** row implied by its capability parameters (`spec/01`
+  §5, MARV-6); a `pure fn` carries the empty row. Error sets stay inferred via the
+  checker (carried as a `@error-union` marker in `!T`, not in the row). The
+  checker (M2) infers the body's actual row from its `Perform`/`Raise` sites and
+  verifies it against the declared one.
 - **Reference resolution to content hashes.** Cross-definition references
   (`Global` values, `Nominal` types) resolve via `symbol_hash` — a stable hash of
   the resolved, module-qualified *name* — rather than the target's own Core hash.
