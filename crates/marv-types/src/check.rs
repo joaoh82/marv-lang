@@ -442,6 +442,8 @@ impl<'a> Checker<'a> {
 
             Core::Ctor { ty, tag, fields } => self.synth_ctor(ty, *tag, fields, env),
 
+            Core::Array { elem, items } => self.synth_array(elem, items, env),
+
             Core::Proj { base, idx } => {
                 let bt = self.atom_ty(base, env);
                 let ty = self.proj_ty(&bt, *idx);
@@ -627,6 +629,36 @@ impl<'a> Checker<'a> {
         };
         Out {
             ty: Ty::Known(result),
+            eff: EffectRow::empty(),
+            uses,
+        }
+    }
+
+    /// Type an array literal `[e0, e1, …]` ([`Core::Array`]). Every element must
+    /// be compatible with the array's declared element type (homogeneity); a
+    /// second-class reference may not be stored as an element (it would escape).
+    /// The result is the fixed-length array type `[N]elem`.
+    fn synth_array(&mut self, elem: &Type, items: &[Atom], env: &mut Vec<Binder>) -> Out {
+        let mut uses = Uses::new();
+        for (i, a) in items.iter().enumerate() {
+            let at = self.atom_ty(a, env);
+            if is_ref(&at) {
+                self.emit(escaping_ref_diag(EscapeSite::CtorField(i)));
+            }
+            if !compatible(&Ty::Known(elem.clone()), &at) {
+                self.emit(Diagnostic::error(
+                    Code::TypeMismatch,
+                    format!(
+                        "array element {i} has type `{}` but the array's element type is `{}`",
+                        show_ty(&at),
+                        show_type(elem)
+                    ),
+                ));
+            }
+            uses = seq(&uses, &atom_uses(a, env));
+        }
+        Out {
+            ty: Ty::Known(Type::Array(Box::new(elem.clone()), items.len() as u64)),
             eff: EffectRow::empty(),
             uses,
         }
@@ -1179,7 +1211,7 @@ fn lit_ty(l: &Literal) -> Ty {
 
 fn value_prov(value: &Core) -> Prov {
     match value {
-        Core::Ctor { .. } | Core::Prim { .. } => Prov::Computed,
+        Core::Ctor { .. } | Core::Array { .. } | Core::Prim { .. } => Prov::Computed,
         _ => Prov::Other,
     }
 }

@@ -1,0 +1,58 @@
+mod arrays
+
+// Array literal + indexed reads (MARV-30): `[e0, …]` constructs a boxed
+// `[len, e0, …]` block; `a[i]` loads element `i`.
+pure fn sum3() -> i64 {
+    let a: [3]i64 = [10, 20, 12]
+    ((a[0] + a[1]) + a[2])
+}
+
+// Index with a runtime (parameter) subscript.
+pure fn nth(i: i64) -> i64 {
+    let a: [4]i64 = [5, 6, 7, 8]
+    a[i]
+}
+
+// `len` over an array (the header word), surfaced as an `i64`.
+pure fn length() -> i64 {
+    let a: [4]i64 = [9, 9, 9, 9]
+    (len(a) as i64)
+}
+
+// `len` + indexed read driving a `while` loop (carried `usize` index).
+pure fn sum_all() -> i64 {
+    let a: [5]i64 = [1, 2, 3, 4, 5]
+    var s: i64 = 0
+    var i: usize = 0
+    while (i < len(a)) {
+        s = (s + a[i])
+        i = (i + 1)
+    }
+    s
+}
+
+// Index store `a[i] = e` (MARV-30): a functional element update under mutable
+// value semantics. Constant subscript.
+pure fn set_get() -> i64 {
+    var a: [3]i64 = [1, 2, 3]
+    a[1] = 42
+    a[1]
+}
+
+// Index store with a runtime subscript, then sum every element back.
+pure fn set_sum(i: i64) -> i64 {
+    var a: [3]i64 = [1, 2, 3]
+    a[i] = 10
+    ((a[0] + a[1]) + a[2])
+}
+
+// `for x in a { … }` over an array: the desugared `len`/index loop (`spec/02` §D)
+// now runs on a real collection, on all three backends.
+pure fn sum_for() -> i64 {
+    let a: [4]i64 = [2, 4, 6, 8]
+    var total: i64 = 0
+    for x in a {
+        total = (total + x)
+    }
+    total
+}

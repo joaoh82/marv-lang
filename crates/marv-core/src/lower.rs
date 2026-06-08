@@ -81,8 +81,10 @@ pub enum LowerError {
     AssignToImmutable { name: String },
     /// Assignment to a name that is not a binding in scope.
     AssignToUndeclared { name: String },
-    /// Index assignment `a[i] = e`. Functional element update needs an
-    /// array/slice store, which arrives with aggregate codegen (MARV-9).
+    /// Index assignment `a[i] = e` whose base is not a fixed-length array. The
+    /// functional element update (`spec/01` §4) unrolls over the array's static
+    /// length, so a slice (`[]T`, no compile-time length) or a base whose type
+    /// M1 cannot resolve is not yet supported.
     IndexAssignUnsupported,
     /// A loop body ends in a `return`, `if`, or `match` tail. Threading
     /// loop-carried `var`s through a branch join is deferred (MARV-2 lowers
@@ -150,8 +152,8 @@ impl std::fmt::Display for LowerError {
             }
             LowerError::IndexAssignUnsupported => write!(
                 f,
-                "index assignment `a[i] = e` is not supported yet (it needs an array/slice store, \
-                 which arrives with aggregate codegen, MARV-9)"
+                "index assignment `a[i] = e` requires a fixed-length array base (`[N]T`); a slice \
+                 (`[]T`) has no compile-time length to unroll the element update over yet"
             ),
             LowerError::LoopBodyControlFlow => write!(
                 f,
@@ -1539,6 +1541,10 @@ impl Lowerer {
                     args: vec![ab, ai],
                 }))
             }
+            Expr::Array(items) => {
+                let node = self.emit_array(items, env, b)?;
+                Ok(b.push(node))
+            }
             Expr::Struct { path, fields } => {
                 let node = self.emit_struct_lit(path, fields, env, b)?;
                 Ok(b.push(node))
@@ -1562,6 +1568,43 @@ impl Lowerer {
                 }
                 Ok(cur)
             }
+        }
+    }
+
+    /// Lower an array literal `[e0, e1, …]` to a [`Core::Array`] (`spec/02` §B
+    /// `primary`). Elements are emitted left-to-right (ANF order); the carried
+    /// element type is the inferred type of the first element (see
+    /// [`Self::array_elem_stype`]).
+    fn emit_array(
+        &self,
+        items: &[Expr],
+        env: &[Binding],
+        b: &mut Builder,
+    ) -> Result<Core, LowerError> {
+        let elem = self.lower_type(&self.array_elem_stype(items, env), &[]);
+        let atoms = items
+            .iter()
+            .map(|e| self.emit_atom(e, env, b))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Core::Array { elem, items: atoms })
+    }
+
+    /// Best-effort surface element type of an array literal: the inferred type of
+    /// its first element, with a bare integer literal defaulting to `i64` (the
+    /// runtime word width, and the width a flexible int literal unifies with) and
+    /// an empty array to `()`. Lowering only needs *an* element type so `len` and
+    /// `index` over the array resolve; the checker re-derives and enforces
+    /// homogeneity from the elements themselves.
+    fn array_elem_stype(&self, items: &[Expr], env: &[Binding]) -> SType {
+        match items.first() {
+            None => SType::Unit,
+            Some(e) => self.type_of_expr(e, env).unwrap_or_else(|| match e {
+                Expr::Int(_) => SType::Named(vec!["i64".to_string()]),
+                Expr::Bool(_) => SType::Named(vec!["bool".to_string()]),
+                Expr::Char(_) => SType::Named(vec!["char".to_string()]),
+                Expr::Str(_) => SType::Named(vec!["str".to_string()]),
+                _ => SType::Unit,
+            }),
         }
     }
 
@@ -1631,6 +1674,7 @@ impl Lowerer {
                     args: vec![ab, ai],
                 })
             }
+            Expr::Array(items) => self.emit_array(items, env, b),
             Expr::Struct { path, fields } => self.emit_struct_lit(path, fields, env, b),
             Expr::Field(base, field) => {
                 if let Some(c) = self.field_nullary_ctor(base, field, env) {
@@ -1870,7 +1914,59 @@ impl Lowerer {
                 });
                 self.assign_to(base, rebuilt, env, b)
             }
-            LValue::Index(..) => Err(LowerError::IndexAssignUnsupported),
+            LValue::Index(base, index) => {
+                // `a[i] = e` under mutable value semantics (`spec/01` §4): produce
+                // a fresh array equal to the old one except position `i` holds the
+                // new value, then rebind the root. The array's length must be
+                // statically known (a fixed `[N]T`); a slice has no compile-time
+                // length, so its element store stays unsupported for now.
+                let base_expr = lvalue_to_expr(base);
+                let bt = self
+                    .type_of_expr(&base_expr, env.as_slice())
+                    .ok_or(LowerError::IndexAssignUnsupported)?;
+                let (len, elem_st) = match peel_ref_ty(bt) {
+                    SType::Array { len, elem } => (len, *elem),
+                    _ => return Err(LowerError::IndexAssignUnsupported),
+                };
+                let elem = self.lower_type(&elem_st, &[]);
+                // Evaluate the current array and the index once.
+                let arr_atom = self.emit_atom(&base_expr, env.as_slice(), b)?;
+                let idx_atom = self.emit_atom(index, env.as_slice(), b)?;
+                // Rebuild element-by-element: position `j` is the new value when
+                // `j == i`, else the old `a[j]`. With `len` known this unrolls into
+                // `len` selects, reusing the array read + a two-arm `bool` `Match`
+                // (no new backend machinery).
+                let mut items = Vec::with_capacity(len as usize);
+                for j in 0..len {
+                    let jlit = Atom::Lit(Literal::Int(j as i64));
+                    let old_j = b.push(Core::Prim {
+                        op: PrimOp::Index,
+                        args: vec![arr_atom.clone(), jlit.clone()],
+                    });
+                    let is_j = b.push(Core::Prim {
+                        op: PrimOp::Eq,
+                        args: vec![idx_atom.clone(), jlit],
+                    });
+                    let sel = b.push(Core::Match {
+                        scrutinee: is_j,
+                        branches: vec![
+                            // tag 0 (false): keep the old element.
+                            Branch {
+                                binds: 0,
+                                body: Core::Atom(old_j),
+                            },
+                            // tag 1 (true): take the new value.
+                            Branch {
+                                binds: 0,
+                                body: Core::Atom(new_atom.clone()),
+                            },
+                        ],
+                    });
+                    items.push(sel);
+                }
+                let rebuilt = b.push(Core::Array { elem, items });
+                self.assign_to(base, rebuilt, env, b)
+            }
         }
     }
 
@@ -2422,6 +2518,14 @@ impl Lowerer {
                 SType::Array { elem, .. } => Some(*elem),
                 _ => None,
             },
+            // An array literal has a fixed-length array type `[N]T`, where `N` is
+            // the element count and `T` the inferred element type. This pins the
+            // binder type of `let a = [1, 2, 3]` (so `a[i]`/`len(a)`/`a[i] = e`
+            // resolve) without needing the checker.
+            Expr::Array(items) => Some(SType::Array {
+                len: items.len() as u64,
+                elem: Box::new(self.array_elem_stype(items, env)),
+            }),
             // A prefix unary's type: `-e` keeps the operand's type, `not e` is
             // `bool`, and `&e`/`&mut e` wrap the operand's type in a reference.
             Expr::Unary(op, operand) => match op {
@@ -2785,6 +2889,10 @@ fn to_indices(c: &Core, depth: u32) -> Core {
             ty: *ty,
             tag: *tag,
             fields: fields.iter().map(|a| atom_to_index(a, depth)).collect(),
+        },
+        Core::Array { elem, items } => Core::Array {
+            elem: elem.clone(),
+            items: items.iter().map(|a| atom_to_index(a, depth)).collect(),
         },
         Core::Proj { base, idx } => Core::Proj {
             base: atom_to_index(base, depth),

@@ -421,6 +421,11 @@ fn encode_core(e: &mut Encoder, c: &Core) {
             e.u8(*mutable as u8);
             encode_atom(e, of);
         }
+        Core::Array { elem, items } => {
+            e.u8(13);
+            encode_type(e, elem);
+            encode_atoms(e, items);
+        }
     }
 }
 

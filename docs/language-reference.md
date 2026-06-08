@@ -61,11 +61,13 @@ up only at the cast boundary; per-width **arithmetic** wrapping remains roadmap.
   parsed, lowered to `Ctor`/`Match`, exhaustiveness-checked, and run by the interpreter. See
   `examples/color.mv` and the `std/` prelude.
 - **array** `[N]T`, **slice** `[]T`, **tuple** `(A, B)`. Types parse **[impl]** (both `[]T`
-  and the fixed `[N]T` form); **index reads** `a[i]` parse and lower to `Prim{Index}`, and
-  `len(x)` lowers to `Prim{Len}` (a builtin, not a call) — both run on the interpreter for
-  `str`/aggregate operands **[impl]**. Array/slice *literals*, index *stores* (`a[i] = e`),
-  and backend execution of `len`/index over aggregates are **[design]** — they await aggregate
-  codegen (MARV-9).
+  and the fixed `[N]T` form). **Array literals** `[e0, …]` parse and lower to a structural
+  `Core::Array { elem, items }`; **index reads** `a[i]` lower to `Prim{Index}`, `len(x)` to
+  `Prim{Len}` (a builtin, not a call), and the **index store** `a[i] = e` is a functional
+  element update over the array's static length. All of these execute on the interpreter,
+  Cranelift, and WASM (an array boxes to a `[len, e0, …]` block) and are differential-tested
+  in `tests/run/arrays.mv` **[impl, MARV-30]**. Slices `[]T` (runtime length) and stores over
+  them are **[design]**.
 - **optional** `?T` = `Option[T]` — the only way to express absence. `Option`/`Result` are
   written in marv (`std/`) and parse + lower **[impl]**; the `?T`/`!T` *sugar* and the postfix
   `?` propagation operator now parse and lower too **[impl]** (`!T` → `Result[T, error-union]`;
@@ -139,8 +141,9 @@ and the loop evaluates to their final values, which the enclosing scope rebinds.
 mutable cells in Core; this is the cross-iteration form of mutable value semantics (§4).
 
 A `while` head carries zero or more `invariant` clauses. `for x in xs { … }` desugars to an
-index-driven loop (`spec/02` §D); iterating a real slice needs `len`/element indexing
-(collections, roadmap), so `for` parses and lowers today but awaits collection support to run.
+index-driven loop (`spec/02` §D). With array `len`/index codegen now in place (MARV-30), a
+`for` over a fixed-length array runs on all three backends (`tests/run/arrays.mv::sum_for`);
+iterating a runtime-length slice still awaits slice support.
 
 Today's loop lowering covers **straight-line** bodies (assignments and nested loops). A body
 whose tail is an `if`/`match`/`return` — which would need to thread carried `var`s through a
@@ -264,7 +267,8 @@ The parser accepts: `mod`/`import`, `struct`/`enum`/`fn`/`interface`/`impl` (inc
 generic parameter lists with bounds, and capability interfaces whose method calls `perform`),
 `let`/`var` bindings, assignment (`x = e`, `p.x = e`), `if`/`else(-if)`, `match`
 (constructor + `_` patterns, payload binding), enum constructor application, struct literals
-(`Name { f: e, … }`), index reads (`a[i]`), `len(x)`, `char` literals (`'a'`) and `as` casts
+(`Name { f: e, … }`), array literals (`[e0, …]`), index reads/stores (`a[i]`, `a[i] = e`),
+`len(x)`, `char` literals (`'a'`) and `as` casts
 (`(n as u8)`), array/slice types (`[N]T`, `[]T`), `while`/`for` loops with `invariant` clauses,
 generic type arguments (`Option[T]`), the binary
 operators (`+ - * / % == != < <= > >= and or`), the prefix unary operators

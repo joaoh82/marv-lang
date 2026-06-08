@@ -25,6 +25,7 @@ where each one sits and what must land first. Each task references back here.
 | ~~**MARV-7** scalars & collections (str/char, slices/arrays, `as`)~~ ✅ done | 1 · Surface | — (pairs w/ 4) | — | medium |
 | **MARV-8** reachability-pruned compilation | 2 · Backends | — *(independent)* | — | medium |
 | ~~**MARV-9** aggregate/enum codegen (interp + Cranelift + WASM)~~ ✅ done | 2 · Backends | ~~MARV-1~~ ✅, ~~MARV-4~~ ✅ | 10 | medium |
+| ~~**MARV-30** array literals + `len`/index codegen (+ index store)~~ ✅ done | 2 · Backends | ~~MARV-9~~ ✅, ~~MARV-7~~ ✅ | — | medium |
 | **MARV-10** AOT native + LLVM + WASM component/WIT | 2 · Backends | MARV-9 | — | low |
 | **MARV-11** verified-subset expansion + loop invariants + `old`/quantifiers | 3 · Verification | MARV-2, MARV-1 | — | medium |
 | ~~**MARV-12** formatter doc-comments + real source spans~~ ✅ done | 5 · Infra/polish | — *(independent)* | — | medium |
@@ -38,8 +39,8 @@ Done (Phase 1 · Surface): **MARV-1** enums + `match` (surface parser + lowering
 and lower; `examples/color.mv` runs) · **MARV-4** construction/mutation (struct literals →
 `Ctor`, index `a[i]` → `Prim{Index}`, assignment `lvalue = e` and `var` reassignment under
 mutable value semantics — rebinding in ANF, field updates rebuild the aggregate;
-`examples/mutation.mv` runs). Index *store* `a[i] = e` is deferred to MARV-9 (array/slice
-store) · **MARV-2** `while`/`for` loops → `Core::Loop` (loop-carried `var`s threaded as the
+`examples/mutation.mv` runs). Index *store* `a[i] = e` landed in MARV-30 (array element store)
+· **MARV-2** `while`/`for` loops → `Core::Loop` (loop-carried `var`s threaded as the
 node's `state`, body yields the next-state tuple, the loop yields the final tuple; Tier-1
 `invariant` checking in the interpreter; SSA loop blocks in Cranelift + WASM via compile-time
 register/local tuples; `examples/loops.mv` runs and agrees across all three backends). `for`
@@ -58,8 +59,8 @@ codegen is MARV-9.
 *identically across interpreter + Cranelift + WASM* and differential-tested in
 `tests/run/casts.mv`; fixed-array type `[N]T` parses; `len(x)` → `Prim{Len}` as a builtin;
 `examples/casts.mv` runs and checks clean). The value domain is still 64-bit, so sub-width
-semantics surface only at the cast boundary — per-width **arithmetic** wrapping, array/slice
-*literals*, index *stores*, and backend `len`/index over aggregates remain MARV-9.
+semantics surface only at the cast boundary — per-width **arithmetic** wrapping remains MARV-9;
+array *literals*, index *stores*, and backend `len`/index over arrays landed in MARV-30.
 · **MARV-23** prefix unary operators (`spec/02` §B `unary`): `-e` → `Prim{Neg}`, `not e` →
 `Prim{Not}`, and `&e`/`&mut e` → a new `Core::Ref { mutable, of }` node the checker types as
 `&T` (so escaping-reference diagnostics fire on `&e`). Unary binds tighter than every binary
@@ -122,7 +123,19 @@ one fact the type-erased Core does not carry at the node. The three-way differen
 (`tests/run/structs.mv`, `color.mv`, `shapes.mv`) asserts interp == Cranelift == wasm on programs
 that construct, project, cross boundaries with, and `match` (binding fields, `binds > 0`) aggregates
 and enums. Neither backend reclaims yet (no GC — Cranelift leaks, WASM bump-allocates; `spec/01`
-§4); array/slice *literals* with `len`/index codegen, and AOT/LLVM emission, are MARV-10 follow-ups.
+§4); AOT/LLVM emission is a MARV-10 follow-up.
+· **MARV-30** array literals + `len`/index codegen (+ index store), closing the collection side
+MARV-9 left open. An array literal `[e0, …]` lowers to a new structural `Core::Array { elem, items }`
+node (the spec's `Core` has no nominal hash for a `[N]T`, so arrays carry their element type
+directly) and boxes to a `[len, e0, …]` block — the **length** lives in the header word where a
+`struct`/`enum` keeps its tag, so `len(a)` is one header load and `a[i]` loads `[i + 1]` in both
+native backends; the interpreter reuses `Value::Agg` as the oracle. The index *store* `a[i] = e`
+(deferred MARV-4 → MARV-9 → here) is a functional element update under mutable value semantics: with
+the array's length statically known it rebuilds the array, taking the written value at position `i`
+and the old element elsewhere — reusing the array-read + two-arm `bool` `Match` machinery, so it
+needs no new backend primitive. `tests/run/arrays.mv` (literal/index/`len`/loop/store) asserts
+interp == Cranelift == wasm. Slices (`[]T`, runtime length) and stores over them are the remaining
+follow-up.
 
 ## Recommended order
 

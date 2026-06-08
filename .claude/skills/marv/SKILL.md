@@ -45,9 +45,11 @@ tightly and respect the invariants. Full context: [`docs/agents.md`](../../../do
 ## What parses today
 
 `mod`/`import`, `struct`/`fn` (incl. `pure fn`), `enum`/`match`, `error`/`!T`/`?` error
-handling, struct literals + index reads + assignment (`var`), `while`/`for` loops, `let`/`var`,
+handling, struct literals + array literals (`[e0, …]`) + index reads/stores (`a[i]`,
+`a[i] = e`) + `len(x)` + assignment (`var`), `while`/`for` loops, `let`/`var`,
 `if`/`else`, the binary operators, the prefix unary operators (`-e`, `not e`, `&e`/`&mut e`),
-calls/recursion, field projection, generic parameter lists,
-and `requires`/`ensures` contracts. Generics monomorphization, capabilities-from-source, and
-collection literals are roadmap — for those today, use a `*.core.json` snapshot (see
-`tests/run/*.core.json`). Don't generate surface that won't parse.
+calls/recursion, field projection, generic parameter lists, generics monomorphization,
+capabilities-from-source, and `requires`/`ensures` contracts. Fixed-length arrays run on all
+three backends (MARV-30); runtime-length **slices** (`[]T` literals/stores) are still roadmap —
+for those today, use a `*.core.json` snapshot (see `tests/run/*.core.json`). Don't generate
+surface that won't parse.

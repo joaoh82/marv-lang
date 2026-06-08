@@ -247,6 +247,10 @@ fn collect_core_syms(c: &Core, out: &mut Vec<Hash>) {
             fields.iter().for_each(|a| atom(a, out));
         }
         Core::Proj { base, .. } => atom(base, out),
+        Core::Array { elem, items } => {
+            collect_type_syms(elem, out);
+            items.iter().for_each(|a| atom(a, out));
+        }
         Core::Match {
             scrutinee,
             branches,
@@ -355,6 +359,10 @@ fn subst_core(c: &Core, subst: &dyn Fn(Hash) -> Option<Hash>) -> Core {
         Core::Proj { base, idx } => Core::Proj {
             base: subst_atom(base, subst),
             idx: *idx,
+        },
+        Core::Array { elem, items } => Core::Array {
+            elem: subst_type(elem, subst),
+            items: items.iter().map(|a| subst_atom(a, subst)).collect(),
         },
         Core::Match {
             scrutinee,

@@ -424,6 +424,17 @@ impl Program {
                 Ok(Value::Agg { tag: *tag, fields })
             }
 
+            // An array literal is a homogeneous aggregate: tag 0, elements as its
+            // fields. `len`/`index` over a `Value::Agg` already do the rest
+            // (`eval_prim`), so the interpreter is the oracle for the backends.
+            Core::Array { items, .. } => {
+                let fields = items
+                    .iter()
+                    .map(|a| self.eval_atom(a, env))
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(Value::Agg { tag: 0, fields })
+            }
+
             Core::Proj { base, idx } => {
                 let base = self.eval_atom(base, env)?;
                 match base {
