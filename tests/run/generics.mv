@@ -1,0 +1,35 @@
+mod generics
+
+enum Ordering {
+    Lt,
+    Eq,
+    Gt,
+}
+
+interface Ord[T] {
+    fn cmp(a: T, b: T) -> Ordering
+}
+
+impl Ord[i64] {
+    fn cmp(a: i64, b: i64) -> Ordering {
+        if (a < b) {
+            Ordering.Lt
+        } else if (a > b) {
+            Ordering.Gt
+        } else {
+            Ordering.Eq
+        }
+    }
+}
+
+fn max[T: Ord](a: T, b: T) -> T {
+    match cmp(a, b) {
+        Ordering.Lt => b,
+        Ordering.Eq => a,
+        Ordering.Gt => a,
+    }
+}
+
+pure fn max_of(a: i64, b: i64) -> i64 {
+    max(a, b)
+}

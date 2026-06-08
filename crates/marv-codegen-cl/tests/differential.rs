@@ -153,6 +153,14 @@ fn corpus_cases() -> Vec<(&'static str, &'static str, Vec<i64>, i64)> {
         ("shapes.mv", "circle_area", vec![0], 0),
         ("shapes.mv", "rect_area", vec![3, 4], 12),
         ("shapes.mv", "rect_area", vec![7, 6], 42),
+        // Monomorphized generics (MARV-26 / MARV-5): a `max[T: Ord]` whose body
+        // matches on the `Ordering` enum, specialized to `i64` and dispatched to
+        // the coherent `impl Ord[i64]`. Now runnable on all three backends because
+        // MARV-9 gave the enum a runtime layout. interp == cranelift == wasm.
+        ("generics.mv", "max_of", vec![3, 7], 7),
+        ("generics.mv", "max_of", vec![7, 3], 7),
+        ("generics.mv", "max_of", vec![5, 5], 5),
+        ("generics.mv", "max_of", vec![-4, -9], -4),
     ]
 }
 

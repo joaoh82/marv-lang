@@ -44,6 +44,14 @@ The integer/boolean core the M0/M1 front end can express and lower:
 - **aggregates and enums (MARV-9):** `struct`/tuple products and `enum` tagged
   unions — `Ctor`, field `Proj`, and an n-way `Match` that binds a variant's
   fields (`binds > 0`). See the representation below.
+- **monomorphized generics (MARV-26):** monomorphization is a lowering-time pass
+  (`spec/01` §§3.3–3.4), so a generic call has already specialized to a concrete
+  def (`max@i64`) with its interface methods dispatched to the coherent `impl`
+  before codegen runs — no backend-specific generics work is needed. Both backends
+  **skip** the generic *templates* themselves (defs whose signature still mentions
+  a `Type::Var`, via `Type::is_polymorphic`): a template has no concrete ABI and is
+  never called directly, and its body references unresolved interface methods. The
+  interpreter skips them implicitly via lazy, by-need evaluation.
 
 Every scalar lives in a 64-bit register in *both* backends, so their wrapping
 arithmetic matches — the property that makes the differential test meaningful.
@@ -110,6 +118,7 @@ the results are equal to each other and to a hand-computed golden value:
 | `structs.mv`    | `struct` `Ctor`/`Proj`; a struct returned from and passed to a function (boxed across the boundary) — MARV-9 |
 | `color.mv`      | n-way `enum` `Match` (jump table on tag) over a boxed enum built behind a call and through `if`/`else` — MARV-9 |
 | `shapes.mv`     | payload-carrying variants + `Match` arms that bind fields (`binds > 0`) — MARV-9 |
+| `generics.mv`   | a monomorphized generic (`max[T: Ord]` matching on `Ordering`, specialized to `i64` and dispatched to `impl Ord[i64]`) — runnable on all three backends since the enum got a layout (MARV-9); closes the gap noted in MARV-5 — MARV-26 |
 
 The negative case is `uses_ungranted_cap.core.json`: a Core-IR snapshot whose
 `leak(fs: Fs, path: str)` body `perform`s `Fs` while declaring the empty
