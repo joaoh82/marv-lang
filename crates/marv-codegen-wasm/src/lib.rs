@@ -37,13 +37,46 @@
 use std::collections::HashMap;
 
 use wasm_encoder::{
-    BlockType, CodeSection, EntityType, ExportKind, ExportSection, Function, FunctionSection,
-    ImportSection, Instruction, Module, TypeSection, ValType,
+    BlockType, CodeSection, ConstExpr, EntityType, ExportKind, ExportSection, Function,
+    FunctionSection, GlobalSection, GlobalType, ImportSection, Instruction, MemArg, MemorySection,
+    MemoryType, Module, TypeSection, ValType,
 };
 
 use marv_core::ir::*;
 use marv_core::symbol_hash;
-use marv_types::World;
+use marv_types::{layout, World};
+
+/// Bytes per aggregate slot — every field (and the tag) is one `i64` machine
+/// word (MARV-9).
+const SLOT: u64 = 8;
+
+/// Alignment exponent for an 8-byte (`i64`) access (`log2(8)`).
+const ALIGN8: u32 = 3;
+
+/// The linear-memory index (this backend declares exactly one memory).
+const MEM: u32 = 0;
+
+/// The global index of the bump-allocation pointer (this backend declares
+/// exactly one global).
+const BUMP: u32 = 0;
+
+/// Where the bump allocator starts handing out memory. The low bytes are left
+/// unused so a zero pointer never names a live aggregate.
+const HEAP_START: i64 = 1024;
+
+/// Linear-memory size, in 64 KiB pages. The bump allocator never reclaims (marv
+/// has no GC yet, `spec/01` §4), so this caps total live aggregates per run;
+/// generous for the short programs this backend runs.
+const MEM_PAGES: u64 = 64;
+
+/// An 8-byte aligned access at `offset` into the single linear memory.
+fn memarg(offset: u64) -> MemArg {
+    MemArg {
+        offset,
+        align: ALIGN8,
+        memory_index: MEM,
+    }
+}
 
 /// A backend failure — never a type error (the M2 checker has already run).
 #[derive(Debug, Clone)]
@@ -223,11 +256,39 @@ pub fn compile(
         code_sec.function(&func);
     }
 
+    // The aggregate heap (MARV-9): one linear memory plus a mutable bump pointer
+    // the boxing sites advance. Both are module-internal — a *pure* module still
+    // imports nothing, so the capability manifest is unchanged.
+    let mut mem_sec = MemorySection::new();
+    mem_sec.memory(MemoryType {
+        minimum: MEM_PAGES,
+        maximum: None,
+        memory64: false,
+        shared: false,
+        page_size_log2: None,
+    });
+    let mut global_sec = GlobalSection::new();
+    global_sec.global(
+        GlobalType {
+            val_type: ValType::I64,
+            mutable: true,
+            shared: false,
+        },
+        &ConstExpr::i64_const(HEAP_START),
+    );
+    // Export the memory so a host/embedding can inspect the heap (harmless for a
+    // pure module; the import manifest — the sandbox boundary — is untouched).
+    export_sec.export("memory", ExportKind::Memory, MEM);
+
+    // Section order is fixed by the spec: type, import, function, memory, global,
+    // export, code.
     let mut module = Module::new();
     module
         .section(&types)
         .section(&import_sec)
         .section(&func_sec)
+        .section(&mem_sec)
+        .section(&global_sec)
         .section(&export_sec)
         .section(&code_sec);
     let bytes = module.finish();
@@ -383,10 +444,11 @@ enum Out {
     Unit,
     /// A partially-applied function (compile-time only): nothing pushed.
     Partial { func: Hash, args: Vec<ArgVal> },
-    /// A compile-time aggregate (a product `Ctor`, or a `Loop`'s final carried
-    /// state): its fields live in locals; nothing is pushed. A `Proj` selects one.
-    /// No heap layout yet (full aggregate codegen is MARV-9).
-    Tuple(Vec<Slot>),
+    /// A compile-time aggregate (a product/struct `Ctor`, an enum-variant `Ctor`
+    /// with tag `tag`, or a `Loop`'s final carried state): its fields live in
+    /// locals; nothing is pushed. A `Proj` selects one; it is **boxed** into
+    /// linear memory lazily — only when it must become a single word (MARV-9).
+    Tuple { tag: u32, fields: Vec<Slot> },
 }
 
 /// An argument resolved to something re-emittable at the saturating call site,
@@ -396,6 +458,12 @@ enum ArgVal {
     Local(u32),
     Const(i64),
     Unit,
+    /// An aggregate argument: boxed into linear memory at the call site, passing
+    /// the pointer (MARV-9). Fields are themselves resolved arguments.
+    Boxed {
+        tag: u32,
+        fields: Vec<ArgVal>,
+    },
 }
 
 /// A binding in scope: an absolute local, a unit, a pending partial call, or a
@@ -405,7 +473,7 @@ enum Slot {
     Local(u32),
     Unit,
     Partial { func: Hash, args: Vec<ArgVal> },
-    Tuple(Vec<Slot>),
+    Tuple { tag: u32, fields: Vec<Slot> },
 }
 
 fn compile_fn(
@@ -502,10 +570,14 @@ impl Trans<'_> {
                     }
                     Out::Unit => Slot::Unit,
                     Out::Partial { func, args } => Slot::Partial { func, args },
-                    Out::Tuple(slots) => Slot::Tuple(slots),
+                    Out::Tuple { tag, fields } => Slot::Tuple { tag, fields },
                 };
+                // Record the bound value's type so a `Match`/`Proj` over it knows
+                // whether it is a scalar or a boxed aggregate (MARV-9).
+                let world = self.world;
+                let t = layout::type_of(world, value, &mut self.tys);
                 self.env.push(slot);
-                self.tys.push(None);
+                self.tys.push(t);
                 let r = self.eval(body);
                 self.env.pop();
                 self.tys.pop();
@@ -525,38 +597,21 @@ impl Trans<'_> {
 
             Core::Perform { cap, op, args } => self.eval_perform(cap, *op, args),
 
-            Core::Ctor { fields, .. } => {
-                // A product/aggregate as a compile-time tuple of slots. Each field
-                // is materialized into its own local so the bundle is stable
+            Core::Ctor { tag, fields, .. } => {
+                // A product/enum value as a compile-time tuple of slots. Each
+                // field is materialized into its own local so the bundle is stable
                 // regardless of later stores (e.g. a loop's carried-state copy).
                 let mut slots = Vec::with_capacity(fields.len());
                 for a in fields {
                     slots.push(self.atom_to_local_slot(a)?);
                 }
-                Ok(Out::Tuple(slots))
+                Ok(Out::Tuple {
+                    tag: *tag,
+                    fields: slots,
+                })
             }
 
-            Core::Proj { base, idx } => {
-                let s = match base {
-                    Atom::Var(i) => self.slot(*i)?,
-                    _ => {
-                        return Err(WasmError::Unsupported(
-                            "projection of a non-aggregate base".into(),
-                        ))
-                    }
-                };
-                match s {
-                    Slot::Tuple(slots) => {
-                        let field = slots.into_iter().nth(*idx as usize).ok_or_else(|| {
-                            WasmError::Unsupported("projection out of range".into())
-                        })?;
-                        Ok(self.slot_to_out(field))
-                    }
-                    _ => Err(WasmError::Unsupported(
-                        "projection of a non-aggregate".into(),
-                    )),
-                }
-            }
+            Core::Proj { base, idx } => self.eval_proj(base, *idx),
 
             Core::Loop {
                 state, cond, body, ..
@@ -589,10 +644,15 @@ impl Trans<'_> {
             self.push_argval(av);
             self.emit(Instruction::LocalSet(*l));
         }
-        // The carried vars are the innermost env slots for `cond`/`body`.
-        for l in &carried {
+        // The carried vars are the innermost env slots for `cond`/`body`; record
+        // their types so a match over a carried aggregate pointer stays correct.
+        let carried_tys: Vec<Option<Type>> = state
+            .iter()
+            .map(|a| layout::atom_type(self.world, a, &self.tys))
+            .collect();
+        for (l, t) in carried.iter().zip(carried_tys) {
             self.env.push(Slot::Local(*l));
-            self.tys.push(None);
+            self.tys.push(t);
         }
 
         self.emit(Instruction::Block(BlockType::Empty));
@@ -606,7 +666,7 @@ impl Trans<'_> {
         // locals); copy them into the carried locals, then iterate.
         let next = self.eval(body)?;
         let next_slots = match next {
-            Out::Tuple(slots) => slots,
+            Out::Tuple { fields, .. } => fields,
             Out::Unit if k == 0 => Vec::new(),
             _ => {
                 return Err(WasmError::Unsupported(
@@ -621,7 +681,7 @@ impl Trans<'_> {
                     self.emit(Instruction::LocalSet(*l));
                 }
                 Slot::Unit => {}
-                Slot::Partial { .. } | Slot::Tuple(_) => {
+                Slot::Partial { .. } | Slot::Tuple { .. } => {
                     return Err(WasmError::Unsupported(
                         "non-scalar loop-carried value".into(),
                     ))
@@ -637,7 +697,40 @@ impl Trans<'_> {
             self.tys.pop();
         }
         // The loop evaluates to its final carried state.
-        Ok(Out::Tuple(carried.into_iter().map(Slot::Local).collect()))
+        Ok(Out::Tuple {
+            tag: 0,
+            fields: carried.into_iter().map(Slot::Local).collect(),
+        })
+    }
+
+    /// Project field `idx`. A compile-time tuple selects the field directly; a
+    /// boxed aggregate (a word that is a pointer) loads from `[idx + 1]` — word 0
+    /// is the tag (MARV-9).
+    fn eval_proj(&mut self, base: &Atom, idx: u32) -> Result<Out, WasmError> {
+        match base {
+            Atom::Var(i) => match self.slot(*i)? {
+                Slot::Tuple { fields, .. } => {
+                    let field = fields
+                        .into_iter()
+                        .nth(idx as usize)
+                        .ok_or_else(|| WasmError::Unsupported("projection out of range".into()))?;
+                    Ok(self.slot_to_out(field))
+                }
+                Slot::Local(l) => {
+                    // A boxed-aggregate pointer in a local: load `[idx + 1]`.
+                    self.emit(Instruction::LocalGet(l));
+                    self.emit(Instruction::I32WrapI64);
+                    self.emit(Instruction::I64Load(memarg((idx as u64 + 1) * SLOT)));
+                    Ok(Out::Stack)
+                }
+                _ => Err(WasmError::Unsupported(
+                    "projection of a non-aggregate".into(),
+                )),
+            },
+            _ => Err(WasmError::Unsupported(
+                "projection of a non-aggregate base".into(),
+            )),
+        }
     }
 
     /// Materialize an atom's value into a fresh local and return it as a slot —
@@ -651,7 +744,7 @@ impl Trans<'_> {
             }
             Out::Unit => Ok(Slot::Unit),
             Out::Partial { func, args } => Ok(Slot::Partial { func, args }),
-            Out::Tuple(slots) => Ok(Slot::Tuple(slots)),
+            Out::Tuple { tag, fields } => Ok(Slot::Tuple { tag, fields }),
         }
     }
 
@@ -664,7 +757,7 @@ impl Trans<'_> {
             }
             Slot::Unit => Out::Unit,
             Slot::Partial { func, args } => Out::Partial { func, args },
-            Slot::Tuple(slots) => Out::Tuple(slots),
+            Slot::Tuple { tag, fields } => Out::Tuple { tag, fields },
         }
     }
 
@@ -747,17 +840,9 @@ impl Trans<'_> {
         match a {
             Atom::Lit(Literal::Int(n)) => Ok(ArgVal::Const(*n)),
             Atom::Lit(Literal::Bool(b)) => Ok(ArgVal::Const(*b as i64)),
+            Atom::Lit(Literal::Char(c)) => Ok(ArgVal::Const(*c as i64)),
             Atom::Lit(Literal::Unit) => Ok(ArgVal::Unit),
-            Atom::Var(idx) => match self.slot(*idx)? {
-                Slot::Local(l) => Ok(ArgVal::Local(l)),
-                Slot::Unit => Ok(ArgVal::Unit),
-                Slot::Partial { .. } => Err(WasmError::Unsupported(
-                    "passing a partially-applied function as an argument".into(),
-                )),
-                Slot::Tuple(_) => Err(WasmError::Unsupported(
-                    "passing an aggregate where a single word is required".into(),
-                )),
-            },
+            Atom::Var(idx) => self.slot_to_argval(&self.slot(*idx)?),
             Atom::Lit(_) => Err(WasmError::Unsupported("non-scalar literal argument".into())),
             Atom::Global(_) => Err(WasmError::Unsupported(
                 "passing a function as a value argument".into(),
@@ -765,12 +850,34 @@ impl Trans<'_> {
         }
     }
 
-    /// Push a resolved argument (unit arguments occupy no slot).
+    /// Resolve a slot to a depth-independent re-emittable argument. An aggregate
+    /// becomes a [`ArgVal::Boxed`] — boxed into linear memory at the point it is
+    /// pushed, so the pointer is what crosses the call boundary (MARV-9).
+    fn slot_to_argval(&self, s: &Slot) -> Result<ArgVal, WasmError> {
+        match s {
+            Slot::Local(l) => Ok(ArgVal::Local(*l)),
+            Slot::Unit => Ok(ArgVal::Unit),
+            Slot::Partial { .. } => Err(WasmError::Unsupported(
+                "passing a partially-applied function as an argument".into(),
+            )),
+            Slot::Tuple { tag, fields } => {
+                let fields = fields
+                    .iter()
+                    .map(|f| self.slot_to_argval(f))
+                    .collect::<Result<_, _>>()?;
+                Ok(ArgVal::Boxed { tag: *tag, fields })
+            }
+        }
+    }
+
+    /// Push a resolved argument (unit arguments occupy no slot; an aggregate is
+    /// boxed into linear memory and its pointer pushed).
     fn push_argval(&mut self, av: &ArgVal) {
         match av {
             ArgVal::Local(l) => self.emit(Instruction::LocalGet(*l)),
             ArgVal::Const(n) => self.emit(Instruction::I64Const(*n)),
             ArgVal::Unit => {}
+            ArgVal::Boxed { tag, fields } => self.box_argvals(*tag, fields),
         }
     }
 
@@ -878,10 +985,25 @@ impl Trans<'_> {
         self.emit(Instruction::I64ExtendI32U);
     }
 
+    /// Lower a `Match`. A `bool` scrutinee (the `if`/`else` desugaring) takes the
+    /// two-arm scalar path; a boxed `enum`/`struct` scrutinee takes the runtime
+    /// path — load the tag from word 0 and dispatch, binding each variant's fields
+    /// by loading them from the payload (MARV-9).
     fn eval_match(&mut self, scrutinee: &Atom, branches: &[Branch]) -> Result<Out, WasmError> {
+        let scrut_ty = layout::atom_type(self.world, scrutinee, &self.tys);
+        let boxed = scrut_ty
+            .as_ref()
+            .map(|t| layout::is_boxed(self.world, t))
+            .unwrap_or(false);
+        if boxed {
+            return self.eval_match_boxed(scrutinee, branches, &scrut_ty.unwrap());
+        }
+
+        // Scalar path: the front end emits only the two-armed `bool` match
+        // (`if`/`else`): branch 0 = false, branch 1 = true (`spec/02` §D).
         if branches.len() != 2 || branches.iter().any(|b| b.binds != 0) {
             return Err(WasmError::Unsupported(
-                "match other than a two-arm boolean `if`/`else`".into(),
+                "match on a value whose layout could not be determined".into(),
             ));
         }
         // Push the scrutinee (i64) and reduce it to an i32 condition for `if`.
@@ -903,6 +1025,91 @@ impl Trans<'_> {
         self.coerce_to_word(e)?;
         self.emit(Instruction::End);
         Ok(Out::Stack)
+    }
+
+    /// The runtime enum/struct `Match` (MARV-9): box the scrutinee to a pointer,
+    /// load the tag from word 0, and dispatch over the branches with a chain of
+    /// tag-equality `if`/`else`s. Each arm binds its variant's fields by loading
+    /// `[i + 1]` from the payload, then evaluates its body; the whole chain leaves
+    /// the branch's result on the stack.
+    fn eval_match_boxed(
+        &mut self,
+        scrutinee: &Atom,
+        branches: &[Branch],
+        scrut_ty: &Type,
+    ) -> Result<Out, WasmError> {
+        if branches.is_empty() {
+            return Err(WasmError::Unsupported("match with no branches".into()));
+        }
+        // Materialize the scrutinee pointer and its tag into locals (the pointer
+        // is reloaded in every arm to bind fields).
+        let ptr = self.alloc_local();
+        let av = self.resolve_arg(scrutinee)?;
+        self.push_argval(&av);
+        self.emit(Instruction::LocalSet(ptr));
+        let tag = self.alloc_local();
+        self.emit(Instruction::LocalGet(ptr));
+        self.emit(Instruction::I32WrapI64);
+        self.emit(Instruction::I64Load(memarg(0)));
+        self.emit(Instruction::LocalSet(tag));
+
+        self.emit_match_arm(branches, 0, ptr, tag, scrut_ty)?;
+        Ok(Out::Stack)
+    }
+
+    /// Emit the dispatch chain for branch `t` onward: test the tag, run arm `t` in
+    /// the `then`, recurse into the `else`. The final arm needs no test (an
+    /// exhaustively-checked match always lands on a covered tag).
+    fn emit_match_arm(
+        &mut self,
+        branches: &[Branch],
+        t: usize,
+        ptr: u32,
+        tag: u32,
+        scrut_ty: &Type,
+    ) -> Result<(), WasmError> {
+        if t + 1 == branches.len() {
+            return self.emit_bind_and_body(&branches[t], t, ptr, scrut_ty);
+        }
+        self.emit(Instruction::LocalGet(tag));
+        self.emit(Instruction::I64Const(t as i64));
+        self.emit(Instruction::I64Eq);
+        self.emit(Instruction::If(BlockType::Result(ValType::I64)));
+        self.emit_bind_and_body(&branches[t], t, ptr, scrut_ty)?;
+        self.emit(Instruction::Else);
+        self.emit_match_arm(branches, t + 1, ptr, tag, scrut_ty)?;
+        self.emit(Instruction::End);
+        Ok(())
+    }
+
+    /// Bind variant `tag`'s fields from the payload (`[i + 1]`) into fresh locals,
+    /// evaluate the arm body, and leave its word on the stack.
+    fn emit_bind_and_body(
+        &mut self,
+        br: &Branch,
+        tag: usize,
+        ptr: u32,
+        scrut_ty: &Type,
+    ) -> Result<(), WasmError> {
+        let field_tys =
+            layout::variant_fields(self.world, scrut_ty, tag as u32).unwrap_or_default();
+        let pushed = br.binds as usize;
+        for i in 0..pushed {
+            let l = self.alloc_local();
+            self.emit(Instruction::LocalGet(ptr));
+            self.emit(Instruction::I32WrapI64);
+            self.emit(Instruction::I64Load(memarg((i as u64 + 1) * SLOT)));
+            self.emit(Instruction::LocalSet(l));
+            self.env.push(Slot::Local(l));
+            self.tys.push(field_tys.get(i).cloned());
+        }
+        let out = self.eval(&br.body)?;
+        self.coerce_to_word(out)?;
+        for _ in 0..pushed {
+            self.env.pop();
+            self.tys.pop();
+        }
+        Ok(())
     }
 
     fn eval_perform(&mut self, cap: &Atom, op: OpId, args: &[Atom]) -> Result<Out, WasmError> {
@@ -933,8 +1140,9 @@ impl Trans<'_> {
         }
     }
 
-    /// Ensure the term's value is exactly one `i64` on the stack (a unit becomes
-    /// the zero word; a partial application is a compile error).
+    /// Ensure the term's value is exactly one `i64` on the stack: a unit becomes
+    /// the zero word, an aggregate is **boxed** into linear memory and its pointer
+    /// pushed (MARV-9), and a partial application is a compile error.
     fn coerce_to_word(&mut self, out: Out) -> Result<(), WasmError> {
         match out {
             Out::Stack => Ok(()),
@@ -945,9 +1153,97 @@ impl Trans<'_> {
             Out::Partial { .. } => Err(WasmError::Unsupported(
                 "a partially-applied function used as a value".into(),
             )),
-            Out::Tuple(_) => Err(WasmError::Unsupported(
-                "an aggregate used where a single word is required".into(),
-            )),
+            Out::Tuple { tag, fields } => self.box_tuple_slots(tag, fields),
+        }
+    }
+
+    /// Box a compile-time aggregate (its fields are slots) into a fresh
+    /// `[tag, field_0, …]` block in linear memory and leave the pointer on the
+    /// stack (MARV-9). Nested aggregate fields are boxed recursively.
+    fn box_tuple_slots(&mut self, tag: u32, fields: Vec<Slot>) -> Result<(), WasmError> {
+        let base = self.bump_alloc(fields.len());
+        self.store_word(base, 0, |t| {
+            t.emit(Instruction::I64Const(tag as i64));
+            Ok(())
+        })?;
+        for (i, f) in fields.into_iter().enumerate() {
+            self.store_word(base, (i as u64 + 1) * SLOT, |t| t.emit_slot_word(&f))?;
+        }
+        self.emit(Instruction::LocalGet(base));
+        Ok(())
+    }
+
+    /// Box an aggregate whose fields are resolved arguments (the call-site path)
+    /// and leave the pointer on the stack (MARV-9).
+    fn box_argvals(&mut self, tag: u32, fields: &[ArgVal]) {
+        let base = self.bump_alloc(fields.len());
+        // Tag (infallible writers, so the `store_word` results are discarded).
+        let _ = self.store_word(base, 0, |t| {
+            t.emit(Instruction::I64Const(tag as i64));
+            Ok(())
+        });
+        for (i, f) in fields.iter().enumerate() {
+            let _ = self.store_word(base, (i as u64 + 1) * SLOT, |t| {
+                t.emit_argval_word(f);
+                Ok(())
+            });
+        }
+        self.emit(Instruction::LocalGet(base));
+    }
+
+    /// Bump-allocate `n_fields + 1` words (tag + payload) and return the local
+    /// holding the base address. The bump pointer never rewinds — marv has no GC
+    /// yet (`spec/01` §4); the allocation is bounded by [`MEM_PAGES`].
+    fn bump_alloc(&mut self, n_fields: usize) -> u32 {
+        let total = (n_fields as i64 + 1) * SLOT as i64;
+        let base = self.alloc_local();
+        self.emit(Instruction::GlobalGet(BUMP));
+        self.emit(Instruction::LocalTee(base));
+        self.emit(Instruction::I64Const(total));
+        self.emit(Instruction::I64Add);
+        self.emit(Instruction::GlobalSet(BUMP));
+        base
+    }
+
+    /// Store one word at `base + offset`: emit the address, run `value` to push
+    /// the i64, then `i64.store`.
+    fn store_word(
+        &mut self,
+        base: u32,
+        offset: u64,
+        value: impl FnOnce(&mut Self) -> Result<(), WasmError>,
+    ) -> Result<(), WasmError> {
+        self.emit(Instruction::LocalGet(base));
+        self.emit(Instruction::I32WrapI64);
+        value(self)?;
+        self.emit(Instruction::I64Store(memarg(offset)));
+        Ok(())
+    }
+
+    /// Push the word for a slot, boxing a nested aggregate (a unit field occupies
+    /// a zero word so field indices stay stable).
+    fn emit_slot_word(&mut self, s: &Slot) -> Result<(), WasmError> {
+        match s {
+            Slot::Local(l) => self.emit(Instruction::LocalGet(*l)),
+            Slot::Unit => self.emit(Instruction::I64Const(0)),
+            Slot::Partial { .. } => {
+                return Err(WasmError::Unsupported(
+                    "a partially-applied function used as an aggregate field".into(),
+                ))
+            }
+            Slot::Tuple { tag, fields } => return self.box_tuple_slots(*tag, fields.clone()),
+        }
+        Ok(())
+    }
+
+    /// Push the word for a resolved argument used as an aggregate field (a unit
+    /// occupies a zero word here, unlike a call argument where it is dropped).
+    fn emit_argval_word(&mut self, av: &ArgVal) {
+        match av {
+            ArgVal::Local(l) => self.emit(Instruction::LocalGet(*l)),
+            ArgVal::Const(n) => self.emit(Instruction::I64Const(*n)),
+            ArgVal::Unit => self.emit(Instruction::I64Const(0)),
+            ArgVal::Boxed { tag, fields } => self.box_argvals(*tag, fields),
         }
     }
 }

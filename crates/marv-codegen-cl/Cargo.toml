@@ -8,6 +8,7 @@ repository.workspace = true
 
 [dependencies]
 marv-core = { path = "../marv-core" }
+marv-types = { path = "../marv-types" }
 cranelift = "0.132"
 cranelift-jit = "0.132"
 cranelift-module = "0.132"

@@ -126,6 +126,18 @@ fn corpus_cases() -> Vec<(&'static str, &'static str, Vec<i64>, i64)> {
         ("unary.mv", "abs", vec![4], 4),
         ("unary.mv", "flip", vec![5], 1),
         ("unary.mv", "flip", vec![0], 0),
+        // Aggregates & enums (MARV-9): boxed `[tag, fields…]` in linear memory,
+        // crossing boundaries, projected, and matched. interp == cranelift == wasm.
+        ("structs.mv", "manhattan", vec![3, 4], 7),
+        ("structs.mv", "manhattan", vec![10, 20], 30),
+        ("structs.mv", "manhattan", vec![-5, 5], 0),
+        ("color.mv", "rank_of", vec![0], 1),
+        ("color.mv", "rank_of", vec![1], 2),
+        ("color.mv", "rank_of", vec![2], 3),
+        ("shapes.mv", "circle_area", vec![5], 25),
+        ("shapes.mv", "circle_area", vec![0], 0),
+        ("shapes.mv", "rect_area", vec![3, 4], 12),
+        ("shapes.mv", "rect_area", vec![7, 6], 42),
     ]
 }
 

@@ -56,8 +56,14 @@ fn interp_i64(
 }
 
 /// JIT-compile the module and call `entry(args)` natively.
-fn cranelift_i64(module_path: &str, defs: &[(String, Def)], entry: &str, args: &[i64]) -> i64 {
-    let jit = marv_codegen_cl::compile(module_path, defs)
+fn cranelift_i64(
+    module_path: &str,
+    defs: &[(String, Def)],
+    world: &World,
+    entry: &str,
+    args: &[i64],
+) -> i64 {
+    let jit = marv_codegen_cl::compile(module_path, defs, world)
         .unwrap_or_else(|e| panic!("cranelift compile: {e}"));
     jit.run_i64(entry, args)
         .unwrap_or_else(|e| panic!("cranelift run {entry}: {e}"))
@@ -131,6 +137,22 @@ fn corpus_cases() -> Vec<(&'static str, &'static str, Vec<i64>, i64)> {
         ("unary.mv", "abs", vec![4], 4),
         ("unary.mv", "flip", vec![5], 1),
         ("unary.mv", "flip", vec![0], 0),
+        // Aggregates & enums (MARV-9): heap-boxed `[tag, fields…]` crossing
+        // function boundaries, projected, and matched. interp == cranelift == wasm.
+        // struct `Ctor`/`Proj` + a struct returned from and passed to a function.
+        ("structs.mv", "manhattan", vec![3, 4], 7),
+        ("structs.mv", "manhattan", vec![10, 20], 30),
+        ("structs.mv", "manhattan", vec![-5, 5], 0),
+        // n-way `enum` `Match` (jump table on tag) over a boxed enum built behind
+        // a call and through an `if`/`else`.
+        ("color.mv", "rank_of", vec![0], 1),
+        ("color.mv", "rank_of", vec![1], 2),
+        ("color.mv", "rank_of", vec![2], 3),
+        // payload-carrying variants + `Match` arms that bind fields (binds > 0).
+        ("shapes.mv", "circle_area", vec![5], 25),
+        ("shapes.mv", "circle_area", vec![0], 0),
+        ("shapes.mv", "rect_area", vec![3, 4], 12),
+        ("shapes.mv", "rect_area", vec![7, 6], 42),
     ]
 }
 
@@ -138,8 +160,8 @@ fn corpus_cases() -> Vec<(&'static str, &'static str, Vec<i64>, i64)> {
 fn interpreter_and_cranelift_agree() {
     for (file, entry, args, expected) in corpus_cases() {
         let (module_path, defs, world) = load_source(file);
-        let interp = interp_i64(&module_path, defs.clone(), world, entry, &args);
-        let native = cranelift_i64(&module_path, &defs, entry, &args);
+        let interp = interp_i64(&module_path, defs.clone(), world.clone(), entry, &args);
+        let native = cranelift_i64(&module_path, &defs, &world, entry, &args);
 
         assert_eq!(
             interp, native,

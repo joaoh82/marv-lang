@@ -1,4 +1,4 @@
-//! # marv-codegen-cl — Cranelift backend (milestone M4)
+//! # marv-codegen-cl — Cranelift backend (milestone M4, aggregates MARV-9)
 //!
 //! Compiles the canonical **Core IR** (`marv-core`) to native code with
 //! Cranelift, JIT-compiling each definition so the result can be called
@@ -8,21 +8,30 @@
 //!
 //! ## What it compiles
 //!
-//! The integer/boolean core that the M0/M1 front end can express and lower:
-//! arithmetic and comparison [`PrimOp`]s, `if`/`else` (a two-branch `bool`
-//! [`Core::Match`]), `let` bindings, curried calls between top-level functions
-//! (recursion included), and `while`/`for` loops ([`Core::Loop`], lowered to an
-//! SSA header/body/exit with the loop-carried state as block parameters). Every
-//! scalar lives in a 64-bit register, so the backend's wrapping arithmetic
-//! matches the oracle's `i64` semantics — the property that keeps the
-//! differential test meaningful.
+//! The integer/boolean core that the front end lowers — arithmetic and
+//! comparison [`PrimOp`]s, `if`/`else` (a two-branch `bool` [`Core::Match`]),
+//! `let` bindings, curried calls between top-level functions (recursion
+//! included), `while`/`for` loops ([`Core::Loop`], lowered to an SSA
+//! header/body/exit) — **plus aggregates and enums** (MARV-9): a `struct`/tuple
+//! product or an `enum` variant is a heap-boxed `[tag, field_0, …]` block, so
+//! `Ctor`/`Proj`/n-way `Match` (with field binding) lower to real allocation,
+//! loads, and a jump table on the tag. Every scalar still lives in a 64-bit
+//! register, so the backend's wrapping arithmetic matches the oracle's `i64`
+//! semantics — the property that keeps the differential test meaningful.
 //!
-//! A product `Ctor` and its `Proj` are handled as a compile-time [`Slot::Tuple`]
-//! (register-resident, never crossing a function boundary), which is what loop
-//! state needs; full *heap*-laid-out aggregates, capability `perform`,
-//! first-class closures, and floats still return [`CodegenError::Unsupported`]
-//! rather than emitting wrong code. Such constructs are added to *both* backends
-//! together so agreement is preserved by construction.
+//! ## Aggregate representation (MARV-9)
+//!
+//! Every marv value is one machine word. A scalar *is* that word; an aggregate
+//! is a **pointer** to `(1 + arity)` contiguous `i64` words laid out as
+//! `[tag, field_0, …, field_{n-1}]` (`spec/02` §C). The layout is identical to
+//! the interpreter's `Value::Agg` and to the WASM backend's linear-memory form,
+//! so all three agree by construction. Boxing is *lazy*: a `Ctor` first becomes a
+//! compile-time [`Slot::Tuple`] (register-resident, which is what loop state and
+//! purely-local products want) and is only spilled to the heap when it must cross
+//! a function boundary, be returned, or be matched as a runtime value. Allocation
+//! goes through the host `marv_rt_alloc` symbol and **leaks** — marv has no GC
+//! yet (`spec/01` §4 leaves reclamation to a later milestone), which is fine for
+//! the short-lived programs the JIT runs.
 //!
 //! ## Currying without heap closures
 //!
@@ -35,22 +44,40 @@
 
 use std::collections::HashMap;
 
-use cranelift::codegen::ir::{BlockArg, Type as ClType};
+use cranelift::codegen::ir::{BlockArg, JumpTableData, Type as ClType};
 use cranelift::codegen::settings::{self, Configurable};
 // Explicit imports (not a glob) so cranelift's `Type` does not collide with
 // `marv_core::ir::Type`, which we glob-import below as the Core type model.
 use cranelift::prelude::{
-    types, AbiParam, FunctionBuilder, FunctionBuilderContext, InstBuilder, IntCC, Value,
+    types, AbiParam, FunctionBuilder, FunctionBuilderContext, InstBuilder, IntCC, MemFlags,
+    TrapCode, Value,
 };
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{default_libcall_names, FuncId, Linkage, Module, ModuleError};
 
 use marv_core::ir::*;
 use marv_core::symbol_hash;
+use marv_types::{layout, World};
 
 /// Every scalar the backend handles is a machine word; using one width keeps the
-/// backend's wrapping arithmetic identical to the interpreter's `i64` oracle.
+/// backend's wrapping arithmetic identical to the interpreter's `i64` oracle, and
+/// an aggregate pointer is the same width (one word).
 const WORD: ClType = types::I64;
+
+/// Bytes per aggregate slot — every field (and the tag) is one machine word.
+const SLOT: i32 = 8;
+
+/// The host allocator the compiled code calls to box an aggregate: it returns a
+/// pointer to `n_words` zeroed `i64` slots. marv has no GC yet (`spec/01` §4), so
+/// this **leaks** — acceptable for the short-lived programs the JIT runs, and the
+/// interpreter oracle leaks the same logical garbage (it never frees a `Value`).
+extern "C" fn marv_rt_alloc(n_words: i64) -> i64 {
+    let n = n_words.max(0) as usize;
+    let mut buf = vec![0i64; n];
+    let ptr = buf.as_mut_ptr() as i64;
+    std::mem::forget(buf);
+    ptr
+}
 
 /// A backend failure. Like the interpreter's `RunError`, these are conditions
 /// the *codegen* cannot handle — never type errors (the M2 checker has already
@@ -105,6 +132,10 @@ struct FnMeta {
     /// `param_is_unit[i]` is true iff the i-th curried parameter has type
     /// `Unit`; such parameters get no Cranelift ABI slot.
     param_is_unit: Vec<bool>,
+    /// The declared parameter types, in curried order — threaded into the body's
+    /// type environment so a `Match` can tell a `bool` scrutinee (the value *is*
+    /// the tag) from a boxed enum (the tag lives at word 0). See [`layout`].
+    param_tys: Vec<Type>,
 }
 
 impl FnMeta {
@@ -129,9 +160,20 @@ pub struct JitProgram {
 ///
 /// Definitions are keyed under `symbol_hash("<module>.<name>")` — the hash a
 /// body's `Atom::Global` carries (see `marv_core::lower`) — so intra-module
-/// calls and recursion bind correctly.
-pub fn compile(module_path: &str, defs: &[(String, Def)]) -> Result<JitProgram, CodegenError> {
+/// calls and recursion bind correctly. `world` supplies the struct/enum
+/// declarations the aggregate paths need for layout (`spec/02` §C).
+pub fn compile(
+    module_path: &str,
+    defs: &[(String, Def)],
+    world: &World,
+) -> Result<JitProgram, CodegenError> {
     let mut module = make_module()?;
+
+    // The host allocator is an import every boxing site can call.
+    let mut alloc_sig = module.make_signature();
+    alloc_sig.params.push(AbiParam::new(WORD));
+    alloc_sig.returns.push(AbiParam::new(WORD));
+    let alloc_id = module.declare_function("marv_rt_alloc", Linkage::Import, &alloc_sig)?;
 
     // Pass 1: declare every function (signature only) so that bodies compiled in
     // pass 2 can reference any callee — including not-yet-compiled and recursive
@@ -162,6 +204,7 @@ pub fn compile(module_path: &str, defs: &[(String, Def)]) -> Result<JitProgram, 
                 id,
                 arity,
                 param_is_unit,
+                param_tys,
             },
         );
         names.insert(name.clone(), h);
@@ -174,7 +217,16 @@ pub fn compile(module_path: &str, defs: &[(String, Def)]) -> Result<JitProgram, 
     let mut fb_ctx = FunctionBuilderContext::new();
     for (h, idx) in &order {
         let (_, def) = &defs[*idx];
-        compile_fn(&mut module, &metas, &mut ctx, &mut fb_ctx, *h, def)?;
+        compile_fn(
+            &mut module,
+            &metas,
+            world,
+            alloc_id,
+            &mut ctx,
+            &mut fb_ctx,
+            *h,
+            def,
+        )?;
         module.clear_context(&mut ctx);
     }
 
@@ -262,7 +314,8 @@ impl JitProgram {
     }
 }
 
-/// Build a fresh JIT module configured for the host machine.
+/// Build a fresh JIT module configured for the host machine, with the host
+/// allocator symbol registered so boxing sites can call it.
 fn make_module() -> Result<JITModule, CodegenError> {
     let mut flags = settings::builder();
     // The JIT loads code into its own process; position-independent code and
@@ -278,14 +331,18 @@ fn make_module() -> Result<JITModule, CodegenError> {
     let isa = isa_builder
         .finish(settings::Flags::new(flags))
         .map_err(|e| CodegenError::Backend(e.to_string()))?;
-    let builder = JITBuilder::with_isa(isa, default_libcall_names());
+    let mut builder = JITBuilder::with_isa(isa, default_libcall_names());
+    builder.symbol("marv_rt_alloc", marv_rt_alloc as *const u8);
     Ok(JITModule::new(builder))
 }
 
 /// Compile one function definition into the module.
+#[allow(clippy::too_many_arguments)]
 fn compile_fn(
     module: &mut JITModule,
     metas: &HashMap<Hash, FnMeta>,
+    world: &World,
+    alloc_id: FuncId,
     ctx: &mut cranelift::codegen::Context,
     fb_ctx: &mut FunctionBuilderContext,
     h: Hash,
@@ -313,17 +370,20 @@ fn compile_fn(
 
         // Bind parameters at de Bruijn levels 0..arity. Unit parameters get no
         // ABI slot, so map them to `Slot::Unit`; the rest pull the next block
-        // parameter, in order.
+        // parameter, in order. Each binder's type is recorded in parallel so a
+        // boxed-enum `Match` over a parameter can be told from a `bool` one.
         let block_params: Vec<Value> = builder.block_params(entry_block).to_vec();
         let mut env: Vec<Slot> = Vec::with_capacity(meta.arity);
+        let mut tys: Vec<Option<Type>> = Vec::with_capacity(meta.arity);
         let mut abi_i = 0usize;
-        for is_unit in &meta.param_is_unit {
+        for (i, is_unit) in meta.param_is_unit.iter().enumerate() {
             if *is_unit {
                 env.push(Slot::Unit);
             } else {
                 env.push(Slot::Val(block_params[abi_i]));
                 abi_i += 1;
             }
+            tys.push(meta.param_tys.get(i).cloned());
         }
 
         // Scope the translator so its `&mut builder` borrow ends before
@@ -332,8 +392,12 @@ fn compile_fn(
             let mut trans = Trans {
                 module,
                 metas,
+                world,
+                alloc_id,
+                alloc_ref: None,
                 builder: &mut builder,
                 env,
+                tys,
             };
             let result = trans.eval(inner)?;
             let ret = trans.as_word(result)?;
@@ -346,8 +410,9 @@ fn compile_fn(
     Ok(())
 }
 
-/// A compile-time value: a real machine word, a (zero-sized) unit, or a
-/// partially-applied call accumulating its arguments (the currying mirror).
+/// A compile-time value: a real machine word, a (zero-sized) unit, a
+/// partially-applied call accumulating its arguments (the currying mirror), or a
+/// compile-time aggregate.
 #[derive(Clone)]
 enum Slot {
     Val(Value),
@@ -356,20 +421,33 @@ enum Slot {
         func: Hash,
         got: Vec<Slot>,
     },
-    /// A compile-time aggregate: the fields of a product `Ctor` (and the
-    /// loop-carried-state tuple a `Loop` evaluates to). Its leaves live in
-    /// registers; it never crosses a function boundary, so no heap layout is
-    /// needed (full aggregate codegen is MARV-9). A `Proj` selects a field.
-    Tuple(Vec<Slot>),
+    /// A compile-time aggregate (a product/struct `Ctor`, an enum-variant `Ctor`
+    /// whose tag is `tag`, or the loop-carried-state tuple a `Loop` yields). Its
+    /// leaves live in registers; it is **boxed** to the heap lazily — only when
+    /// it must become a single word ([`Trans::as_word`]), i.e. cross a function
+    /// boundary, be returned, or be matched at runtime (MARV-9). A `Proj` selects
+    /// a field at compile time.
+    Tuple {
+        tag: u32,
+        fields: Vec<Slot>,
+    },
 }
 
 /// The per-function translation state.
 struct Trans<'a, 'b> {
     module: &'a mut JITModule,
     metas: &'a HashMap<Hash, FnMeta>,
+    world: &'a World,
+    alloc_id: FuncId,
+    /// The allocator's func-ref in the current function, declared lazily on the
+    /// first boxing site.
+    alloc_ref: Option<cranelift::codegen::ir::FuncRef>,
     builder: &'a mut FunctionBuilder<'b>,
     /// Environment indexed by de Bruijn *level* (`env[0]` = outermost binder).
     env: Vec<Slot>,
+    /// Binder types, parallel to `env` (`None` when unknown). Drives the
+    /// `Match` scalar-vs-boxed decision and boxed field binding.
+    tys: Vec<Option<Type>>,
 }
 
 impl Trans<'_, '_> {
@@ -379,9 +457,13 @@ impl Trans<'_, '_> {
 
             Core::Let { value, body } => {
                 let v = self.eval(value)?;
+                let world = self.world;
+                let t = layout::type_of(world, value, &mut self.tys);
                 self.env.push(v);
+                self.tys.push(t);
                 let r = self.eval(body);
                 self.env.pop();
+                self.tys.pop();
                 r
             }
 
@@ -400,32 +482,20 @@ impl Trans<'_, '_> {
                 branches,
             } => self.eval_match(scrutinee, branches),
 
-            Core::Ctor { fields, .. } => {
-                // A product/aggregate as a compile-time register tuple (no heap
-                // layout yet; see `Slot::Tuple`). Fields are atomic in ANF.
+            Core::Ctor { tag, fields, .. } => {
+                // A product/enum value as a compile-time tuple (boxed lazily; see
+                // `Slot::Tuple`). Fields are atomic in ANF.
                 let mut slots = Vec::with_capacity(fields.len());
                 for a in fields {
                     slots.push(self.eval_atom(a)?);
                 }
-                Ok(Slot::Tuple(slots))
+                Ok(Slot::Tuple {
+                    tag: *tag,
+                    fields: slots,
+                })
             }
 
-            Core::Proj { base, idx } => {
-                let b = self.eval_atom(base)?;
-                match b {
-                    Slot::Tuple(mut slots) => {
-                        let i = *idx as usize;
-                        if i < slots.len() {
-                            Ok(slots.swap_remove(i))
-                        } else {
-                            Err(CodegenError::Unsupported("projection out of range".into()))
-                        }
-                    }
-                    _ => Err(CodegenError::Unsupported(
-                        "projection of a non-aggregate".into(),
-                    )),
-                }
-            }
+            Core::Proj { base, idx } => self.eval_proj(base, *idx),
 
             Core::Loop {
                 state, cond, body, ..
@@ -443,13 +513,38 @@ impl Trans<'_, '_> {
         }
     }
 
+    /// Project field `idx`. A compile-time tuple selects the field directly; a
+    /// boxed aggregate (a word that is a pointer) loads from `[idx + 1]` — word 0
+    /// is the tag (MARV-9).
+    fn eval_proj(&mut self, base: &Atom, idx: u32) -> Result<Slot, CodegenError> {
+        let b = self.eval_atom(base)?;
+        match b {
+            Slot::Tuple { mut fields, .. } => {
+                let i = idx as usize;
+                if i < fields.len() {
+                    Ok(fields.swap_remove(i))
+                } else {
+                    Err(CodegenError::Unsupported("projection out of range".into()))
+                }
+            }
+            Slot::Val(ptr) => {
+                let off = (idx as i32 + 1) * SLOT;
+                let v = self.builder.ins().load(WORD, MemFlags::trusted(), ptr, off);
+                Ok(Slot::Val(v))
+            }
+            _ => Err(CodegenError::Unsupported(
+                "projection of a non-aggregate".into(),
+            )),
+        }
+    }
+
     /// Lower a [`Core::Loop`] to SSA control flow: a `header` block carrying the
     /// loop-carried state as block parameters, a `body` block that computes the
     /// next state and jumps back, and an `exit` block carrying the final state
-    /// (`spec/02` §C `Loop`). The loop evaluates to the final state as a
-    /// [`Slot::Tuple`] for the enclosing scope to project. Invariants are Tier-1/
-    /// Tier-2 proof obligations checked elsewhere (the interpreter / `marv-verify`),
-    /// so they are not emitted here.
+    /// (`spec/02` §C `Loop`). Loop state stays in registers (never boxed), so the
+    /// already-tested loop lowering is unchanged by MARV-9. The loop evaluates to
+    /// the final state as a compile-time [`Slot::Tuple`] for the enclosing scope
+    /// to project. Invariants are Tier-1/Tier-2 obligations checked elsewhere.
     fn eval_loop(
         &mut self,
         state: &[Atom],
@@ -457,11 +552,14 @@ impl Trans<'_, '_> {
         body: &Core,
     ) -> Result<Slot, CodegenError> {
         let k = state.len();
-        // Initial carried values (loop-carried state must be scalar words).
+        // Initial carried values (loop-carried state must be scalar words), and
+        // their types (so a carried aggregate pointer can still be matched).
         let mut init: Vec<BlockArg> = Vec::with_capacity(k);
+        let mut carried_tys: Vec<Option<Type>> = Vec::with_capacity(k);
         for a in state {
             let s = self.eval_atom(a)?;
             init.push(self.as_word(s)?.into());
+            carried_tys.push(layout::atom_type(self.world, a, &self.tys));
         }
 
         let header = self.builder.create_block();
@@ -479,8 +577,9 @@ impl Trans<'_, '_> {
         // current carried values as the loop's result).
         self.builder.switch_to_block(header);
         let carried: Vec<Value> = self.builder.block_params(header).to_vec();
-        for v in &carried {
+        for (v, t) in carried.iter().zip(&carried_tys) {
             self.env.push(Slot::Val(*v));
+            self.tys.push(t.clone());
         }
         let c = self.eval(cond)?;
         let c = self.as_word(c)?;
@@ -494,7 +593,7 @@ impl Trans<'_, '_> {
         self.builder.seal_block(body_block);
         let next = self.eval(body)?;
         let next_args: Vec<BlockArg> = match next {
-            Slot::Tuple(slots) => slots
+            Slot::Tuple { fields, .. } => fields
                 .into_iter()
                 .map(|s| self.as_word(s).map(BlockArg::from))
                 .collect::<Result<_, _>>()?,
@@ -507,6 +606,7 @@ impl Trans<'_, '_> {
         };
         for _ in 0..k {
             self.env.pop();
+            self.tys.pop();
         }
         self.builder.ins().jump(header, &next_args);
         self.builder.seal_block(header);
@@ -520,7 +620,10 @@ impl Trans<'_, '_> {
             .iter()
             .map(|v| Slot::Val(*v))
             .collect();
-        Ok(Slot::Tuple(finals))
+        Ok(Slot::Tuple {
+            tag: 0,
+            fields: finals,
+        })
     }
 
     fn eval_atom(&mut self, a: &Atom) -> Result<Slot, CodegenError> {
@@ -581,7 +684,8 @@ impl Trans<'_, '_> {
         if got.len() < meta.arity {
             return Ok(Slot::Partial { func, got });
         }
-        // Saturated: drop unit arguments, lower the rest to words, and call.
+        // Saturated: drop unit arguments, lower the rest to words (boxing any
+        // aggregate argument), and call.
         let param_is_unit = meta.param_is_unit.clone();
         let func_id = meta.id;
         let mut call_args: Vec<Value> = Vec::with_capacity(got.len());
@@ -623,7 +727,7 @@ impl Trans<'_, '_> {
             Neg => self.builder.ins().ineg(v(0)),
             Len | Index => {
                 return Err(CodegenError::Unsupported(
-                    "len/index (no aggregate layout yet)".into(),
+                    "len/index over arrays/slices (no array layout yet — MARV-9 follow-up)".into(),
                 ))
             }
         };
@@ -689,13 +793,26 @@ impl Trans<'_, '_> {
         self.builder.ins().uextend(WORD, c)
     }
 
+    /// Lower a `Match`. A `bool` scrutinee (the `if`/`else` desugaring) takes the
+    /// two-arm scalar path; a boxed `enum`/`struct` scrutinee takes the runtime
+    /// path — load the tag from word 0 and dispatch through a jump table, binding
+    /// each variant's fields by loading them from the payload (MARV-9).
     fn eval_match(&mut self, scrutinee: &Atom, branches: &[Branch]) -> Result<Slot, CodegenError> {
-        // The front end emits only the two-armed `bool` match (`if`/`else`):
-        // branch 0 = false, branch 1 = true (`spec/02` §D), with no bound
-        // fields. Anything else needs aggregate/enum support not present yet.
+        let scrut_ty = layout::atom_type(self.world, scrutinee, &self.tys);
+        let boxed = scrut_ty
+            .as_ref()
+            .map(|t| layout::is_boxed(self.world, t))
+            .unwrap_or(false);
+        if boxed {
+            return self.eval_match_boxed(scrutinee, branches, &scrut_ty.unwrap());
+        }
+
+        // Scalar path: the front end emits only the two-armed `bool` match
+        // (`if`/`else`): branch 0 = false, branch 1 = true (`spec/02` §D), with no
+        // bound fields. A non-`bool`, non-aggregate scrutinee has no layout here.
         if branches.len() != 2 || branches.iter().any(|b| b.binds != 0) {
             return Err(CodegenError::Unsupported(
-                "match other than a two-arm boolean `if`/`else`".into(),
+                "match on a value whose layout could not be determined".into(),
             ));
         }
         let cond = self.eval_atom(scrutinee)?;
@@ -731,9 +848,80 @@ impl Trans<'_, '_> {
         Ok(Slot::Val(result))
     }
 
+    /// The runtime enum/struct `Match` (MARV-9): box the scrutinee to a pointer,
+    /// load the tag from word 0, and `br_table` over the branch blocks. Each arm
+    /// binds its variant's fields by loading `[i + 1]` from the payload, then
+    /// evaluates its body; all arms converge on a merge block carrying the result.
+    fn eval_match_boxed(
+        &mut self,
+        scrutinee: &Atom,
+        branches: &[Branch],
+        scrut_ty: &Type,
+    ) -> Result<Slot, CodegenError> {
+        let scrut = self.eval_atom(scrutinee)?;
+        let ptr = self.as_word(scrut)?;
+        let tag64 = self.builder.ins().load(WORD, MemFlags::trusted(), ptr, 0);
+        // `br_table` dispatches on an `i32` index; the tag fits a variant count.
+        let tag = self.builder.ins().ireduce(types::I32, tag64);
+
+        let merge = self.builder.create_block();
+        self.builder.append_block_param(merge, WORD);
+        let arm_blocks: Vec<_> = branches
+            .iter()
+            .map(|_| self.builder.create_block())
+            .collect();
+        let default_block = self.builder.create_block();
+
+        // Jump table on the tag; an out-of-range tag (impossible for an
+        // exhaustively-checked match) lands on the trapping default.
+        let arm_calls: Vec<_> = arm_blocks
+            .iter()
+            .map(|b| self.builder.func.dfg.block_call(*b, &[]))
+            .collect();
+        let default_call = self.builder.func.dfg.block_call(default_block, &[]);
+        let jt = self
+            .builder
+            .create_jump_table(JumpTableData::new(default_call, &arm_calls));
+        self.builder.ins().br_table(tag, jt);
+
+        // Default: unreachable for a well-checked program.
+        self.builder.switch_to_block(default_block);
+        self.builder.seal_block(default_block);
+        self.builder.ins().trap(TrapCode::unwrap_user(1));
+
+        for (t, br) in branches.iter().enumerate() {
+            self.builder.switch_to_block(arm_blocks[t]);
+            self.builder.seal_block(arm_blocks[t]);
+            // Bind the variant's fields from the payload (`[i + 1]`), recording
+            // their types so a nested match over a field stays well-formed.
+            let field_tys =
+                layout::variant_fields(self.world, scrut_ty, t as u32).unwrap_or_default();
+            let pushed = br.binds as usize;
+            for i in 0..pushed {
+                let off = (i as i32 + 1) * SLOT;
+                let v = self.builder.ins().load(WORD, MemFlags::trusted(), ptr, off);
+                self.env.push(Slot::Val(v));
+                self.tys.push(field_tys.get(i).cloned());
+            }
+            let body = self.eval(&br.body)?;
+            let w = self.as_word(body)?;
+            for _ in 0..pushed {
+                self.env.pop();
+                self.tys.pop();
+            }
+            self.builder.ins().jump(merge, &[w.into()]);
+        }
+
+        self.builder.switch_to_block(merge);
+        self.builder.seal_block(merge);
+        let result = self.builder.block_params(merge)[0];
+        Ok(Slot::Val(result))
+    }
+
     /// Coerce a slot to a machine word: a real value passes through, a unit
-    /// becomes the zero word, and a partial application is a compile error
-    /// (a function used where a value is required).
+    /// becomes the zero word, an aggregate is **boxed** to the heap (MARV-9), and
+    /// a partial application is a compile error (a function used where a value is
+    /// required).
     fn as_word(&mut self, s: Slot) -> Result<Value, CodegenError> {
         match s {
             Slot::Val(v) => Ok(v),
@@ -741,10 +929,41 @@ impl Trans<'_, '_> {
             Slot::Partial { .. } => Err(CodegenError::Unsupported(
                 "a partially-applied function used as a value".into(),
             )),
-            Slot::Tuple(_) => Err(CodegenError::Unsupported(
-                "an aggregate used where a single word is required".into(),
-            )),
+            Slot::Tuple { tag, fields } => self.box_tuple(tag, fields),
         }
+    }
+
+    /// Box an aggregate into a fresh `[tag, field_0, …]` heap block and return the
+    /// pointer (MARV-9). Nested aggregate fields are boxed recursively.
+    fn box_tuple(&mut self, tag: u32, fields: Vec<Slot>) -> Result<Value, CodegenError> {
+        let n = fields.len();
+        let base = self.alloc((n + 1) as i64);
+        let tagv = self.builder.ins().iconst(WORD, tag as i64);
+        self.builder.ins().store(MemFlags::trusted(), tagv, base, 0);
+        for (i, f) in fields.into_iter().enumerate() {
+            let w = self.as_word(f)?;
+            let off = (i as i32 + 1) * SLOT;
+            self.builder.ins().store(MemFlags::trusted(), w, base, off);
+        }
+        Ok(base)
+    }
+
+    /// Emit a call to the host allocator for `n_words` slots, returning the
+    /// pointer. The allocator's func-ref is declared lazily, once per function.
+    fn alloc(&mut self, n_words: i64) -> Value {
+        let aref = match self.alloc_ref {
+            Some(r) => r,
+            None => {
+                let r = self
+                    .module
+                    .declare_func_in_func(self.alloc_id, self.builder.func);
+                self.alloc_ref = Some(r);
+                r
+            }
+        };
+        let n = self.builder.ins().iconst(WORD, n_words);
+        let call = self.builder.ins().call(aref, &[n]);
+        self.builder.inst_results(call)[0]
     }
 }
 

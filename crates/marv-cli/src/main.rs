@@ -461,7 +461,7 @@ fn cmd_build(args: &[String]) -> ExitCode {
 
 /// Cranelift backend: JIT-compile, and with `--run` execute the entry point.
 fn build_native(inv: &Invocation, file: &str, loaded: &Loaded) -> ExitCode {
-    let jit = match codegen::compile(&loaded.module_path, &loaded.defs) {
+    let jit = match codegen::compile(&loaded.module_path, &loaded.defs, &loaded.world) {
         Ok(j) => j,
         Err(e) => {
             eprintln!("marv build: {e}");

@@ -24,7 +24,7 @@ where each one sits and what must land first. Each task references back here.
 | ~~**MARV-6** capabilities/`perform` from source~~ ✅ done | 1 · Surface | ~~MARV-5~~ ✅, ~~MARV-3~~ ✅ | — | medium |
 | ~~**MARV-7** scalars & collections (str/char, slices/arrays, `as`)~~ ✅ done | 1 · Surface | — (pairs w/ 4) | — | medium |
 | **MARV-8** reachability-pruned compilation | 2 · Backends | — *(independent)* | — | medium |
-| **MARV-9** aggregate/enum codegen (interp + Cranelift + WASM) | 2 · Backends | MARV-1, MARV-4 | 10 | medium |
+| ~~**MARV-9** aggregate/enum codegen (interp + Cranelift + WASM)~~ ✅ done | 2 · Backends | ~~MARV-1~~ ✅, ~~MARV-4~~ ✅ | 10 | medium |
 | **MARV-10** AOT native + LLVM + WASM component/WIT | 2 · Backends | MARV-9 | — | low |
 | **MARV-11** verified-subset expansion + loop invariants + `old`/quantifiers | 3 · Verification | MARV-2, MARV-1 | — | medium |
 | ~~**MARV-12** formatter doc-comments + real source spans~~ ✅ done | 5 · Infra/polish | — *(independent)* | — | medium |
@@ -105,6 +105,24 @@ cross-module linking is MARV-14). `std/capabilities.mv` parses/checks; `examples
 rows, and run under `marv run --grant Io`. Cranelift n/a (rejects `Perform`); WASM lowers a
 `perform` to a host import but capability *narrowing* on WASM, and `linear` capabilities (a `Conn`
 that must be `close`d), are follow-ups.
+
+Done (Phase 2 · Backends): **MARV-9** aggregate/enum codegen across interp + Cranelift + WASM
+(`spec/02` §C). Both native backends gained a **real runtime representation** for aggregates: every
+value is one machine word, and a `struct`/tuple product or `enum` variant is a **pointer** to a
+`[tag, field_0, …]` block — the *same* layout the interpreter's `Value::Agg` carries. **Cranelift**
+heap-boxes via a host `marv_rt_alloc` symbol, lowers `Proj` to a load and an enum `Match` to a
+`br_table` on the tag with per-arm field binding; **WASM** does the same over a linear memory (a new
+memory + bump-pointer global, both module-internal so a *pure* module still imports nothing).
+Boxing is **lazy** — a `Ctor` stays a compile-time register/local bundle and is spilled only when it
+crosses a function boundary, is returned, or is matched at runtime — so loops (whose carried state
+never escapes) still allocate nothing and the tested loop lowering is unchanged. The scalar-`bool`
+`Match` (the `if`/`else` desugaring) is told from a boxed-`enum` one by the scrutinee's *type*, via a
+shared `marv_types::layout` oracle (`is_boxed`/`variant_fields`/`type_of`) the backends consult — the
+one fact the type-erased Core does not carry at the node. The three-way differential corpus
+(`tests/run/structs.mv`, `color.mv`, `shapes.mv`) asserts interp == Cranelift == wasm on programs
+that construct, project, cross boundaries with, and `match` (binding fields, `binds > 0`) aggregates
+and enums. Neither backend reclaims yet (no GC — Cranelift leaks, WASM bump-allocates; `spec/01`
+§4); array/slice *literals* with `len`/index codegen, and AOT/LLVM emission, are MARV-10 follow-ups.
 
 ## Recommended order
 

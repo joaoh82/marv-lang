@@ -10,17 +10,20 @@ property (`spec/01` §9).
 | Backend | Crate | Form | Status |
 |---------|-------|------|--------|
 | Tree-walking interpreter | `marv-interp` | in-process; the oracle | **working** — full Core IR (arithmetic, `if`/`match`, recursion, currying, aggregates, `perform`/effects, contracts/Tier-1) |
-| Cranelift (native) | `marv-codegen-cl` | **JIT** (in-process) | **working** for the integer/boolean subset; AOT object/executable emission is roadmap |
-| WebAssembly | `marv-codegen-wasm` | core `.wasm` module | **working** for the integer/boolean subset + capabilities-as-host-imports; component/WIT packaging + linear-memory aggregates are roadmap |
+| Cranelift (native) | `marv-codegen-cl` | **JIT** (in-process) | **working** for the integer/boolean subset + heap-boxed aggregates/enums (MARV-9); AOT object/executable emission is roadmap |
+| WebAssembly | `marv-codegen-wasm` | core `.wasm` module | **working** for the integer/boolean subset + linear-memory aggregates/enums (MARV-9) + capabilities-as-host-imports; component/WIT packaging is roadmap |
 | LLVM (release) | `marv-codegen-llvm` | — | **stub** (roadmap — optimized release builds via `inkwell`) |
 
 The interpreter executes the whole Core IR. The Cranelift and WASM backends today compile the
-**integer/boolean subset** the front end can lower (arithmetic, comparisons, `and`/`or`,
-`if`/`else`, `let`, curried cross-function calls and recursion); both compute scalars at
-64-bit width so they match the oracle exactly. Constructs they don't lower yet (aggregates
-with runtime layout, first-class closures, floats) return an honest `unsupported` rather than
-emitting wrong code — and land in *both* backends together so agreement is preserved. The
-WASM backend additionally lowers `perform` to a host-import call.
+integer/boolean subset the front end can lower (arithmetic, comparisons, `and`/`or`, `if`/`else`,
+`let`, curried cross-function calls and recursion), **plus aggregates and enums (MARV-9)**: a
+`struct`/tuple product or `enum` variant is a pointer to a `[tag, fields…]` block — Cranelift on a
+host-allocated heap, WASM in a linear memory — so `Ctor`/`Proj`/n-way `Match` (binding fields) run
+identically to the interpreter's tagged `Value`. Both compute scalars at 64-bit width so they match
+the oracle exactly. Constructs they don't lower yet (first-class closures, floats, `len`/index over
+arrays) return an honest `unsupported` rather than emitting wrong code — and land in *both* backends
+together so agreement is preserved. The WASM backend additionally lowers `perform` to a host-import
+call. Neither native backend reclaims memory yet (no GC, `spec/01` §4).
 
 ## Capabilities across hosts
 

@@ -1,0 +1,16 @@
+mod demo
+
+struct Point { x: i64, y: i64 }
+
+pure fn make(x: i64, y: i64) -> Point {
+    Point { x: x, y: y }
+}
+
+pure fn sum_point(p: Point) -> i64 {
+    (p.x + p.y)
+}
+
+pure fn manhattan(x: i64, y: i64) -> i64 {
+    let p = make(x, y)
+    sum_point(p)
+}
