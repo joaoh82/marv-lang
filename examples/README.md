@@ -19,7 +19,7 @@ fixture source for the test suite. As of M4 the integer/boolean subset is
 | [`mutation.mv`](mutation.mv) | **Runnable:** construction + mutation (MARV-4) — a `struct` literal `Point { x: …, y: … }`, a `var` accumulator reassigned with `total = …`, and an in-place field update `q.x = …`. `marv run --entry main examples/mutation.mv` yields `45`; mutating the copy `q` leaves the original untouched (mutable value semantics, `spec/01` §4). |
 | [`loops.mv`](loops.mv) | **Runnable (MARV-2):** `while` loops carrying `var`s across iterations, with a Tier-1 `invariant` (`sum_to`, `pow`, `count_down`). `marv run --entry sum_to examples/loops.mv 5` yields `15`; it runs identically on the interpreter, Cranelift JIT, and WASM (differential corpus). |
 | [`casts.mv`](casts.mv) | **Runnable (MARV-7):** `char` literals (`'\n'`), `as` casts (`(n as u8)`, widening + narrowing), the fixed-array type `[N]T`, and `len(str)`. Integer casts truncate/wrap to width identically on the interpreter, Cranelift, and WASM (`tests/run/casts.mv`); a constant that overflows its narrowing target (`256 as u8`) fails `marv check` with `E0104`. |
-| [`generics.mv`](generics.mv) | **Runnable (MARV-5):** generics + an `interface`/`impl` with a bound. `max[T: Ord](a, b)` calls the interface method `cmp`; `main` calls `max(3, 7)`, which **monomorphizes** to `max@i32` and **dispatches** `cmp` to the coherent `impl Ord[i32]`. `marv run --entry main examples/generics.mv` yields `7`; `marv resolve-impl examples/generics.mv` reports the selected impl; instantiating at a type with no impl (e.g. `max(true, false)`) fails `marv check` with `E0160`. |
+| [`generics.mv`](generics.mv) | **Runnable (MARV-5):** generics + an `interface`/`impl` with a bound. `max[T: Ord](a, b)` calls the interface method `cmp`; `main` calls `max(3, 7)`, which **monomorphizes** to `max@i32` and **dispatches** `cmp` to the coherent `impl Ord[i32]`. `marv run --entry main examples/generics.mv` yields `7`; `marv resolve-impl examples/generics.mv` reports the selected impl; instantiating at a type with no impl (e.g. `max(true, false)`) fails `marv check` with `E0160`. Since the `Ordering` enum got a runtime layout (MARV-9), the monomorphized program also runs on the Cranelift JIT and WASM — an `i64` variant lives in the differential corpus as [`tests/run/generics.mv`](../tests/run/generics.mv) (MARV-26). |
 
 Every example now parses, formats, and checks through the **real** front end — the
 `examples_are_canonical` test reprints each from the AST (the formatter's whitespace
@@ -33,8 +33,10 @@ when capabilities & `perform` from source landed (MARV-6); `clamp.mv` joined in 
 and WebAssembly (`marv build --target wasm-component`, then via wasmtime or the browser
 demo in [`../web/`](../web)). `hello`/`read_file` run on the interpreter under
 `marv run --grant Io` (capability ops are interpreter-modeled; Cranelift rejects
-`perform`). `generics.mv` constructs an `enum` (`Ordering`), so — like `color.mv` — it
-runs on the interpreter only until aggregate codegen lands (MARV-9).
+`perform`). `generics.mv` constructs an `enum` (`Ordering`); now that aggregate codegen
+has landed (MARV-9), the monomorphized generic runs identically on the interpreter,
+Cranelift, and WASM — exercised in the differential corpus by
+[`tests/run/generics.mv`](../tests/run/generics.mv) (MARV-26).
 
 ## Invariant: examples stay canonical
 

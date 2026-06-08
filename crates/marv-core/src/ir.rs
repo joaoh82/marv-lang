@@ -149,6 +149,30 @@ pub enum Type {
     Var(u32),
 }
 
+impl Type {
+    /// Whether this type mentions a free generic [`Type::Var`] anywhere — i.e. it
+    /// is the signature of an *un-instantiated* generic template, not a concrete
+    /// type. A polymorphic function has no fixed runtime representation: only its
+    /// monomorphizations (`max@i64`, …) get an ABI and are compiled. Backends use
+    /// this to skip generic templates, which are kept in the lowered def set so
+    /// the generic body type-checks once but are never called directly (the
+    /// interpreter skips them implicitly via lazy, by-need evaluation).
+    pub fn is_polymorphic(&self) -> bool {
+        match self {
+            Type::Var(_) => true,
+            Type::Unit | Type::Bool | Type::Int(_) | Type::Float(_) | Type::Str | Type::Char => {
+                false
+            }
+            Type::Array(of, _) | Type::Slice(of) | Type::Ref { of, .. } | Type::Linear(of) => {
+                of.is_polymorphic()
+            }
+            Type::Tuple(items) => items.iter().any(Type::is_polymorphic),
+            Type::Arrow { param, ret, .. } => param.is_polymorphic() || ret.is_polymorphic(),
+            Type::Nominal { args, .. } => args.iter().any(Type::is_polymorphic),
+        }
+    }
+}
+
 /// The set of capabilities a computation may exercise and the errors it may
 /// raise — the effect/error row carried by an [`Type::Arrow`] (`spec/02` §C).
 ///

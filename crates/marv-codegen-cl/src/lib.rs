@@ -185,6 +185,14 @@ pub fn compile(
         if def.kind != DefKind::Fn {
             continue;
         }
+        // Skip generic templates (signatures mentioning a `Type::Var`): they have
+        // no concrete ABI and are never called directly — only their
+        // monomorphizations (`max@i64`, …) are. Compiling the template would also
+        // fail, since its body references interface methods (`cmp`) that resolve
+        // only in a specialized, impl-dispatched context (`spec/01` §§3.3–3.4).
+        if def.ty.is_polymorphic() {
+            continue;
+        }
         let qualified = qualify(module_path, name);
         let h = symbol_hash(&qualified);
         let param_tys = peel_param_types(&def.ty);

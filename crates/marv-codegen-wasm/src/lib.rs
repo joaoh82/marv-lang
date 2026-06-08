@@ -179,9 +179,13 @@ pub fn compile(
     world: &World,
 ) -> Result<WasmArtifact, WasmError> {
     // ---- gather functions, in definition order --------------------------
+    // Skip generic templates (signatures mentioning a `Type::Var`): they have no
+    // concrete ABI and are never called directly — only their monomorphizations
+    // (`max@i64`, …) are. Their bodies reference interface methods (`cmp`) that
+    // resolve only in a specialized, impl-dispatched context (`spec/01` §§3.3–3.4).
     let fns: Vec<(Hash, &str, &Def)> = defs
         .iter()
-        .filter(|(_, d)| d.kind == DefKind::Fn)
+        .filter(|(_, d)| d.kind == DefKind::Fn && !d.ty.is_polymorphic())
         .map(|(name, d)| (symbol_hash(&qualify(module_path, name)), name.as_str(), d))
         .collect();
 
