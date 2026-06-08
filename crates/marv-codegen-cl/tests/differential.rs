@@ -161,6 +161,26 @@ fn corpus_cases() -> Vec<(&'static str, &'static str, Vec<i64>, i64)> {
         ("generics.mv", "max_of", vec![7, 3], 7),
         ("generics.mv", "max_of", vec![5, 5], 5),
         ("generics.mv", "max_of", vec![-4, -9], -4),
+        // Arrays (MARV-30): array literals box to `[len, e0, …]`; `len` reads the
+        // header word and `index` loads `[i + 1]`; an index *store* is a functional
+        // element update (unrolled over the static length). interp == cranelift == wasm.
+        // literal + indexed reads + arithmetic.
+        ("arrays.mv", "sum3", vec![], 42),
+        // index with a runtime subscript.
+        ("arrays.mv", "nth", vec![0], 5),
+        ("arrays.mv", "nth", vec![3], 8),
+        // `len` over an array (the header word).
+        ("arrays.mv", "length", vec![], 4),
+        // `len` + index driving a `while` loop.
+        ("arrays.mv", "sum_all", vec![], 15),
+        // index store `a[i] = e` with a constant subscript, then read back.
+        ("arrays.mv", "set_get", vec![], 42),
+        // index store with a runtime subscript, then sum every element.
+        ("arrays.mv", "set_sum", vec![0], 15),
+        ("arrays.mv", "set_sum", vec![1], 14),
+        ("arrays.mv", "set_sum", vec![2], 13),
+        // `for x in a` over an array (desugared len/index loop).
+        ("arrays.mv", "sum_for", vec![], 20),
     ]
 }
 

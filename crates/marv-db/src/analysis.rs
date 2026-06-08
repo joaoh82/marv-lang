@@ -830,6 +830,7 @@ fn collect_globals(c: &Core, out: &mut Vec<Hash>) {
             atom(arg, out);
         }
         Core::Ctor { fields, .. } => fields.iter().for_each(|a| atom(a, out)),
+        Core::Array { items, .. } => items.iter().for_each(|a| atom(a, out)),
         Core::Proj { base, .. } => atom(base, out),
         Core::Match {
             scrutinee,

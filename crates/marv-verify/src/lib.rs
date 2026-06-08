@@ -286,7 +286,7 @@ fn encode_body(ctx: &Context, c: &Core, env: &[SExpr]) -> Result<SExpr, String> 
         Core::Cast { .. } => Err("`as` casts are outside the verified subset".to_string()),
         Core::Ref { .. } => Err("references are outside the verified subset".to_string()),
         Core::App { .. } => Err("function calls are outside the verified subset".to_string()),
-        Core::Ctor { .. } | Core::Proj { .. } => {
+        Core::Ctor { .. } | Core::Proj { .. } | Core::Array { .. } => {
             Err("aggregates/ADTs are outside the verified subset".to_string())
         }
         Core::Perform { .. } => Err("a `perform` makes the function impure".to_string()),

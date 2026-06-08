@@ -1,4 +1,4 @@
-//! # marv-codegen-cl — Cranelift backend (milestone M4, aggregates MARV-9)
+//! # marv-codegen-cl — Cranelift backend (milestone M4, aggregates MARV-9, arrays MARV-30)
 //!
 //! Compiles the canonical **Core IR** (`marv-core`) to native code with
 //! Cranelift, JIT-compiling each definition so the result can be called
@@ -15,9 +15,13 @@
 //! header/body/exit) — **plus aggregates and enums** (MARV-9): a `struct`/tuple
 //! product or an `enum` variant is a heap-boxed `[tag, field_0, …]` block, so
 //! `Ctor`/`Proj`/n-way `Match` (with field binding) lower to real allocation,
-//! loads, and a jump table on the tag. Every scalar still lives in a 64-bit
-//! register, so the backend's wrapping arithmetic matches the oracle's `i64`
-//! semantics — the property that keeps the differential test meaningful.
+//! loads, and a jump table on the tag. **Arrays** (MARV-30) reuse the same boxed
+//! shape with the element count in the header word (`[len, e0, …]`), so a
+//! `Core::Array` boxes like a tuple, `len` is a header load, `index` loads
+//! `[i + 1]`, and an element store is a functional rebuild lowered upstream.
+//! Every scalar still lives in a 64-bit register, so the backend's wrapping
+//! arithmetic matches the oracle's `i64` semantics — the property that keeps the
+//! differential test meaningful.
 //!
 //! ## Aggregate representation (MARV-9)
 //!
@@ -503,6 +507,21 @@ impl Trans<'_, '_> {
                 })
             }
 
+            // An array literal: a compile-time tuple whose header word (the
+            // `Slot::Tuple` tag) is the element **count**, so once boxed the block
+            // is `[len, e0, …]`. `len` then reads word 0 and `index` loads
+            // `[i + 1]` (`eval_prim`). Boxing is still lazy (`Slot::Tuple`).
+            Core::Array { items, .. } => {
+                let mut slots = Vec::with_capacity(items.len());
+                for a in items {
+                    slots.push(self.eval_atom(a)?);
+                }
+                Ok(Slot::Tuple {
+                    tag: items.len() as u32,
+                    fields: slots,
+                })
+            }
+
             Core::Proj { base, idx } => self.eval_proj(base, *idx),
 
             Core::Loop {
@@ -733,10 +752,17 @@ impl Trans<'_, '_> {
             Or => self.builder.ins().bor(v(0), v(1)),
             Not => self.builder.ins().bxor_imm(v(0), 1),
             Neg => self.builder.ins().ineg(v(0)),
-            Len | Index => {
-                return Err(CodegenError::Unsupported(
-                    "len/index over arrays/slices (no array layout yet — MARV-9 follow-up)".into(),
-                ))
+            // `len(a)` / `a[i]` over a boxed array (`[len, e0, …]`, MARV-30). The
+            // operand is coerced to a word above, so `v(0)` is the array pointer;
+            // boxing wrote the element count into the header (word 0) and element
+            // `i` at word `i + 1`.
+            Len => self.builder.ins().load(WORD, MemFlags::trusted(), v(0), 0),
+            Index => {
+                // addr = base + (i + 1) * SLOT, then load the element word.
+                let plus1 = self.builder.ins().iadd_imm(v(1), 1);
+                let off = self.builder.ins().imul_imm(plus1, SLOT as i64);
+                let addr = self.builder.ins().iadd(v(0), off);
+                self.builder.ins().load(WORD, MemFlags::trusted(), addr, 0)
             }
         };
         Ok(Slot::Val(out))

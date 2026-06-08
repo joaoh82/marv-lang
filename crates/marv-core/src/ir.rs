@@ -296,6 +296,18 @@ pub enum Core {
         tag: u32,
         fields: Vec<Atom>,
     },
+    /// construct a fixed-length array `[e0, e1, …]` (`spec/02` §B `primary`). Its
+    /// type is `Array(elem, items.len())`. Arrays are *structural* (no nominal
+    /// hash), homogeneous, and indexed/measured with [`PrimOp::Index`] /
+    /// [`PrimOp::Len`] rather than projected. `elem` is carried explicitly so the
+    /// element type is known even for an empty array. At runtime it is a boxed
+    /// `[len, e0, …]` block — the length sits in the header word (where a `Ctor`
+    /// keeps its tag), so `len` is a single header load and `index` loads
+    /// `[i + 1]`.
+    Array {
+        elem: Type,
+        items: Vec<Atom>,
+    },
     /// project field `idx` from an aggregate atom.
     Proj {
         base: Atom,

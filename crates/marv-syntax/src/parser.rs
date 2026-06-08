@@ -1145,6 +1145,25 @@ impl Parser {
                     Ok(inner)
                 }
             }
+            // `[e0, e1, ...]` — an array literal (`spec/02` §B `primary`). A `[`
+            // at the *start* of a `primary` is unambiguously a literal; a trailing
+            // `[` (an index) is handled in `parse_postfix`. The element exprs sit
+            // inside brackets, so struct literals are unambiguous again.
+            Tok::LBracket => {
+                self.bump();
+                let mut elems = Vec::new();
+                if self.peek() != &Tok::RBracket {
+                    elems.push(self.parse_expr_allow_struct()?);
+                    while self.eat(&Tok::Comma) {
+                        if self.peek() == &Tok::RBracket {
+                            break; // trailing comma
+                        }
+                        elems.push(self.parse_expr_allow_struct()?);
+                    }
+                }
+                self.expect(Tok::RBracket)?;
+                Ok(Expr::Array(elems))
+            }
             other => Err(ParseError::new(format!(
                 "expected an expression, found {other:?}"
             ))),

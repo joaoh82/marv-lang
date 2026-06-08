@@ -19,12 +19,14 @@
 //!
 //! ## What it compiles
 //!
-//! The same integer/boolean subset the Cranelift backend handles — arithmetic
-//! and comparison [`PrimOp`]s, `if`/`else` (a two-arm `bool` [`Core::Match`]),
-//! `let`, curried cross-function calls and recursion — plus [`Core::Perform`]
-//! lowered to a host-import call. Every scalar is an `i64`, matching the oracle's
-//! semantics, so the differential test is meaningful. Constructs with no surface
-//! form yet (aggregate layout, first-class closures, floats, string-typed
+//! The same subset the Cranelift backend handles — arithmetic and comparison
+//! [`PrimOp`]s, `if`/`else` (a two-arm `bool` [`Core::Match`]), `let`, curried
+//! cross-function calls and recursion, boxed aggregates/enums over a linear-memory
+//! heap (MARV-9), and arrays with `len`/index/store (MARV-30; an array boxes to
+//! `[len, e0, …]` with the element count in the header word) — plus
+//! [`Core::Perform`] lowered to a host-import call. Every scalar is an `i64`,
+//! matching the oracle's semantics, so the differential test is meaningful.
+//! Constructs with no surface form yet (first-class closures, floats, string-typed
 //! capability operands) return [`WasmError::Unsupported`].
 //!
 //! ## Currying without heap closures
@@ -615,6 +617,20 @@ impl Trans<'_> {
                 })
             }
 
+            // An array literal: a compile-time tuple whose header word (the tag)
+            // is the element **count**, so once boxed the block is `[len, e0, …]`.
+            // `len` then reads word 0 and `index` loads `[i + 1]` (`eval_prim`).
+            Core::Array { items, .. } => {
+                let mut slots = Vec::with_capacity(items.len());
+                for a in items {
+                    slots.push(self.atom_to_local_slot(a)?);
+                }
+                Ok(Out::Tuple {
+                    tag: items.len() as u32,
+                    fields: slots,
+                })
+            }
+
             Core::Proj { base, idx } => self.eval_proj(base, *idx),
 
             Core::Loop {
@@ -921,10 +937,24 @@ impl Trans<'_> {
                 self.emit(Instruction::I64Const(-1));
                 self.emit(Instruction::I64Mul);
             }
-            Len | Index => {
-                return Err(WasmError::Unsupported(
-                    "len/index (no aggregate layout yet)".into(),
-                ))
+            // `len(a)` / `a[i]` over a boxed array (`[len, e0, …]`, MARV-30). The
+            // operands were pushed above: for `len` the stack is `[ptr]`, for
+            // `index` it is `[ptr, i]`. Boxing wrote the element count into the
+            // header (word 0) and element `i` at word `i + 1`.
+            Len => {
+                self.emit(Instruction::I32WrapI64);
+                self.emit(Instruction::I64Load(memarg(0)));
+            }
+            Index => {
+                // addr = ptr + (i + 1) * SLOT, then load the element word. Stack on
+                // entry is [ptr, i]; fold it down to a single address.
+                self.emit(Instruction::I64Const(SLOT as i64));
+                self.emit(Instruction::I64Mul); // i * SLOT
+                self.emit(Instruction::I64Add); // ptr + i * SLOT
+                self.emit(Instruction::I64Const(SLOT as i64));
+                self.emit(Instruction::I64Add); // + SLOT  (skip the header word)
+                self.emit(Instruction::I32WrapI64);
+                self.emit(Instruction::I64Load(memarg(0)));
             }
         }
         Ok(Out::Stack)

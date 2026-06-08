@@ -158,6 +158,13 @@ pub fn type_of(world: &World, c: &Core, tys: &mut Vec<Option<Type>>) -> Option<T
             args: Vec::new(),
         }),
 
+        // An array literal has the fixed-length array type `[N]elem`; the length
+        // is the element count. This is what lets `len`/`index` over a bound array
+        // recover its element type and length in the backends.
+        Core::Array { elem, items } => {
+            Some(Type::Array(Box::new(elem.clone()), items.len() as u64))
+        }
+
         Core::Proj { base, idx } => {
             let bt = atom_type(world, base, tys)?;
             variant_fields(world, &bt, 0)?
