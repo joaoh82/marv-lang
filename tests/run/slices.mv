@@ -75,3 +75,55 @@ pure fn total() -> i64 {
     }
     sum
 }
+
+// `for x in s` over a runtime-length slice (MARV-20): the desugared
+// index-driven loop (`spec/02` §D) runs on a collection whose length is only
+// known at run time, on all three backends.
+pure fn sum_for() -> i64 {
+    let s: []i64 = [2, 4, 6, 8]
+    var total: i64 = 0
+    for x in s {
+        total = (total + x)
+    }
+    total
+}
+
+// `total` rewritten as a `for`: the binder receives each `Sale` element and the
+// body projects `.amount` — the `examples/report.mv` shape with the index loop
+// hidden behind the desugar.
+pure fn total_for() -> i64 {
+    let sales: []Sale = [Sale { region: 1, amount: 10 }, Sale { region: 2, amount: 20 }, Sale { region: 1, amount: 12 }]
+    var sum: i64 = 0
+    for sale in sales {
+        sum = (sum + sale.amount)
+    }
+    sum
+}
+
+// Nested `for`s: the desugar keys each index name on the builder depth
+// (`#for<d>`), so the inner loop's index never collides with the outer one.
+pure fn nested_for() -> i64 {
+    let xs: []i64 = [1, 2, 3]
+    let ys: []i64 = [10, 20]
+    var sum: i64 = 0
+    for x in xs {
+        for y in ys {
+            sum = (sum + (x * y))
+        }
+    }
+    sum
+}
+
+// Two sequential `for`s in one block desugar to the *same* depth-keyed index
+// name; the second declaration shadows the first without clobbering it.
+pure fn rescan_for() -> i64 {
+    let xs: []i64 = [1, 2, 3]
+    var sum: i64 = 0
+    for x in xs {
+        sum = (sum + x)
+    }
+    for x in xs {
+        sum = (sum + (x * 10))
+    }
+    sum
+}

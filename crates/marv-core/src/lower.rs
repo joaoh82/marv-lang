@@ -2290,9 +2290,9 @@ impl Lowerer {
     ///
     /// The index name carries the builder depth so nested `for`s never collide,
     /// and `#` cannot start a source identifier, so it never shadows user names.
-    /// Execution awaits slice/`len` support (MARV-7) and element indexing
-    /// (MARV-9); the desugaring produces valid Core today (`len`/index lower to
-    /// the corresponding `Prim`s) so the grammar is real and round-trips.
+    /// `len`/index lower to the corresponding `Prim`s, which run on arrays
+    /// (MARV-30) and runtime-length slices (MARV-33) across all three backends,
+    /// so the desugared loop executes end to end (MARV-20).
     fn lower_for(
         &self,
         binder: &str,

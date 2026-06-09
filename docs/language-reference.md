@@ -145,11 +145,12 @@ and the loop evaluates to their final values, which the enclosing scope rebinds.
 mutable cells in Core; this is the cross-iteration form of mutable value semantics (§4).
 
 A `while` head carries zero or more `invariant` clauses. `for x in xs { … }` desugars to an
-index-driven loop (`spec/02` §D). With array `len`/index codegen now in place (MARV-30), a
-`for` over a fixed-length array runs on all three backends (`tests/run/arrays.mv::sum_for`).
-A runtime-length slice now has the same `len`/index codegen (MARV-33), so a `while` over
-`len(s)` reading `s[i]` runs on all three backends (`tests/run/slices.mv`); the `for`-desugar
-over a slice rides on the same machinery.
+index-driven loop (`spec/02` §D) and runs end to end on all three backends: over a fixed-length
+array via the array `len`/index codegen (MARV-30, `tests/run/arrays.mv::sum_for`), and over a
+runtime-length slice via the slice codegen (MARV-33 + MARV-20, `tests/run/slices.mv::sum_for`).
+The differential corpus also pins `for` over a slice of structs, nested `for`s (the desugar
+keys each index name on the builder depth, so inner and outer indices never collide), and two
+sequential `for`s in one block.
 
 A loop body may also end in an **`if`/`match`** (MARV-21): the carried `var`s are threaded
 through the branch join, so each branch produces their next values and the loop continues with
