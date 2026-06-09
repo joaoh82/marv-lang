@@ -181,6 +181,29 @@ fn corpus_cases() -> Vec<(&'static str, &'static str, Vec<i64>, i64)> {
         ("arrays.mv", "set_sum", vec![2], 13),
         // `for x in a` over an array (desugared len/index loop).
         ("arrays.mv", "sum_for", vec![], 20),
+        // Runtime-length slices (MARV-33): a slice shares the array's `[len, e0, …]`
+        // layout but with a length known only at run time. `len`/`index` reads fall
+        // out of that layout; the element *store* goes through `Core::IndexSet` —
+        // an allocate-copy-store over the runtime length, not the array's static
+        // unroll. interp == cranelift == wasm.
+        // literal + indexed reads.
+        ("slices.mv", "sum3", vec![], 42),
+        // index with a runtime subscript.
+        ("slices.mv", "nth", vec![0], 5),
+        ("slices.mv", "nth", vec![3], 8),
+        // `len` over a slice (the header word).
+        ("slices.mv", "length", vec![], 4),
+        // `len` + index driving a `while` loop.
+        ("slices.mv", "sum_all", vec![], 15),
+        // runtime-length element store with a constant subscript, then read back.
+        ("slices.mv", "set_get", vec![], 42),
+        // runtime-length element store with a runtime subscript, then sum back.
+        ("slices.mv", "set_sum", vec![0], 15),
+        ("slices.mv", "set_sum", vec![1], 14),
+        ("slices.mv", "set_sum", vec![2], 13),
+        // `examples/report.mv`'s `total`: a `while` over `len(sales)` reading
+        // `sales[i].amount` from a slice of structs (MARV-33 + MARV-20 slice half).
+        ("slices.mv", "total", vec![], 42),
     ]
 }
 

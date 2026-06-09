@@ -1,0 +1,22 @@
+mod demo
+
+pure fn sum(xs: &[]i64) -> i64 {
+    var total: i64 = 0
+    var i: usize = 0
+    while (i < len(xs)) {
+        total = (total + xs[i])
+        i = (i + 1)
+    }
+    total
+}
+
+pure fn set_first(xs: []i64, v: i64) -> i64 {
+    var ys: []i64 = xs
+    ys[0] = v
+    ys[0]
+}
+
+pure fn main() -> i64 {
+    let xs: []i64 = [1, 2, 3, 4]
+    (sum(&xs) + set_first(xs, 10))
+}

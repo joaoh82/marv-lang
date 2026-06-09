@@ -426,6 +426,12 @@ fn encode_core(e: &mut Encoder, c: &Core) {
             encode_type(e, elem);
             encode_atoms(e, items);
         }
+        Core::IndexSet { base, index, value } => {
+            e.u8(14);
+            encode_atom(e, base);
+            encode_atom(e, index);
+            encode_atom(e, value);
+        }
     }
 }
 

@@ -166,12 +166,27 @@ fn assignment_to_let_is_rejected() {
 }
 
 #[test]
-fn index_assignment_is_deferred() {
-    let src = "mod demo\n\npure fn run(xs: []i64) -> () {\n    xs[0] = 1\n    return\n}\n";
-    assert!(matches!(
-        try_lower(src),
-        Err(LowerError::IndexAssignUnsupported)
-    ));
+fn slice_index_store_lowers_to_index_set() {
+    // A store into a runtime-length slice cannot use the array's static unroll, so
+    // it lowers to a `Core::IndexSet` over the slice, the index, and the new value
+    // (MARV-33). The store then rebinds the root `var`.
+    let src = "mod demo\n\npure fn run(xs: []i64) -> () {\n    var ys = xs\n    ys[0] = 1\n    return\n}\n";
+    let body = fn_body(&lower(src), "run");
+    assert!(
+        has_index_set(&body),
+        "a slice element store must lower to a `Core::IndexSet`"
+    );
+}
+
+/// Whether a `Core::IndexSet` appears anywhere in a Core term.
+fn has_index_set(c: &Core) -> bool {
+    match c {
+        Core::IndexSet { .. } => true,
+        Core::Let { value, body } => has_index_set(value) || has_index_set(body),
+        Core::Match { branches, .. } => branches.iter().any(|b| has_index_set(&b.body)),
+        Core::Lam { body, .. } | Core::Loop { body, .. } => has_index_set(body),
+        _ => false,
+    }
 }
 
 #[test]

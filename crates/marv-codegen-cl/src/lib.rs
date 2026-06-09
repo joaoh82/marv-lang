@@ -522,6 +522,8 @@ impl Trans<'_, '_> {
                 })
             }
 
+            Core::IndexSet { base, index, value } => self.eval_index_set(base, index, value),
+
             Core::Proj { base, idx } => self.eval_proj(base, *idx),
 
             Core::Loop {
@@ -651,6 +653,65 @@ impl Trans<'_, '_> {
             tag: 0,
             fields: finals,
         })
+    }
+
+    /// Lower a runtime element store `s[i] = e` ([`Core::IndexSet`], MARV-33).
+    /// Unlike the array store (unrolled over a static length), a slice's length is
+    /// only known at runtime, so this emits the functional update directly: read
+    /// the element count from the header, allocate a fresh `[len, …]` block, copy
+    /// every word into it with a runtime loop, then overwrite element `i`. The
+    /// result is the new block pointer, which the surface store rebinds the root
+    /// to (mutable value semantics — the old block is untouched, `spec/01` §4).
+    fn eval_index_set(
+        &mut self,
+        base: &Atom,
+        index: &Atom,
+        value: &Atom,
+    ) -> Result<Slot, CodegenError> {
+        let base_slot = self.eval_atom(base)?;
+        let ptr = self.as_word(base_slot)?;
+        let i = self.eval_atom(index)?;
+        let i = self.as_word(i)?;
+        let v = self.eval_atom(value)?;
+        let v = self.as_word(v)?;
+
+        // The header word holds the element count; the block is `len + 1` words.
+        let len = self.builder.ins().load(WORD, MemFlags::trusted(), ptr, 0);
+        let total = self.builder.ins().iadd_imm(len, 1);
+        let newptr = self.alloc_dyn(total);
+
+        // Copy loop: `for k in 0..total { new[k] = old[k] }` (header + elements).
+        let header = self.builder.create_block();
+        let body = self.builder.create_block();
+        let exit = self.builder.create_block();
+        self.builder.append_block_param(header, WORD); // the induction counter `k`
+        let zero = self.builder.ins().iconst(WORD, 0);
+        self.builder.ins().jump(header, &[zero.into()]);
+
+        self.builder.switch_to_block(header);
+        let k = self.builder.block_params(header)[0];
+        let more = self.builder.ins().icmp(IntCC::UnsignedLessThan, k, total);
+        self.builder.ins().brif(more, body, &[], exit, &[]);
+
+        self.builder.switch_to_block(body);
+        self.builder.seal_block(body);
+        let off = self.builder.ins().imul_imm(k, SLOT as i64);
+        let src = self.builder.ins().iadd(ptr, off);
+        let w = self.builder.ins().load(WORD, MemFlags::trusted(), src, 0);
+        let dst = self.builder.ins().iadd(newptr, off);
+        self.builder.ins().store(MemFlags::trusted(), w, dst, 0);
+        let k1 = self.builder.ins().iadd_imm(k, 1);
+        self.builder.ins().jump(header, &[k1.into()]);
+        self.builder.seal_block(header);
+
+        // Exit: overwrite the one element at `[i + 1]` with the new value.
+        self.builder.switch_to_block(exit);
+        self.builder.seal_block(exit);
+        let plus1 = self.builder.ins().iadd_imm(i, 1);
+        let eoff = self.builder.ins().imul_imm(plus1, SLOT as i64);
+        let eaddr = self.builder.ins().iadd(newptr, eoff);
+        self.builder.ins().store(MemFlags::trusted(), v, eaddr, 0);
+        Ok(Slot::Val(newptr))
     }
 
     fn eval_atom(&mut self, a: &Atom) -> Result<Slot, CodegenError> {
@@ -982,9 +1043,18 @@ impl Trans<'_, '_> {
         Ok(base)
     }
 
-    /// Emit a call to the host allocator for `n_words` slots, returning the
-    /// pointer. The allocator's func-ref is declared lazily, once per function.
+    /// Emit a call to the host allocator for a compile-time-constant `n_words`
+    /// slots, returning the pointer.
     fn alloc(&mut self, n_words: i64) -> Value {
+        let n = self.builder.ins().iconst(WORD, n_words);
+        self.alloc_dyn(n)
+    }
+
+    /// Emit a call to the host allocator for a **runtime** word count `n_words`,
+    /// returning the pointer (MARV-33: a slice store allocates a block whose size
+    /// is only known at run time). The allocator's func-ref is declared lazily,
+    /// once per function.
+    fn alloc_dyn(&mut self, n_words: Value) -> Value {
         let aref = match self.alloc_ref {
             Some(r) => r,
             None => {
@@ -995,8 +1065,7 @@ impl Trans<'_, '_> {
                 r
             }
         };
-        let n = self.builder.ins().iconst(WORD, n_words);
-        let call = self.builder.ins().call(aref, &[n]);
+        let call = self.builder.ins().call(aref, &[n_words]);
         self.builder.inst_results(call)[0]
     }
 }

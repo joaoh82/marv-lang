@@ -165,6 +165,10 @@ pub fn type_of(world: &World, c: &Core, tys: &mut Vec<Option<Type>>) -> Option<T
             Some(Type::Array(Box::new(elem.clone()), items.len() as u64))
         }
 
+        // A runtime element store yields the same collection type as its base
+        // (MARV-33); the store rebinds the root to this value.
+        Core::IndexSet { base, .. } => atom_type(world, base, tys),
+
         Core::Proj { base, idx } => {
             let bt = atom_type(world, base, tys)?;
             variant_fields(world, &bt, 0)?

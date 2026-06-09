@@ -1916,16 +1916,30 @@ impl Lowerer {
             }
             LValue::Index(base, index) => {
                 // `a[i] = e` under mutable value semantics (`spec/01` §4): produce
-                // a fresh array equal to the old one except position `i` holds the
-                // new value, then rebind the root. The array's length must be
-                // statically known (a fixed `[N]T`); a slice has no compile-time
-                // length, so its element store stays unsupported for now.
+                // a fresh collection equal to the old one except position `i` holds
+                // the new value, then rebind the root.
                 let base_expr = lvalue_to_expr(base);
                 let bt = self
                     .type_of_expr(&base_expr, env.as_slice())
                     .ok_or(LowerError::IndexAssignUnsupported)?;
                 let (len, elem_st) = match peel_ref_ty(bt) {
                     SType::Array { len, elem } => (len, *elem),
+                    // A slice `[]T` has no compile-time length, so the static
+                    // unroll below cannot express its store. Emit a runtime
+                    // functional update ([`Core::IndexSet`], MARV-33): the backends
+                    // allocate a fresh `[len, …]` block, copy it, and overwrite the
+                    // one element. The result rebinds the root just like the array
+                    // path.
+                    SType::Slice(_) => {
+                        let arr_atom = self.emit_atom(&base_expr, env.as_slice(), b)?;
+                        let idx_atom = self.emit_atom(index, env.as_slice(), b)?;
+                        let rebuilt = b.push(Core::IndexSet {
+                            base: arr_atom,
+                            index: idx_atom,
+                            value: new_atom,
+                        });
+                        return self.assign_to(base, rebuilt, env, b);
+                    }
                     _ => return Err(LowerError::IndexAssignUnsupported),
                 };
                 let elem = self.lower_type(&elem_st, &[]);
@@ -2893,6 +2907,11 @@ fn to_indices(c: &Core, depth: u32) -> Core {
         Core::Array { elem, items } => Core::Array {
             elem: elem.clone(),
             items: items.iter().map(|a| atom_to_index(a, depth)).collect(),
+        },
+        Core::IndexSet { base, index, value } => Core::IndexSet {
+            base: atom_to_index(base, depth),
+            index: atom_to_index(index, depth),
+            value: atom_to_index(value, depth),
         },
         Core::Proj { base, idx } => Core::Proj {
             base: atom_to_index(base, depth),

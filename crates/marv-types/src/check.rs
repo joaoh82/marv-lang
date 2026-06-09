@@ -444,6 +444,8 @@ impl<'a> Checker<'a> {
 
             Core::Array { elem, items } => self.synth_array(elem, items, env),
 
+            Core::IndexSet { base, index, value } => self.synth_index_set(base, index, value, env),
+
             Core::Proj { base, idx } => {
                 let bt = self.atom_ty(base, env);
                 let ty = self.proj_ty(&bt, *idx);
@@ -659,6 +661,72 @@ impl<'a> Checker<'a> {
         }
         Out {
             ty: Ty::Known(Type::Array(Box::new(elem.clone()), items.len() as u64)),
+            eff: EffectRow::empty(),
+            uses,
+        }
+    }
+
+    /// Type a runtime element store `s[i] = e` ([`Core::IndexSet`], MARV-33). The
+    /// base must be a slice or array (peeling any reference), the index numeric,
+    /// and the value compatible with the element type. A second-class reference
+    /// may not be stored as an element (it would escape). The result is the same
+    /// collection type as the base — the store rebinds the root to it.
+    fn synth_index_set(
+        &mut self,
+        base: &Atom,
+        index: &Atom,
+        value: &Atom,
+        env: &mut Vec<Binder>,
+    ) -> Out {
+        let bt = self.atom_ty(base, env);
+        let vt = self.atom_ty(value, env);
+        let elem = match &bt {
+            Ty::Known(t) => match peel(t) {
+                Type::Slice(e) | Type::Array(e, _) => Some((**e).clone()),
+                _ => {
+                    self.emit(Diagnostic::error(
+                        Code::BadPrimOperand,
+                        "element store requires a slice or array base".to_string(),
+                    ));
+                    None
+                }
+            },
+            Ty::Unknown => None,
+            _ => {
+                self.emit(Diagnostic::error(
+                    Code::BadPrimOperand,
+                    "element store requires a slice or array base".to_string(),
+                ));
+                None
+            }
+        };
+        if !numeric(&self.atom_ty(index, env)) {
+            self.emit(Diagnostic::error(
+                Code::BadPrimOperand,
+                "element store requires an integer index".to_string(),
+            ));
+        }
+        if is_ref(&vt) {
+            self.emit(escaping_ref_diag(EscapeSite::CtorField(0)));
+        }
+        if let Some(elem) = &elem {
+            if !compatible(&Ty::Known(elem.clone()), &vt) {
+                self.emit(Diagnostic::error(
+                    Code::TypeMismatch,
+                    format!(
+                        "stored value has type `{}` but the element type is `{}`",
+                        show_ty(&vt),
+                        show_type(elem)
+                    ),
+                ));
+            }
+        }
+        let uses = seq(
+            &seq(&atom_uses(base, env), &atom_uses(index, env)),
+            &atom_uses(value, env),
+        );
+        Out {
+            ty: bt,
             eff: EffectRow::empty(),
             uses,
         }
@@ -1211,7 +1279,9 @@ fn lit_ty(l: &Literal) -> Ty {
 
 fn value_prov(value: &Core) -> Prov {
     match value {
-        Core::Ctor { .. } | Core::Array { .. } | Core::Prim { .. } => Prov::Computed,
+        Core::Ctor { .. } | Core::Array { .. } | Core::IndexSet { .. } | Core::Prim { .. } => {
+            Prov::Computed
+        }
         _ => Prov::Other,
     }
 }
@@ -1336,7 +1406,26 @@ fn compatible(a: &Ty, b: &Ty) -> bool {
         (Ty::IntLit, Ty::IntLit) => true,
         (Ty::IntLit, Ty::Known(Type::Int(_))) | (Ty::Known(Type::Int(_)), Ty::IntLit) => true,
         (Ty::IntLit, _) | (_, Ty::IntLit) => false,
-        (Ty::Known(x), Ty::Known(y)) => type_eq(x, y),
+        // `a` is the expected (target) type and `b` the actual (source) at every
+        // call site, so the array→slice coercion is checked directionally here.
+        (Ty::Known(x), Ty::Known(y)) => type_eq(x, y) || coerces_to(x, y),
+    }
+}
+
+/// Whether a value of type `source` may be used where `target` is expected via an
+/// implicit coercion (MARV-33). The only such coercion is a fixed-length array
+/// `[N]T` used as a runtime-length slice `[]T`: the two share the boxed
+/// `[len, e0, …]` layout, so the conversion just forgets the static length. It
+/// applies through a second-class reference too (`&[N]T` → `&[]T`), which is how
+/// an array argument satisfies a `&[]T` parameter (`spec/01` §4). The coercion is
+/// one-way: a slice is *not* usable where a fixed array is expected.
+fn coerces_to(target: &Type, source: &Type) -> bool {
+    match (target, source) {
+        (Type::Slice(t), Type::Array(s, _)) => type_eq(t, s),
+        (Type::Ref { mutable: mt, of: t }, Type::Ref { mutable: ms, of: s }) => {
+            mt == ms && coerces_to(t, s)
+        }
+        _ => false,
     }
 }
 

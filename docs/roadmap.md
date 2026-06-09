@@ -26,6 +26,7 @@ where each one sits and what must land first. Each task references back here.
 | **MARV-8** reachability-pruned compilation | 2 · Backends | — *(independent)* | — | medium |
 | ~~**MARV-9** aggregate/enum codegen (interp + Cranelift + WASM)~~ ✅ done | 2 · Backends | ~~MARV-1~~ ✅, ~~MARV-4~~ ✅ | 10 | medium |
 | ~~**MARV-30** array literals + `len`/index codegen (+ index store)~~ ✅ done | 2 · Backends | ~~MARV-9~~ ✅, ~~MARV-7~~ ✅ | — | medium |
+| ~~**MARV-33** runtime-length slices `[]T` (construct, `len`/index, element store)~~ ✅ done | 2 · Backends | ~~MARV-30~~ ✅ | 20 | medium |
 | **MARV-10** AOT native + LLVM + WASM component/WIT | 2 · Backends | MARV-9 | — | low |
 | **MARV-11** verified-subset expansion + loop invariants + `old`/quantifiers | 3 · Verification | MARV-2, MARV-1 | — | medium |
 | ~~**MARV-12** formatter doc-comments + real source spans~~ ✅ done | 5 · Infra/polish | — *(independent)* | — | medium |
@@ -134,8 +135,22 @@ native backends; the interpreter reuses `Value::Agg` as the oracle. The index *s
 the array's length statically known it rebuilds the array, taking the written value at position `i`
 and the old element elsewhere — reusing the array-read + two-arm `bool` `Match` machinery, so it
 needs no new backend primitive. `tests/run/arrays.mv` (literal/index/`len`/loop/store) asserts
-interp == Cranelift == wasm. Slices (`[]T`, runtime length) and stores over them are the remaining
-follow-up.
+interp == Cranelift == wasm.
+· **MARV-33** runtime-length slices `[]T`, extending MARV-30 from fixed-length arrays. A slice
+shares the array's boxed `[len, e0, …]` layout — only its length is a runtime value — so `len`/index
+fall straight out of the array codegen, and a fixed-length array now **coerces** to a slice
+(`compatible`/`coerces_to` in the checker: `[N]T` → `[]T`, also through a second-class reference
+`&[N]T` → `&[]T`), which is how a `[]T` binding/parameter receives an array literal. The element
+*store* `s[i] = e` cannot use MARV-30's static unroll (the length is unknown), so it lowers to a new
+`Core::IndexSet { base, index, value }` node: the backends read the element count from the header,
+allocate a fresh `[len, …]` block, copy it with a **runtime loop**, and overwrite element `i` — a
+functional update under mutable value semantics, leaving the source block untouched (`spec/01` §4);
+the interpreter clones the `Value::Agg` fields as the oracle. `tests/run/slices.mv`
+(literal/index/`len`/`while`-loop/store + a `total` over a slice of structs) and both `examples/`
+demos assert interp == Cranelift == wasm. This also makes `examples/report.mv`'s `total` shape
+(a `while` over `len(sales)` reading `sales[i].amount`) runnable, closing the slice half of MARV-20.
+A debug Tier-1 bounds check on a runtime index is a follow-up (today's slice reads/stores trap or
+read out of bounds exactly as the array path does).
 
 ## Recommended order
 

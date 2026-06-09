@@ -346,3 +346,23 @@ fn e0150_reference_in_ctor_field() {
     );
     one(check_def(&world, &def, Some("f")), Code::EscapingReference);
 }
+
+#[test]
+fn array_coerces_to_slice_argument() {
+    // A fixed-length array `[3]i64` is accepted where a `[]i64` slice is expected
+    // (MARV-33): the two share the boxed layout, so the call type-checks clean.
+    let src = "mod demo\n\npure fn take(xs: []i64) -> i64 {\n    (len(xs) as i64)\n}\n\npure fn run() -> i64 {\n    let a: [3]i64 = [1, 2, 3]\n    take(a)\n}\n";
+    let diags = check_src(src);
+    assert!(
+        diags.is_empty(),
+        "array→slice coercion should type-check clean, got: {diags:#?}"
+    );
+}
+
+#[test]
+fn slice_does_not_coerce_to_array_argument() {
+    // The coercion is one-way: a runtime-length slice has no static length, so it
+    // may not be passed where a fixed-length array is expected (MARV-33).
+    let src = "mod demo\n\npure fn take(xs: [3]i64) -> i64 {\n    (len(xs) as i64)\n}\n\npure fn run(s: []i64) -> i64 {\n    take(s)\n}\n";
+    one(check_src(src), Code::TypeMismatch);
+}

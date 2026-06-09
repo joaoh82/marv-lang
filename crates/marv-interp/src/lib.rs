@@ -435,6 +435,43 @@ impl Program {
                 Ok(Value::Agg { tag: 0, fields })
             }
 
+            // A runtime element store `s[i] = e` (MARV-33): the functional update
+            // the backends realize by allocate-copy-store. The interpreter is the
+            // oracle — clone the aggregate's fields, overwrite position `i`, and
+            // keep the same tag so `len` over the result is unchanged.
+            Core::IndexSet { base, index, value } => {
+                let base = self.eval_atom(base, env)?;
+                let i = match self.eval_atom(index, env)? {
+                    Value::Int(n) => n,
+                    other => {
+                        return Err(RunError::Unsupported(format!(
+                            "element store index is not an integer: `{}`",
+                            other.render()
+                        )))
+                    }
+                };
+                let v = self.eval_atom(value, env)?;
+                match base {
+                    Value::Agg { tag, mut fields } => {
+                        let idx = usize::try_from(i).ok().filter(|&i| i < fields.len());
+                        match idx {
+                            Some(i) => {
+                                fields[i] = v;
+                                Ok(Value::Agg { tag, fields })
+                            }
+                            None => Err(RunError::Unsupported(format!(
+                                "element store index {i} out of bounds (len {})",
+                                fields.len()
+                            ))),
+                        }
+                    }
+                    other => Err(RunError::Unsupported(format!(
+                        "element store on non-aggregate `{}`",
+                        other.render()
+                    ))),
+                }
+            }
+
             Core::Proj { base, idx } => {
                 let base = self.eval_atom(base, env)?;
                 match base {
