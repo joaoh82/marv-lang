@@ -684,32 +684,11 @@ impl Trans<'_> {
         self.coerce_to_word(c)?;
         self.emit(Instruction::I64Eqz);
         self.emit(Instruction::BrIf(1));
-        // Body computes the next state (its fields already materialized into
-        // locals); copy them into the carried locals, then iterate.
-        let next = self.eval(body)?;
-        let next_slots = match next {
-            Out::Tuple { fields, .. } => fields,
-            Out::Unit if k == 0 => Vec::new(),
-            _ => {
-                return Err(WasmError::Unsupported(
-                    "loop body did not produce its carried state".into(),
-                ))
-            }
-        };
-        for (l, s) in carried.iter().zip(&next_slots) {
-            match s {
-                Slot::Local(src) => {
-                    self.emit(Instruction::LocalGet(*src));
-                    self.emit(Instruction::LocalSet(*l));
-                }
-                Slot::Unit => {}
-                Slot::Partial { .. } | Slot::Tuple { .. } => {
-                    return Err(WasmError::Unsupported(
-                        "non-scalar loop-carried value".into(),
-                    ))
-                }
-            }
-        }
+        // Body computes the next state directly into the carried locals — even
+        // through an `if`/`match` branch join, where each arm writes its own
+        // k-tuple into them (MARV-21), so the carried state stays in locals and is
+        // never boxed (the alloc-free-loops property, MARV-9).
+        self.eval_loop_body(body, &carried)?;
         self.emit(Instruction::Br(0));
         self.emit(Instruction::End); // loop
         self.emit(Instruction::End); // block
@@ -723,6 +702,198 @@ impl Trans<'_> {
             tag: 0,
             fields: carried.into_iter().map(Slot::Local).collect(),
         })
+    }
+
+    /// Emit a loop body so its next-state values land in the carried locals
+    /// `dest`, *without* boxing the carried tuple (the alloc-free-loops property,
+    /// MARV-9). A straight-line body's terminal is a tuple `Ctor` we copy into
+    /// `dest`; a branch-join body (MARV-21) terminates in a `Match` whose every
+    /// arm copies its own k-tuple into `dest`, so the carried state stays in
+    /// locals. `Let` bindings in the spine are emitted in order, exactly as
+    /// [`Self::eval`] would.
+    fn eval_loop_body(&mut self, body: &Core, dest: &[u32]) -> Result<(), WasmError> {
+        match body {
+            Core::Let { value, body } => {
+                let out = self.eval(value)?;
+                let slot = match out {
+                    Out::Stack => {
+                        let l = self.alloc_local();
+                        self.emit(Instruction::LocalSet(l));
+                        Slot::Local(l)
+                    }
+                    Out::Unit => Slot::Unit,
+                    Out::Partial { func, args } => Slot::Partial { func, args },
+                    Out::Tuple { tag, fields } => Slot::Tuple { tag, fields },
+                };
+                let t = layout::type_of(self.world, value, &mut self.tys);
+                self.env.push(slot);
+                self.tys.push(t);
+                let r = self.eval_loop_body(body, dest);
+                self.env.pop();
+                self.tys.pop();
+                r
+            }
+            Core::Match {
+                scrutinee,
+                branches,
+            } => self.eval_loop_match(scrutinee, branches, dest),
+            // Straight-line terminal: the next-state tuple, its fields already
+            // materialized into locals; copy them into the carried locals.
+            _ => {
+                let out = self.eval(body)?;
+                let next_slots = match out {
+                    Out::Tuple { fields, .. } => fields,
+                    Out::Unit if dest.is_empty() => Vec::new(),
+                    _ => {
+                        return Err(WasmError::Unsupported(
+                            "loop body did not produce its carried state".into(),
+                        ))
+                    }
+                };
+                self.copy_into_carried(dest, &next_slots)
+            }
+        }
+    }
+
+    /// Copy a loop body's next-state slots into the carried locals `dest`. Each
+    /// field is a local (or a unit, which occupies no slot); a non-scalar field
+    /// cannot be a carried word. The sequential copy cannot clobber a value a
+    /// later field still needs: `Core::Ctor` already materialized *every* field —
+    /// including a carried var that passes through unchanged — into its own fresh
+    /// local (`atom_to_local_slot`) before this runs, so no `next_slots` entry
+    /// aliases a `dest` carried local.
+    fn copy_into_carried(&mut self, dest: &[u32], next_slots: &[Slot]) -> Result<(), WasmError> {
+        for (l, s) in dest.iter().zip(next_slots) {
+            match s {
+                Slot::Local(src) => {
+                    self.emit(Instruction::LocalGet(*src));
+                    self.emit(Instruction::LocalSet(*l));
+                }
+                Slot::Unit => {}
+                Slot::Partial { .. } | Slot::Tuple { .. } => {
+                    return Err(WasmError::Unsupported(
+                        "non-scalar loop-carried value".into(),
+                    ))
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// A loop body whose terminal is a `Match` (MARV-21 branch join): dispatch like
+    /// [`Self::eval_match`], but each arm writes its own k-tuple into the carried
+    /// locals `dest` and the arm blocks carry no stack result (`BlockType::Empty`)
+    /// — the carried state stays in locals, never boxed.
+    fn eval_loop_match(
+        &mut self,
+        scrutinee: &Atom,
+        branches: &[Branch],
+        dest: &[u32],
+    ) -> Result<(), WasmError> {
+        let scrut_ty = layout::atom_type(self.world, scrutinee, &self.tys);
+        let boxed = scrut_ty
+            .as_ref()
+            .map(|t| layout::is_boxed(self.world, t))
+            .unwrap_or(false);
+        if boxed {
+            if branches.is_empty() {
+                return Err(WasmError::Unsupported("match with no branches".into()));
+            }
+            let scrut_ty = scrut_ty.unwrap();
+            // Materialize the scrutinee pointer and its tag into locals (the
+            // pointer is reloaded in every arm to bind fields).
+            let ptr = self.alloc_local();
+            let av = self.resolve_arg(scrutinee)?;
+            self.push_argval(&av);
+            self.emit(Instruction::LocalSet(ptr));
+            let tag = self.alloc_local();
+            self.emit(Instruction::LocalGet(ptr));
+            self.emit(Instruction::I32WrapI64);
+            self.emit(Instruction::I64Load(memarg(0)));
+            self.emit(Instruction::LocalSet(tag));
+            self.emit_loop_match_arm(branches, 0, ptr, tag, &scrut_ty, dest)
+        } else {
+            // Scalar (`bool`/`if`) path: two arms, no bound fields (`spec/02` §D).
+            if branches.len() != 2 || branches.iter().any(|b| b.binds != 0) {
+                return Err(WasmError::Unsupported(
+                    "loop branch join on a value whose layout could not be determined".into(),
+                ));
+            }
+            let cond = self.resolve_arg(scrutinee)?;
+            if matches!(cond, ArgVal::Unit) {
+                return Err(WasmError::Unsupported("unit match scrutinee".into()));
+            }
+            self.push_argval(&cond);
+            self.emit(Instruction::I64Const(0));
+            self.emit(Instruction::I64Ne); // i32: 1 if nonzero (true)
+            self.emit(Instruction::If(BlockType::Empty));
+            // `then` = the true arm (branch tag 1).
+            self.eval_loop_body(&branches[1].body, dest)?;
+            self.emit(Instruction::Else);
+            // `else` = the false arm (branch tag 0).
+            self.eval_loop_body(&branches[0].body, dest)?;
+            self.emit(Instruction::End);
+            Ok(())
+        }
+    }
+
+    /// Emit the dispatch chain for a branch-join loop's boxed `Match`, arm `t`
+    /// onward (MARV-21): test the tag, run arm `t`'s body into `dest` in the
+    /// `then`, recurse into the `else`. The final arm needs no test (an
+    /// exhaustively-checked match always lands on a covered tag). Mirrors
+    /// [`Self::emit_match_arm`] but the arms carry no stack result.
+    fn emit_loop_match_arm(
+        &mut self,
+        branches: &[Branch],
+        t: usize,
+        ptr: u32,
+        tag: u32,
+        scrut_ty: &Type,
+        dest: &[u32],
+    ) -> Result<(), WasmError> {
+        if t + 1 == branches.len() {
+            return self.emit_loop_bind_and_body(&branches[t], t, ptr, scrut_ty, dest);
+        }
+        self.emit(Instruction::LocalGet(tag));
+        self.emit(Instruction::I64Const(t as i64));
+        self.emit(Instruction::I64Eq);
+        self.emit(Instruction::If(BlockType::Empty));
+        self.emit_loop_bind_and_body(&branches[t], t, ptr, scrut_ty, dest)?;
+        self.emit(Instruction::Else);
+        self.emit_loop_match_arm(branches, t + 1, ptr, tag, scrut_ty, dest)?;
+        self.emit(Instruction::End);
+        Ok(())
+    }
+
+    /// Bind variant `tag`'s fields from the payload (`[i + 1]`) into fresh locals,
+    /// then emit the arm body into the carried locals `dest` (MARV-21). Mirrors
+    /// [`Self::emit_bind_and_body`] but leaves no word on the stack.
+    fn emit_loop_bind_and_body(
+        &mut self,
+        br: &Branch,
+        tag: usize,
+        ptr: u32,
+        scrut_ty: &Type,
+        dest: &[u32],
+    ) -> Result<(), WasmError> {
+        let field_tys =
+            layout::variant_fields(self.world, scrut_ty, tag as u32).unwrap_or_default();
+        let pushed = br.binds as usize;
+        for i in 0..pushed {
+            let l = self.alloc_local();
+            self.emit(Instruction::LocalGet(ptr));
+            self.emit(Instruction::I32WrapI64);
+            self.emit(Instruction::I64Load(memarg((i as u64 + 1) * SLOT)));
+            self.emit(Instruction::LocalSet(l));
+            self.env.push(Slot::Local(l));
+            self.tys.push(field_tys.get(i).cloned());
+        }
+        self.eval_loop_body(&br.body, dest)?;
+        for _ in 0..pushed {
+            self.env.pop();
+            self.tys.pop();
+        }
+        Ok(())
     }
 
     /// Lower a runtime element store `s[i] = e` ([`Core::IndexSet`], MARV-33).

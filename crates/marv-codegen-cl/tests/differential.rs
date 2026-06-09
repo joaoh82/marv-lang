@@ -112,6 +112,32 @@ fn corpus_cases() -> Vec<(&'static str, &'static str, Vec<i64>, i64)> {
         // single-carried-variable loop with no invariant (the `k == 1` path)
         ("loops.mv", "count_down", vec![7], 0),
         ("loops.mv", "count_down", vec![0], 0),
+        // Branch-join loop bodies (MARV-21): a loop body whose tail is an
+        // `if`/`else if`/`match` threads the carried `var`s through the branch
+        // join. Each branch yields the next-state tuple, kept in registers/locals
+        // (never boxed) so loops stay alloc-free. interp == cranelift == wasm.
+        // `if`/`else`.
+        ("loops.mv", "weighted", vec![5], 23),
+        ("loops.mv", "weighted", vec![0], 0),
+        // `if` with no `else` (pass-through on the false branch).
+        ("loops.mv", "count_high", vec![5], 2),
+        ("loops.mv", "count_high", vec![2], 0),
+        // `else if` chain.
+        ("loops.mv", "bucket", vec![6], 123),
+        ("loops.mv", "bucket", vec![3], 3),
+        // `match` tail over an enum, arms reassigning the carried `acc`.
+        ("loops.mv", "parity_score", vec![5], 32),
+        ("loops.mv", "parity_score", vec![4], 22),
+        // Regression: an outer carried `x` reassigned only in the `then` branch,
+        // with a body-local `let x` shadow in the `else` branch — the carried `x`
+        // is threaded through its lineage, not hijacked by the shadow.
+        ("loops.mv", "shadow", vec![6], 30),
+        ("loops.mv", "shadow", vec![2], 0),
+        // A branch join nested inside a loop: `acc` is carried by the inner loop
+        // and its lineage propagates out through the inner loop's final-state
+        // projection (the `carried`-flag lineage under nesting).
+        ("loops.mv", "nested_weighted", vec![4], 9),
+        ("loops.mv", "nested_weighted", vec![3], 5),
         // `as` casts (MARV-7): integer width truncation/wrapping must agree
         // bit-for-bit with the interpreter's `eval_cast`.
         ("casts.mv", "truncate_u8", vec![300], 44),

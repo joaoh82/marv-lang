@@ -151,9 +151,31 @@ A runtime-length slice now has the same `len`/index codegen (MARV-33), so a `whi
 `len(s)` reading `s[i]` runs on all three backends (`tests/run/slices.mv`); the `for`-desugar
 over a slice rides on the same machinery.
 
-Today's loop lowering covers **straight-line** bodies (assignments and nested loops). A body
-whose tail is an `if`/`match`/`return` — which would need to thread carried `var`s through a
-branch join — is rejected for now; lift the branch out or restructure as straight-line updates.
+A loop body may also end in an **`if`/`match`** (MARV-21): the carried `var`s are threaded
+through the branch join, so each branch produces their next values and the loop continues with
+the merged state. A branch that does not reassign a carried `var` passes its current value
+through unchanged (e.g. an `if` with no `else`).
+
+```marv
+pure fn weighted(n: i64) -> i64 {
+    var i: i64 = n
+    var acc: i64 = 0
+    while (i > 0) {
+        i = (i - 1)
+        if (i > 2) {
+            acc = (acc + 10)
+        } else {
+            acc = (acc + 1)
+        }
+    }
+    acc
+}
+```
+
+The next-state tuple is computed per branch and kept in registers/locals — never boxed — so a
+branch-join loop stays **alloc-free** like a straight-line one (`tests/run/loops.mv`, exercised
+across interp/Cranelift/WASM in the differential corpus). The one tail still not lowered is
+**`return`** inside a loop body (early function exit); restructure it as a loop-carried result.
 
 ## 5. Effects & capabilities **[impl]**
 

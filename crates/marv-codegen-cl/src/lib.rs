@@ -617,22 +617,13 @@ impl Trans<'_, '_> {
             .ins()
             .brif(c, body_block, &[], exit, &exit_args);
 
-        // Body: compute the next state, pop the carried slots, jump back.
+        // Body: compute the next `k` state words (in registers — never boxing the
+        // carried tuple, even through an `if`/`match` branch join, MARV-21), pop
+        // the carried slots, jump back.
         self.builder.switch_to_block(body_block);
         self.builder.seal_block(body_block);
-        let next = self.eval(body)?;
-        let next_args: Vec<BlockArg> = match next {
-            Slot::Tuple { fields, .. } => fields
-                .into_iter()
-                .map(|s| self.as_word(s).map(BlockArg::from))
-                .collect::<Result<_, _>>()?,
-            other => {
-                let _ = other;
-                return Err(CodegenError::Unsupported(
-                    "loop body did not produce its carried state".into(),
-                ));
-            }
-        };
+        let next_words = self.eval_loop_body(body, k)?;
+        let next_args: Vec<BlockArg> = next_words.into_iter().map(BlockArg::from).collect();
         for _ in 0..k {
             self.env.pop();
             self.tys.pop();
@@ -653,6 +644,154 @@ impl Trans<'_, '_> {
             tag: 0,
             fields: finals,
         })
+    }
+
+    /// Evaluate a loop body to its `k` next-state words in registers, *without*
+    /// boxing the carried tuple (the alloc-free-loops property, MARV-9). A
+    /// straight-line body's terminal is a tuple `Ctor` (a [`Slot::Tuple`]) whose
+    /// fields we read directly; a branch-join body (MARV-21) terminates in a
+    /// `Match` whose every arm yields the k-tuple, merged field-by-field through
+    /// `k` block params rather than boxed. `Let` bindings in the spine are emitted
+    /// in order, exactly as [`Self::eval`] would.
+    fn eval_loop_body(&mut self, body: &Core, k: usize) -> Result<Vec<Value>, CodegenError> {
+        match body {
+            Core::Let { value, body } => {
+                let v = self.eval(value)?;
+                let t = layout::type_of(self.world, value, &mut self.tys);
+                self.env.push(v);
+                self.tys.push(t);
+                let r = self.eval_loop_body(body, k);
+                self.env.pop();
+                self.tys.pop();
+                r
+            }
+            Core::Match {
+                scrutinee,
+                branches,
+            } => self.eval_loop_match(scrutinee, branches, k),
+            // Straight-line terminal: the next-state tuple, already register-
+            // resident. Each field becomes a carried word (an aggregate field is a
+            // boxed pointer word — `as_word` is identity on a scalar slot and only
+            // boxes a *nested* tuple, matching the original straight-line path).
+            _ => {
+                let s = self.eval(body)?;
+                match s {
+                    Slot::Tuple { fields, .. } => fields
+                        .into_iter()
+                        .map(|f| self.as_word(f))
+                        .collect::<Result<Vec<_>, _>>(),
+                    Slot::Unit if k == 0 => Ok(Vec::new()),
+                    _ => Err(CodegenError::Unsupported(
+                        "loop body did not produce its carried state".into(),
+                    )),
+                }
+            }
+        }
+    }
+
+    /// A loop body whose terminal is a `Match` (MARV-21 branch join): dispatch like
+    /// [`Self::eval_match`], but each arm yields the `k` next-state words (via
+    /// [`Self::eval_loop_body`]) and the arms converge on a merge block carrying
+    /// `k` params — the carried tuple stays in registers, never boxed.
+    fn eval_loop_match(
+        &mut self,
+        scrutinee: &Atom,
+        branches: &[Branch],
+        k: usize,
+    ) -> Result<Vec<Value>, CodegenError> {
+        let scrut_ty = layout::atom_type(self.world, scrutinee, &self.tys);
+        let boxed = scrut_ty
+            .as_ref()
+            .map(|t| layout::is_boxed(self.world, t))
+            .unwrap_or(false);
+
+        let merge = self.builder.create_block();
+        for _ in 0..k {
+            self.builder.append_block_param(merge, WORD);
+        }
+
+        if boxed {
+            // Boxed enum/struct scrutinee: load the tag and `br_table` over the
+            // arms, exactly like `eval_match_boxed` but jumping to `merge` with the
+            // arm's `k` next-state words.
+            let scrut_ty = scrut_ty.unwrap();
+            let scrut = self.eval_atom(scrutinee)?;
+            let ptr = self.as_word(scrut)?;
+            let tag64 = self.builder.ins().load(WORD, MemFlags::trusted(), ptr, 0);
+            let tag = self.builder.ins().ireduce(types::I32, tag64);
+
+            let arm_blocks: Vec<_> = branches
+                .iter()
+                .map(|_| self.builder.create_block())
+                .collect();
+            let default_block = self.builder.create_block();
+            let arm_calls: Vec<_> = arm_blocks
+                .iter()
+                .map(|b| self.builder.func.dfg.block_call(*b, &[]))
+                .collect();
+            let default_call = self.builder.func.dfg.block_call(default_block, &[]);
+            let jt = self
+                .builder
+                .create_jump_table(JumpTableData::new(default_call, &arm_calls));
+            self.builder.ins().br_table(tag, jt);
+
+            self.builder.switch_to_block(default_block);
+            self.builder.seal_block(default_block);
+            self.builder.ins().trap(TrapCode::unwrap_user(1));
+
+            for (t, br) in branches.iter().enumerate() {
+                self.builder.switch_to_block(arm_blocks[t]);
+                self.builder.seal_block(arm_blocks[t]);
+                let field_tys =
+                    layout::variant_fields(self.world, &scrut_ty, t as u32).unwrap_or_default();
+                let pushed = br.binds as usize;
+                for i in 0..pushed {
+                    let off = (i as i32 + 1) * SLOT;
+                    let v = self.builder.ins().load(WORD, MemFlags::trusted(), ptr, off);
+                    self.env.push(Slot::Val(v));
+                    self.tys.push(field_tys.get(i).cloned());
+                }
+                let words = self.eval_loop_body(&br.body, k)?;
+                for _ in 0..pushed {
+                    self.env.pop();
+                    self.tys.pop();
+                }
+                let args: Vec<BlockArg> = words.into_iter().map(BlockArg::from).collect();
+                self.builder.ins().jump(merge, &args);
+            }
+        } else {
+            // Scalar (`bool`/`if`) path: two arms, no bound fields (`spec/02` §D).
+            if branches.len() != 2 || branches.iter().any(|b| b.binds != 0) {
+                return Err(CodegenError::Unsupported(
+                    "loop branch join on a value whose layout could not be determined".into(),
+                ));
+            }
+            let cond = self.eval_atom(scrutinee)?;
+            let cond = self.as_word(cond)?;
+            let then_block = self.builder.create_block();
+            let else_block = self.builder.create_block();
+            self.builder
+                .ins()
+                .brif(cond, then_block, &[], else_block, &[]);
+
+            // true branch (tag 1)
+            self.builder.switch_to_block(then_block);
+            self.builder.seal_block(then_block);
+            let tw = self.eval_loop_body(&branches[1].body, k)?;
+            let targs: Vec<BlockArg> = tw.into_iter().map(BlockArg::from).collect();
+            self.builder.ins().jump(merge, &targs);
+
+            // false branch (tag 0)
+            self.builder.switch_to_block(else_block);
+            self.builder.seal_block(else_block);
+            let ew = self.eval_loop_body(&branches[0].body, k)?;
+            let eargs: Vec<BlockArg> = ew.into_iter().map(BlockArg::from).collect();
+            self.builder.ins().jump(merge, &eargs);
+        }
+
+        self.builder.switch_to_block(merge);
+        self.builder.seal_block(merge);
+        Ok(self.builder.block_params(merge).to_vec())
     }
 
     /// Lower a runtime element store `s[i] = e` ([`Core::IndexSet`], MARV-33).

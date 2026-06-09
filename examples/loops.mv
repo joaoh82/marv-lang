@@ -36,3 +36,21 @@ pure fn count_down(n: i64) -> i64 {
     }
     i
 }
+
+/// MARV-21: a loop body whose tail is an `if`/`else` threads the carried `acc`
+/// through the branch join — each branch produces its next value, merged at the
+/// join, and the loop continues with the merged state (kept register/local-
+/// resident, so the loop stays alloc-free).
+pure fn weighted(n: i64) -> i64 {
+    var i: i64 = n
+    var acc: i64 = 0
+    while (i > 0) {
+        i = (i - 1)
+        if (i > 2) {
+            acc = (acc + 10)
+        } else {
+            acc = (acc + 1)
+        }
+    }
+    acc
+}

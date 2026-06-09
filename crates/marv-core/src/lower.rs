@@ -86,9 +86,9 @@ pub enum LowerError {
     /// length, so a slice (`[]T`, no compile-time length) or a base whose type
     /// M1 cannot resolve is not yet supported.
     IndexAssignUnsupported,
-    /// A loop body ends in a `return`, `if`, or `match` tail. Threading
-    /// loop-carried `var`s through a branch join is deferred (MARV-2 lowers
-    /// straight-line loop bodies; branch-join lowering is follow-up work).
+    /// A loop body ends in a `return` tail — early function exit from inside a
+    /// loop, which is not lowered yet (MARV-21 threads loop-carried `var`s through
+    /// `if`/`match` branch joins, but `return` is out of scope).
     LoopBodyControlFlow,
 }
 
@@ -157,9 +157,8 @@ impl std::fmt::Display for LowerError {
             ),
             LowerError::LoopBodyControlFlow => write!(
                 f,
-                "a loop body cannot yet end in a `return`, `if`, or `match` (threading \
-                 loop-carried `var`s through a branch join is not lowered yet); use straight-line \
-                 assignments in the loop body"
+                "a loop body cannot yet end in a `return` (early function exit from inside a loop \
+                 is not lowered yet); an `if`/`match` branch join is supported"
             ),
         }
     }
@@ -654,6 +653,13 @@ struct Binding {
     /// `let`, a parameter, or a `match`-bound field (`spec/01` §4 — only `var`
     /// bindings are mutable).
     mutable: bool,
+    /// Whether this binding is part of a loop-carried variable's lineage: the
+    /// loop-header binding, a reassignment of it, or its post-loop projection.
+    /// A *fresh* declaration (`let`/`var`/param/pattern bind) is not, even when it
+    /// shadows a carried var by the same name. [`Self::next_state_tuple`] resolves
+    /// each carried var through this flag so a same-named body-local shadow inside
+    /// a branch never hijacks the carried value (MARV-21).
+    carried: bool,
 }
 
 /// Collects the straight-line `let`-value computations of a single block, in
@@ -1091,6 +1097,7 @@ impl Lowerer {
                     ty: Some(self.subst_surface(&p.ty)),
                     // Parameters are passed by value and are not reassignable.
                     mutable: false,
+                    carried: false,
                 });
             }
         }
@@ -1276,6 +1283,9 @@ impl Lowerer {
                         atom,
                         ty: vty,
                         mutable,
+                        // A fresh `let`/`var` declaration starts no carried lineage,
+                        // even if it shadows a carried var of the same name.
+                        carried: false,
                     });
                 }
                 Stmt::Assign { target, value } => {
@@ -1357,6 +1367,34 @@ impl Lowerer {
         env: &[Binding],
         b: &mut Builder,
     ) -> Result<Core, LowerError> {
+        // The ordinary `match`: each arm's body lowers to its own value.
+        self.lower_match_arms(m, env, b, |this, body, benv, depth| {
+            this.lower_arm_body(body, benv, depth)
+        })
+    }
+
+    /// Shared arm-dispatch for `match` lowering: resolve the enum from the first
+    /// constructor pattern, place each arm in the slot of the tag it covers
+    /// (lowering its body via `lower_body`), fill the gaps with the `_` arm, and
+    /// return the covered-prefix [`Core::Match`]. Branches stop at the first
+    /// uncovered tag, so a non-exhaustive `match` yields *fewer* branches than the
+    /// enum has variants — exactly what the M2 checker counts to fire its
+    /// exhaustiveness diagnostic (`spec/02` §C; arms may be written in any order
+    /// and are reordered here).
+    ///
+    /// `lower_body` lowers an arm body at a given environment + base depth: the
+    /// arm's ordinary value for [`Self::lower_match`], or the loop's next-state
+    /// tuple for the branch-join variant ([`Self::lower_loop_match`], MARV-21).
+    fn lower_match_arms<F>(
+        &self,
+        m: &MatchExpr,
+        env: &[Binding],
+        b: &mut Builder,
+        mut lower_body: F,
+    ) -> Result<Core, LowerError>
+    where
+        F: FnMut(&Self, &ArmBody, &[Binding], u32) -> Result<Core, LowerError>,
+    {
         let scrutinee = self.emit_atom(&m.scrutinee, env, b)?;
         let branch_depth = b.depth();
 
@@ -1373,7 +1411,7 @@ impl Lowerer {
             match &arm.pat {
                 Pattern::Wildcard => {
                     if wildcard.is_none() {
-                        wildcard = Some(self.lower_arm_body(&arm.body, env, branch_depth)?);
+                        wildcard = Some(lower_body(self, &arm.body, env, branch_depth)?);
                     }
                 }
                 Pattern::Ctor { path, fields } => {
@@ -1400,10 +1438,11 @@ impl Lowerer {
                                 ty: None,
                                 // Pattern-bound fields are immutable.
                                 mutable: false,
+                                carried: false,
                             });
                         }
                     }
-                    let body = self.lower_arm_body(&arm.body, &benv, branch_depth + binds)?;
+                    let body = lower_body(self, &arm.body, &benv, branch_depth + binds)?;
                     if tag < slots.len() && slots[tag].is_none() {
                         slots[tag] = Some(Branch { binds, body });
                     }
@@ -1857,11 +1896,16 @@ impl Lowerer {
                     return Err(LowerError::AssignToImmutable { name: name.clone() });
                 }
                 let ty = env[pos].ty.clone();
+                // A reassignment continues whatever lineage the binding it resolves
+                // to belongs to: rebinding a loop-carried var stays carried; an
+                // ordinary `var` stays non-carried.
+                let carried = env[pos].carried;
                 env.push(Binding {
                     name: name.clone(),
                     atom: new_atom,
                     ty,
                     mutable: true,
+                    carried,
                 });
                 Ok(())
             }
@@ -2034,6 +2078,8 @@ impl Lowerer {
                 atom: Atom::Var(header_depth + j as u32),
                 ty: carried_tys[j].clone(),
                 mutable: true,
+                // The loop-header binding is the root of this carried var's lineage.
+                carried: true,
             });
         }
 
@@ -2046,33 +2092,14 @@ impl Lowerer {
         let invariant = self.lower_loop_invariants(invariants, &loop_env)?;
 
         // Body: lower its statements (mutating a body-local environment), then
-        // bundle the carried vars' updated atoms into the next-state tuple.
+        // thread the carried vars through its tail into the next-state tuple. A
+        // straight-line tail bundles them directly; an `if`/`match` tail recurses
+        // so every branch yields the tuple at the join point (MARV-21).
         let mut body_env = loop_env.clone();
         let mut bb = Builder::new(header_depth + k);
         self.lower_stmts(&body.stmts, &mut body_env, &mut bb)?;
-        match &body.tail {
-            None => {}
-            Some(Tail::Expr(e)) => {
-                // A loop body's tail value is discarded; emit it for its effects.
-                self.emit_atom(e, &body_env, &mut bb)?;
-            }
-            Some(_) => return Err(LowerError::LoopBodyControlFlow),
-        }
-        let next: Vec<Atom> = carried
-            .iter()
-            .map(|name| {
-                self.resolve_local(name, &body_env)
-                    .expect("carried var resolved after body")
-            })
-            .collect();
-        let body_core = fold_lets(
-            bb.lets,
-            Core::Ctor {
-                ty: loop_tuple_hash(),
-                tag: 0,
-                fields: next,
-            },
-        );
+        let tail_core = self.lower_loop_body_tail(&body.tail, &carried, &body_env, &mut bb)?;
+        let body_core = fold_lets(bb.lets, tail_core);
 
         // Emit the loop; its result is the final-state tuple. Rebind each carried
         // var in the enclosing scope from a projection of that tuple, so code after
@@ -2093,9 +2120,160 @@ impl Lowerer {
                 atom: proj,
                 ty: carried_tys[j].clone(),
                 mutable: true,
+                // The post-loop value continues this var's carried lineage, so an
+                // enclosing loop that also carries it threads this projection.
+                carried: true,
             });
         }
         Ok(())
+    }
+
+    /// The next-state tuple `Ctor` for a loop body: each carried var's current
+    /// value in `env`, in carried order. Resolution follows the carried *lineage*
+    /// ([`Binding::carried`]), not plain name lookup, so a body-local binding that
+    /// shadows a carried var (e.g. a `let` of the same name inside one branch) is
+    /// skipped — the carried var passes through unchanged there (MARV-21). A
+    /// carried var the body did not reassign resolves to its loop-header atom.
+    fn next_state_tuple(&self, carried: &[String], env: &[Binding]) -> Core {
+        let next: Vec<Atom> = carried
+            .iter()
+            .map(|name| {
+                env.iter()
+                    .rev()
+                    .find(|x| x.carried && &x.name == name)
+                    .map(|x| x.atom.clone())
+                    .expect("carried var resolved through its lineage in loop body")
+            })
+            .collect();
+        Core::Ctor {
+            ty: loop_tuple_hash(),
+            tag: 0,
+            fields: next,
+        }
+    }
+
+    /// Thread the carried vars through a loop body's tail, yielding a `Core` that
+    /// evaluates to the next-state tuple (MARV-21). A straight-line or expression
+    /// tail bundles the carried vars after evaluating the tail for its effects; an
+    /// `if`/`match` tail recurses, so every branch produces the tuple at the join
+    /// — the resulting `Match` evaluates to the carried vars' next values, which
+    /// the loop eval threads to the next iteration.
+    fn lower_loop_body_tail(
+        &self,
+        tail: &Option<Tail>,
+        carried: &[String],
+        env: &[Binding],
+        b: &mut Builder,
+    ) -> Result<Core, LowerError> {
+        match tail {
+            None => Ok(self.next_state_tuple(carried, env)),
+            Some(Tail::Expr(e)) => {
+                // A loop body's tail value is discarded; emit it for its effects.
+                self.emit_atom(e, env, b)?;
+                Ok(self.next_state_tuple(carried, env))
+            }
+            Some(Tail::If(ife)) => self.lower_loop_if(ife, carried, env, b),
+            Some(Tail::Match(m)) => self.lower_loop_match(m, carried, env, b),
+            // `return` inside a loop body is early function exit (out of scope);
+            // keep the clear error for it.
+            Some(Tail::Return(_)) => Err(LowerError::LoopBodyControlFlow),
+        }
+    }
+
+    /// Lower a loop body's `Block` so it evaluates to the next-state tuple: run its
+    /// statements (in a body-local environment), then thread the carried vars
+    /// through its tail. Used for each `if`/`match` branch of a branch-join loop
+    /// body (MARV-21).
+    fn lower_loop_body_block(
+        &self,
+        block: &Block,
+        carried: &[String],
+        env_in: &[Binding],
+        base_depth: u32,
+    ) -> Result<Core, LowerError> {
+        let mut env = env_in.to_vec();
+        let mut b = Builder::new(base_depth);
+        self.lower_stmts(&block.stmts, &mut env, &mut b)?;
+        let tail = self.lower_loop_body_tail(&block.tail, carried, &env, &mut b)?;
+        Ok(fold_lets(b.lets, tail))
+    }
+
+    /// [`Self::lower_if`] for a loop body's branch join: each branch yields the
+    /// next-state tuple, so the resulting `bool` `Match` evaluates to the carried
+    /// vars' next values (MARV-21). A missing `else` passes the carried vars
+    /// through unchanged on the false branch.
+    fn lower_loop_if(
+        &self,
+        ife: &IfExpr,
+        carried: &[String],
+        env: &[Binding],
+        b: &mut Builder,
+    ) -> Result<Core, LowerError> {
+        let scrutinee = self.emit_atom(&ife.cond, env, b)?;
+        let branch_depth = b.depth();
+        let then_core = self.lower_loop_body_block(&ife.then, carried, env, branch_depth)?;
+        let else_core = match &ife.els {
+            // No `else`: the carried vars are unchanged on the false branch.
+            None => self.next_state_tuple(carried, env),
+            Some(Else::Block(blk)) => {
+                self.lower_loop_body_block(blk, carried, env, branch_depth)?
+            }
+            Some(Else::If(inner)) => {
+                let mut ib = Builder::new(branch_depth);
+                let m = self.lower_loop_if(inner, carried, env, &mut ib)?;
+                fold_lets(ib.lets, m)
+            }
+        };
+        Ok(Core::Match {
+            scrutinee,
+            branches: vec![
+                Branch {
+                    binds: 0,
+                    body: else_core,
+                },
+                Branch {
+                    binds: 0,
+                    body: then_core,
+                },
+            ],
+        })
+    }
+
+    /// [`Self::lower_match`] for a loop body's branch join: each arm yields the
+    /// next-state tuple instead of its own value, so the resulting `Match`
+    /// evaluates to the carried vars' next values (MARV-21).
+    fn lower_loop_match(
+        &self,
+        m: &MatchExpr,
+        carried: &[String],
+        env: &[Binding],
+        b: &mut Builder,
+    ) -> Result<Core, LowerError> {
+        self.lower_match_arms(m, env, b, |this, body, benv, depth| {
+            this.lower_loop_arm_body(body, carried, benv, depth)
+        })
+    }
+
+    /// Lower a `match` arm body of a branch-join loop so it evaluates to the
+    /// next-state tuple. An arm written as a bare expression has its value
+    /// discarded (emitted for effects) before the tuple; a block arm threads its
+    /// own tail like any loop body (MARV-21).
+    fn lower_loop_arm_body(
+        &self,
+        body: &ArmBody,
+        carried: &[String],
+        env: &[Binding],
+        base_depth: u32,
+    ) -> Result<Core, LowerError> {
+        match body {
+            ArmBody::Expr(e) => {
+                let mut bb = Builder::new(base_depth);
+                self.emit_atom(e, env, &mut bb)?;
+                let ns = self.next_state_tuple(carried, env);
+                Ok(fold_lets(bb.lets, ns))
+            }
+            ArmBody::Block(blk) => self.lower_loop_body_block(blk, carried, env, base_depth),
+        }
     }
 
     /// Lower a `for binder in iter body` statement (`spec/02` §D) by desugaring it
@@ -2152,22 +2330,26 @@ impl Lowerer {
             atom: zero,
             ty: Some(SType::Named(vec!["usize".to_string()])),
             mutable: true,
+            // A fresh declaration; the desugared `while` re-binds it as carried.
+            carried: false,
         });
         self.lower_while(&cond, &[], &while_body, env, b)
     }
 
     /// The in-scope mutable `var`s a loop body reassigns — its loop-carried state,
-    /// in enclosing declaration order. A name re-declared (`let`/`var`) inside the
-    /// body is body-local and excluded.
+    /// in enclosing declaration order. An assignment that resolves to a body-local
+    /// shadow (a `let`/`var`/pattern/`for`-binder in scope *at that assignment
+    /// site*) does not carry the enclosing binding; only assignments reaching past
+    /// every shadow do. Shadowing is tracked per lexical scope, so a `let x` in one
+    /// branch never suppresses an outer `x` assigned in another (MARV-21).
     fn carried_vars(&self, body: &Block, env: &[Binding]) -> Vec<String> {
-        let mut assigned: Vec<String> = Vec::new();
-        let mut declared: HashSet<String> = HashSet::new();
-        collect_assigned_roots(&body.stmts, &mut assigned, &mut declared);
+        let mut outer_assigned: Vec<String> = Vec::new();
+        let mut shadowed: HashSet<String> = HashSet::new();
+        collect_outer_assigned_block(body, &mut shadowed, &mut outer_assigned);
         let mut result: Vec<String> = Vec::new();
         for binding in env {
             if binding.mutable
-                && assigned.contains(&binding.name)
-                && !declared.contains(&binding.name)
+                && outer_assigned.contains(&binding.name)
                 && !result.contains(&binding.name)
             {
                 result.push(binding.name.clone());
@@ -2580,29 +2762,95 @@ fn loop_tuple_hash() -> Hash {
     symbol_hash("@loop-state")
 }
 
-/// Collect the root binding names assigned anywhere in `stmts` (recursing into
-/// nested loop bodies) into `assigned`, and the names *declared* by a `let`/`var`
-/// into `declared`. Used to compute a loop's carried-variable set.
-fn collect_assigned_roots(
-    stmts: &[Stmt],
-    assigned: &mut Vec<String>,
-    declared: &mut HashSet<String>,
+/// Collect the root names a block assigns that resolve *past* every body-local
+/// shadow — the enclosing bindings it actually reassigns. `shadowed` holds the
+/// names currently masked by an in-scope `let`/`var`/pattern/`for`-binder; a
+/// block opens a fresh scope, adding its own declarations and removing them on
+/// exit, so a `let x` in one branch never leaks to a sibling branch (MARV-21).
+/// Recurses through nested loop bodies and `if`/`match` branch tails.
+fn collect_outer_assigned_block(
+    block: &Block,
+    shadowed: &mut HashSet<String>,
+    out: &mut Vec<String>,
 ) {
-    for s in stmts {
+    // Names this block newly shadows (to undo on scope exit). A name already
+    // shadowed by an outer scope is not re-added here, so it stays masked.
+    let mut introduced: Vec<String> = Vec::new();
+    for s in &block.stmts {
         match s {
             Stmt::Let { name, .. } | Stmt::Var { name, .. } => {
-                declared.insert(name.clone());
+                if shadowed.insert(name.clone()) {
+                    introduced.push(name.clone());
+                }
             }
             Stmt::Assign { target, .. } => {
                 let root = lvalue_root(target);
-                if !assigned.contains(&root) {
-                    assigned.push(root);
+                if !shadowed.contains(&root) && !out.contains(&root) {
+                    out.push(root);
                 }
             }
-            Stmt::While { body, .. } | Stmt::For { body, .. } => {
-                collect_assigned_roots(&body.stmts, assigned, declared);
+            Stmt::While { body, .. } => {
+                collect_outer_assigned_block(body, shadowed, out);
+            }
+            Stmt::For { binder, body, .. } => {
+                // The `for` binder shadows the enclosing scope within the body.
+                let added = shadowed.insert(binder.clone());
+                collect_outer_assigned_block(body, shadowed, out);
+                if added {
+                    shadowed.remove(binder);
+                }
             }
         }
+    }
+    collect_outer_assigned_tail(&block.tail, shadowed, out);
+    for n in introduced {
+        shadowed.remove(&n);
+    }
+}
+
+/// Collect outer-assigned roots reachable through a block's tail — an `if`/`match`
+/// branch join whose branch blocks can reassign carried vars (MARV-21). Each
+/// branch is its own scope; a bare-expression tail holds no assignments.
+fn collect_outer_assigned_tail(
+    tail: &Option<Tail>,
+    shadowed: &mut HashSet<String>,
+    out: &mut Vec<String>,
+) {
+    match tail {
+        Some(Tail::If(ife)) => collect_outer_assigned_if(ife, shadowed, out),
+        Some(Tail::Match(m)) => {
+            for arm in &m.arms {
+                // A constructor pattern's field binds shadow within the arm only.
+                let mut introduced: Vec<String> = Vec::new();
+                if let Pattern::Ctor { fields, .. } = &arm.pat {
+                    for fp in fields {
+                        if let FieldPat::Bind(name) = fp {
+                            if shadowed.insert(name.clone()) {
+                                introduced.push(name.clone());
+                            }
+                        }
+                    }
+                }
+                if let ArmBody::Block(blk) = &arm.body {
+                    collect_outer_assigned_block(blk, shadowed, out);
+                }
+                for n in introduced {
+                    shadowed.remove(&n);
+                }
+            }
+        }
+        None | Some(Tail::Expr(_)) | Some(Tail::Return(_)) => {}
+    }
+}
+
+/// Collect outer-assigned roots across an `if`/`else if` chain used as a
+/// branch-join tail; each arm block opens its own scope (MARV-21).
+fn collect_outer_assigned_if(ife: &IfExpr, shadowed: &mut HashSet<String>, out: &mut Vec<String>) {
+    collect_outer_assigned_block(&ife.then, shadowed, out);
+    match &ife.els {
+        None => {}
+        Some(Else::Block(blk)) => collect_outer_assigned_block(blk, shadowed, out),
+        Some(Else::If(inner)) => collect_outer_assigned_if(inner, shadowed, out),
     }
 }
 
