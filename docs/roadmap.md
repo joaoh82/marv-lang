@@ -45,8 +45,10 @@ mutable value semantics — rebinding in ANF, field updates rebuild the aggregat
 node's `state`, body yields the next-state tuple, the loop yields the final tuple; Tier-1
 `invariant` checking in the interpreter; SSA loop blocks in Cranelift + WASM via compile-time
 register/local tuples; `examples/loops.mv` runs and agrees across all three backends). `for`
-parses + desugars to an index loop but awaits slice/`len` (MARV-7) to execute; loop bodies that
-end in an `if`/`match`/`return` await branch-join lowering; Tier-2 SMT for invariants is MARV-11
+parses + desugars to an index loop but awaits slice/`len` (MARV-7) to execute; a loop body whose
+tail is an `if`/`match` now threads the carried `var`s through the branch join (**MARV-21** — each
+branch yields the next-state tuple, kept register/local-resident so the loop stays alloc-free);
+only a `return` tail (early function exit) still awaits lowering; Tier-2 SMT for invariants is MARV-11
 · **MARV-3** error handling (`error E { … }` decls, `!T`/bare-`!` error unions → `Result[T,
 error-union]`, `E.Variant` → `Core::Raise`, postfix `?`; **full cross-call error-set inference**
 via a fixpoint over the call graph in `marv-db`, surfaced through `marv/errorSet`; exhaustive

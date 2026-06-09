@@ -48,6 +48,39 @@ fn well_typed_loop_checks_clean() {
     );
 }
 
+const BRANCH_JOIN: &str = "\
+mod demo
+
+pure fn weighted(n: i64) -> i64 {
+    var i: i64 = n
+    var acc: i64 = 0
+    while (i > 0) {
+        i = (i - 1)
+        if (i > 2) {
+            acc = (acc + 10)
+        } else {
+            acc = (acc + 1)
+        }
+    }
+    acc
+}
+";
+
+#[test]
+fn branch_join_loop_checks_clean() {
+    // MARV-21: a loop body whose tail is an `if`/`else` threads the carried
+    // `var`s through the join; the resulting `Match`-valued loop body must
+    // type-check exactly like a straight-line one.
+    let errors: Vec<_> = diagnostics(BRANCH_JOIN)
+        .into_iter()
+        .filter(|d| d.severity == Severity::Error)
+        .collect();
+    assert!(
+        errors.is_empty(),
+        "a branch-join loop should check clean, got: {errors:?}"
+    );
+}
+
 const NON_BOOL_CONDITION: &str = "\
 mod demo
 

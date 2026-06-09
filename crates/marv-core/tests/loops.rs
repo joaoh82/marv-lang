@@ -6,8 +6,9 @@
 //!   the loop's final-state tuple afterward;
 //! - `for x in xs { body }` → an index-driven `Loop` (`spec/02` §D);
 //! - alpha-equivalent loops lower to identical content hashes (the M1 gate);
-//! - a loop body ending in `if`/`match`/`return` is rejected (deferred join
-//!   lowering).
+//! - a loop body whose tail is an `if`/`match` threads the carried `var`s through
+//!   the branch join — every branch yields the next-state tuple (MARV-21);
+//! - a loop body ending in `return` (early function exit) is still rejected.
 
 use marv_core::ir::*;
 use marv_core::lower::LowerError;
@@ -177,9 +178,96 @@ fn for_desugars_to_a_loop() {
 }
 
 #[test]
-fn loop_body_with_a_branch_tail_is_rejected() {
-    // Threading carried `var`s through a branch join is not lowered yet (MARV-2
-    // handles straight-line bodies); an `if` as the body's tail is an error.
+fn loop_body_with_an_if_tail_threads_carried_vars_through_the_join() {
+    // MARV-21: a loop body whose tail is an `if`/`else` lowers — each branch
+    // produces the next-state tuple, so the loop body's terminal is a `Match`
+    // whose every branch ends in the carried-state `Ctor`.
     let src = "mod demo\n\npure fn run(n: i64) -> i64 {\n    var i: i64 = n\n    while (i > 0) {\n        if (i > 5) {\n            i = (i - 1)\n        } else {\n            i = (i - 2)\n        }\n    }\n    i\n}\n";
+    let m = lower(src);
+    let body = fn_body(&m, "run");
+    let lp = find_loop(&body).expect("the branch-tail `while` lowers to a Core::Loop");
+    let Core::Loop {
+        state, body: lbody, ..
+    } = lp
+    else {
+        unreachable!()
+    };
+    // One carried variable: `i`.
+    assert_eq!(state.len(), 1, "one `var` is carried");
+    // The body's terminal (under any `let` spine) is the branch-join `Match`.
+    match innermost(lbody) {
+        Core::Match { branches, .. } => {
+            assert_eq!(branches.len(), 2, "an `if`/`else` is a two-arm bool match");
+            for br in branches {
+                match innermost(&br.body) {
+                    Core::Ctor { tag, fields, .. } => {
+                        assert_eq!(*tag, 0);
+                        assert_eq!(fields.len(), 1, "every branch yields the carried tuple");
+                    }
+                    other => panic!("branch should end in the carried-state tuple, got {other:?}"),
+                }
+            }
+        }
+        other => panic!("loop body terminal should be the branch-join Match, got {other:?}"),
+    }
+}
+
+#[test]
+fn loop_body_with_a_match_tail_lowers() {
+    // A loop body whose tail is a `match` over an enum threads the carried `acc`
+    // through every arm (MARV-21): each arm yields the next-state tuple.
+    let src = "mod demo\n\nenum Bit {\n    Lo,\n    Hi,\n}\n\npure fn pick(i: i64) -> Bit {\n    if (i > 0) {\n        Bit.Hi\n    } else {\n        Bit.Lo\n    }\n}\n\npure fn run(n: i64) -> i64 {\n    var i: i64 = n\n    var acc: i64 = 0\n    while (i > 0) {\n        i = (i - 1)\n        let b: Bit = pick(i)\n        match b {\n            Bit.Lo => { acc = (acc + 1) }\n            Bit.Hi => { acc = (acc + 2) }\n        }\n    }\n    acc\n}\n";
+    let m = lower(src);
+    let body = fn_body(&m, "run");
+    let lp = find_loop(&body).expect("the match-tail `while` lowers to a Core::Loop");
+    let Core::Loop {
+        state, body: lbody, ..
+    } = lp
+    else {
+        unreachable!()
+    };
+    // Two carried variables: `i` and `acc`.
+    assert_eq!(state.len(), 2, "two `var`s are carried");
+    match innermost(lbody) {
+        Core::Match { branches, .. } => {
+            assert_eq!(branches.len(), 2, "the enum has two variants");
+            for br in branches {
+                match innermost(&br.body) {
+                    Core::Ctor { fields, .. } => {
+                        assert_eq!(fields.len(), 2, "every arm yields the two carried values");
+                    }
+                    other => panic!("arm should end in the carried-state tuple, got {other:?}"),
+                }
+            }
+        }
+        other => panic!("loop body terminal should be the branch-join Match, got {other:?}"),
+    }
+}
+
+#[test]
+fn outer_carried_var_shadowed_in_one_branch_is_still_carried() {
+    // MARV-21 regression: `x` is reassigned only in the `then` branch; the `else`
+    // branch declares a body-local `let x` that shadows it. The carried set must
+    // still include `x` (the shadow is scoped to the else branch), so the loop
+    // threads two `var`s — `i` and `x`.
+    let src = "mod demo\n\npure fn run(n: i64) -> i64 {\n    var i: i64 = n\n    var x: i64 = 0\n    while (i > 0) {\n        i = (i - 1)\n        if (i > 2) {\n            x = (x + 10)\n        } else {\n            let x: i64 = 99\n            i = ((i - x) + x)\n        }\n    }\n    x\n}\n";
+    let m = lower(src);
+    let body = fn_body(&m, "run");
+    let lp = find_loop(&body).expect("the shadowing branch-join `while` lowers to a Core::Loop");
+    let Core::Loop { state, .. } = lp else {
+        unreachable!()
+    };
+    assert_eq!(
+        state.len(),
+        2,
+        "`i` and the outer `x` are both carried despite the else-branch `let x` shadow"
+    );
+}
+
+#[test]
+fn loop_body_ending_in_return_is_rejected() {
+    // `return` inside a loop body is early function exit — still out of scope
+    // (MARV-21 threads `if`/`match` joins, not `return`).
+    let src = "mod demo\n\npure fn run(n: i64) -> i64 {\n    var i: i64 = n\n    while (i > 0) {\n        i = (i - 1)\n        return i\n    }\n    i\n}\n";
     assert_eq!(try_lower(src), Err(LowerError::LoopBodyControlFlow));
 }

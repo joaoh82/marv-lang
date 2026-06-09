@@ -36,3 +36,124 @@ pure fn count_down(n: i64) -> i64 {
     }
     i
 }
+
+// MARV-21 regression: an outer carried `x` is reassigned only in the *then*
+// branch; the *else* branch declares a body-local `let x` that shadows it. The
+// outer `x` must still be carried (the shadow is scoped to the else branch
+// only), so its `+ 10` updates are threaded across iterations.
+pure fn shadow(n: i64) -> i64 {
+    var i: i64 = n
+    var x: i64 = 0
+    while (i > 0) {
+        i = (i - 1)
+        if (i > 2) {
+            x = (x + 10)
+        } else {
+            let x: i64 = 99
+            i = ((i - x) + x)
+        }
+    }
+    x
+}
+
+// MARV-21: a branch join *inside a nested loop*. `acc` is carried by the inner
+// `while` (reassigned in the inner branch join) and its lineage propagates out
+// to the outer loop through the inner loop's final-state projection.
+pure fn nested_weighted(n: i64) -> i64 {
+    var acc: i64 = 0
+    var i: i64 = n
+    while (i > 0) {
+        i = (i - 1)
+        var j: i64 = i
+        while (j > 0) {
+            j = (j - 1)
+            if (j > 0) {
+                acc = (acc + 1)
+            } else {
+                acc = (acc + 2)
+            }
+        }
+    }
+    acc
+}
+
+// MARV-21: a loop body whose tail is an `if`/`else` threads the carried `acc`
+// through the branch join — each branch produces the next carried value.
+pure fn weighted(n: i64) -> i64 {
+    var i: i64 = n
+    var acc: i64 = 0
+    while (i > 0) {
+        i = (i - 1)
+        if (i > 2) {
+            acc = (acc + 10)
+        } else {
+            acc = (acc + 1)
+        }
+    }
+    acc
+}
+
+// A loop body tail `if` with no `else`: the carried `c` passes through unchanged
+// on the false branch (MARV-21).
+pure fn count_high(n: i64) -> i64 {
+    var i: i64 = n
+    var c: i64 = 0
+    while (i > 0) {
+        i = (i - 1)
+        if (i > 2) {
+            c = (c + 1)
+        }
+    }
+    c
+}
+
+// A loop body tail with an `else if` chain: every branch of the join produces
+// the next carried `acc` (MARV-21).
+pure fn bucket(n: i64) -> i64 {
+    var i: i64 = n
+    var acc: i64 = 0
+    while (i > 0) {
+        i = (i - 1)
+        if (i > 4) {
+            acc = (acc + 100)
+        } else if (i > 2) {
+            acc = (acc + 10)
+        } else {
+            acc = (acc + 1)
+        }
+    }
+    acc
+}
+
+enum Parity {
+    Even,
+    Odd,
+}
+
+pure fn parity_of(i: i64) -> Parity {
+    var k: i64 = i
+    while (k > 1) {
+        k = (k - 2)
+    }
+    if (k == 0) {
+        Parity.Even
+    } else {
+        Parity.Odd
+    }
+}
+
+// A loop body whose tail is a `match`: each arm threads the carried `acc`
+// through the join (MARV-21).
+pure fn parity_score(n: i64) -> i64 {
+    var i: i64 = n
+    var acc: i64 = 0
+    while (i > 0) {
+        i = (i - 1)
+        let p: Parity = parity_of(i)
+        match p {
+            Parity.Even => { acc = (acc + 10) }
+            Parity.Odd => { acc = (acc + 1) }
+        }
+    }
+    acc
+}
