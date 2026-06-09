@@ -66,8 +66,12 @@ up only at the cast boundary; per-width **arithmetic** wrapping remains roadmap.
   `Prim{Len}` (a builtin, not a call), and the **index store** `a[i] = e` is a functional
   element update over the array's static length. All of these execute on the interpreter,
   Cranelift, and WASM (an array boxes to a `[len, e0, …]` block) and are differential-tested
-  in `tests/run/arrays.mv` **[impl, MARV-30]**. Slices `[]T` (runtime length) and stores over
-  them are **[design]**.
+  in `tests/run/arrays.mv` **[impl, MARV-30]**. **Slices** `[]T` (runtime length) share that
+  boxed layout: `len`/index reads reuse the array codegen, a fixed-length array **coerces** to a
+  slice (`[N]T` → `[]T`, also through a `&` reference), and an element store `s[i] = e` over a
+  runtime length lowers to `Core::IndexSet` (an allocate-copy-store the backends emit, since the
+  static unroll cannot express an unknown length). Differential-tested in `tests/run/slices.mv`
+  **[impl, MARV-33]**.
 - **optional** `?T` = `Option[T]` — the only way to express absence. `Option`/`Result` are
   written in marv (`std/`) and parse + lower **[impl]**; the `?T`/`!T` *sugar* and the postfix
   `?` propagation operator now parse and lower too **[impl]** (`!T` → `Result[T, error-union]`;
@@ -142,8 +146,10 @@ mutable cells in Core; this is the cross-iteration form of mutable value semanti
 
 A `while` head carries zero or more `invariant` clauses. `for x in xs { … }` desugars to an
 index-driven loop (`spec/02` §D). With array `len`/index codegen now in place (MARV-30), a
-`for` over a fixed-length array runs on all three backends (`tests/run/arrays.mv::sum_for`);
-iterating a runtime-length slice still awaits slice support.
+`for` over a fixed-length array runs on all three backends (`tests/run/arrays.mv::sum_for`).
+A runtime-length slice now has the same `len`/index codegen (MARV-33), so a `while` over
+`len(s)` reading `s[i]` runs on all three backends (`tests/run/slices.mv`); the `for`-desugar
+over a slice rides on the same machinery.
 
 Today's loop lowering covers **straight-line** bodies (assignments and nested loops). A body
 whose tail is an `if`/`match`/`return` — which would need to thread carried `var`s through a

@@ -631,6 +631,8 @@ impl Trans<'_> {
                 })
             }
 
+            Core::IndexSet { base, index, value } => self.eval_index_set(base, index, value),
+
             Core::Proj { base, idx } => self.eval_proj(base, *idx),
 
             Core::Loop {
@@ -721,6 +723,116 @@ impl Trans<'_> {
             tag: 0,
             fields: carried.into_iter().map(Slot::Local).collect(),
         })
+    }
+
+    /// Lower a runtime element store `s[i] = e` ([`Core::IndexSet`], MARV-33).
+    /// A slice's length is only known at run time, so (unlike the array store,
+    /// which unrolls over a static length) this reads the element count from the
+    /// header, bump-allocates a fresh `[len, …]` block, copies every word into it
+    /// with a `loop`, then overwrites element `i`. The result is the new block
+    /// pointer, which the surface store rebinds the root to (mutable value
+    /// semantics — the source block is untouched, `spec/01` §4).
+    fn eval_index_set(
+        &mut self,
+        base: &Atom,
+        index: &Atom,
+        value: &Atom,
+    ) -> Result<Out, WasmError> {
+        // Each operand into a word local: the base pointer, the index, the value.
+        let ptr = self.atom_to_word_local(base)?;
+        let i = self.atom_to_word_local(index)?;
+        let v = self.atom_to_word_local(value)?;
+
+        // The header word holds the element count; the block is `len + 1` words.
+        let total = self.alloc_local();
+        self.emit(Instruction::LocalGet(ptr));
+        self.emit(Instruction::I32WrapI64);
+        self.emit(Instruction::I64Load(memarg(0)));
+        self.emit(Instruction::I64Const(1));
+        self.emit(Instruction::I64Add);
+        self.emit(Instruction::LocalSet(total));
+        let newptr = self.bump_alloc_dyn(total);
+
+        // Copy loop: `for k in 0..total { new[k] = old[k] }` (header + elements).
+        let k = self.alloc_local();
+        self.emit(Instruction::I64Const(0));
+        self.emit(Instruction::LocalSet(k));
+        self.emit(Instruction::Block(BlockType::Empty));
+        self.emit(Instruction::Loop(BlockType::Empty));
+        // Break out of the block once `k >= total`.
+        self.emit(Instruction::LocalGet(k));
+        self.emit(Instruction::LocalGet(total));
+        self.emit(Instruction::I64LtU);
+        self.emit(Instruction::I32Eqz);
+        self.emit(Instruction::BrIf(1));
+        // new[k] = old[k]: push dst address, then the source word, then store.
+        self.emit(Instruction::LocalGet(newptr));
+        self.push_word_offset(k);
+        self.emit(Instruction::I32WrapI64);
+        self.emit(Instruction::LocalGet(ptr));
+        self.push_word_offset(k);
+        self.emit(Instruction::I32WrapI64);
+        self.emit(Instruction::I64Load(memarg(0)));
+        self.emit(Instruction::I64Store(memarg(0)));
+        // k += 1
+        self.emit(Instruction::LocalGet(k));
+        self.emit(Instruction::I64Const(1));
+        self.emit(Instruction::I64Add);
+        self.emit(Instruction::LocalSet(k));
+        self.emit(Instruction::Br(0));
+        self.emit(Instruction::End); // loop
+        self.emit(Instruction::End); // block
+
+        // Overwrite the one element at `[i + 1]` with the new value.
+        self.emit(Instruction::LocalGet(newptr));
+        self.emit(Instruction::LocalGet(i));
+        self.emit(Instruction::I64Const(1));
+        self.emit(Instruction::I64Add);
+        self.emit(Instruction::I64Const(SLOT as i64));
+        self.emit(Instruction::I64Mul);
+        self.emit(Instruction::I64Add);
+        self.emit(Instruction::I32WrapI64);
+        self.emit(Instruction::LocalGet(v));
+        self.emit(Instruction::I64Store(memarg(0)));
+
+        // The store's value is the fresh block pointer.
+        self.emit(Instruction::LocalGet(newptr));
+        Ok(Out::Stack)
+    }
+
+    /// Evaluate an atom and stash its word (boxing an aggregate to its pointer)
+    /// into a fresh local, returning the local index. Used by [`Self::eval_index_set`]
+    /// so each operand can be re-read across the copy loop.
+    fn atom_to_word_local(&mut self, a: &Atom) -> Result<u32, WasmError> {
+        let out = self.eval_atom(a)?;
+        self.coerce_to_word(out)?;
+        let l = self.alloc_local();
+        self.emit(Instruction::LocalSet(l));
+        Ok(l)
+    }
+
+    /// Push the byte offset `k * SLOT` of a word-count local `k` as an `i64`, then
+    /// fold it onto the address already on the stack (`base + k * SLOT`).
+    fn push_word_offset(&mut self, k: u32) {
+        self.emit(Instruction::LocalGet(k));
+        self.emit(Instruction::I64Const(SLOT as i64));
+        self.emit(Instruction::I64Mul);
+        self.emit(Instruction::I64Add);
+    }
+
+    /// Bump-allocate a block of `total_words` words (a runtime count) and return
+    /// the local holding its base address (MARV-33: a slice store's size is known
+    /// only at run time). The bump pointer never rewinds — marv has no GC yet.
+    fn bump_alloc_dyn(&mut self, total_words: u32) -> u32 {
+        let base = self.alloc_local();
+        self.emit(Instruction::GlobalGet(BUMP));
+        self.emit(Instruction::LocalTee(base));
+        self.emit(Instruction::LocalGet(total_words));
+        self.emit(Instruction::I64Const(SLOT as i64));
+        self.emit(Instruction::I64Mul);
+        self.emit(Instruction::I64Add);
+        self.emit(Instruction::GlobalSet(BUMP));
+        base
     }
 
     /// Project field `idx`. A compile-time tuple selects the field directly; a

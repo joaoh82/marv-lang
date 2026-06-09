@@ -308,6 +308,20 @@ pub enum Core {
         elem: Type,
         items: Vec<Atom>,
     },
+    /// functional element store `s[i] = e` over a **runtime-length** collection
+    /// (a slice `[]T`, MARV-33). Produces a *fresh* `[len, e0, …]` block equal to
+    /// `base` except position `index` holds `value`, then the surface store
+    /// rebinds the root — mutable value semantics with no aliasing (`spec/01` §4).
+    /// A fixed-length array `[N]T` instead unrolls into per-element selects at
+    /// lower time (the length is static); this node is for the case the unroll
+    /// cannot express, where `len` is only known at runtime, so the backends emit
+    /// an allocate-copy-store over the runtime length. `len(base)`/`index` over
+    /// the result reuse the array layout unchanged.
+    IndexSet {
+        base: Atom,
+        index: Atom,
+        value: Atom,
+    },
     /// project field `idx` from an aggregate atom.
     Proj {
         base: Atom,

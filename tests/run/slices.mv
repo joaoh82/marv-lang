@@ -1,0 +1,77 @@
+mod slices
+
+// Runtime-length slices `[]T` (MARV-33). A slice shares the array's boxed
+// `[len, e0, …]` layout — the difference is that its length is not known at
+// compile time. An array literal bound to a `[]T` is the slice constructor;
+// `len`/`index` read the header/elements exactly as for an array, and an element
+// store goes through `Core::IndexSet` (an allocate-copy-store over the runtime
+// length) rather than the array's static unroll. interp == cranelift == wasm.
+
+struct Sale { region: i64, amount: i64 }
+
+// Slice literal + indexed reads: built from an array literal, read back.
+pure fn sum3() -> i64 {
+    let s: []i64 = [10, 20, 12]
+    ((s[0] + s[1]) + s[2])
+}
+
+// Index with a runtime (parameter) subscript over a slice.
+pure fn nth(i: i64) -> i64 {
+    let s: []i64 = [5, 6, 7, 8]
+    s[i]
+}
+
+// `len` over a slice (the header word), surfaced as an `i64`.
+pure fn length() -> i64 {
+    let s: []i64 = [9, 9, 9, 9]
+    (len(s) as i64)
+}
+
+// `len` + indexed read driving a `while` loop (carried `usize` index).
+pure fn sum_all() -> i64 {
+    let s: []i64 = [1, 2, 3, 4, 5]
+    var sum: i64 = 0
+    var i: usize = 0
+    while (i < len(s)) {
+        sum = (sum + s[i])
+        i = (i + 1)
+    }
+    sum
+}
+
+// Element store `s[i] = e` over a runtime length (the new `Core::IndexSet`):
+// a functional update under mutable value semantics. Constant subscript.
+pure fn set_get() -> i64 {
+    var s: []i64 = [1, 2, 3]
+    s[1] = 42
+    s[1]
+}
+
+// Element store with a runtime subscript, then sum every element back. The
+// store rebinds the slice to a fresh block; the source is left untouched.
+pure fn set_sum(i: i64) -> i64 {
+    var s: []i64 = [1, 2, 3]
+    s[i] = 10
+    var sum: i64 = 0
+    var j: usize = 0
+    while (j < len(s)) {
+        sum = (sum + s[j])
+        j = (j + 1)
+    }
+    sum
+}
+
+// `examples/report.mv`'s `total` shape: a `while` over `len(sales)` that reads
+// `sales[i].amount` from a slice of structs. Now runnable on all three backends
+// (MARV-33 + MARV-20's slice half). `region` is an `i64` code here because the
+// backends are integer-only; the slice/loop/projection pattern is identical.
+pure fn total() -> i64 {
+    let sales: []Sale = [Sale { region: 1, amount: 10 }, Sale { region: 2, amount: 20 }, Sale { region: 1, amount: 12 }]
+    var sum: i64 = 0
+    var i: usize = 0
+    while (i < len(sales)) {
+        sum = (sum + sales[i].amount)
+        i = (i + 1)
+    }
+    sum
+}

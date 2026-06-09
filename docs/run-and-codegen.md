@@ -51,6 +51,15 @@ The integer/boolean core the M0/M1 front end can express and lower:
   An element store is a functional update under mutable value semantics
   (`spec/01` §4): with the array's length statically known it rebuilds the array,
   taking the new value at the written position and the old element elsewhere.
+- **runtime-length slices (MARV-33):** a slice `[]T` shares the array's
+  `[len, e0, …]` layout — only its length is a runtime value — so `len`/index
+  reads fall straight out of the array codegen, and a fixed-length array
+  **coerces** to a slice (`[N]T` → `[]T`, also through a `&` reference). The
+  element store `s[i] = e` cannot use the array's static unroll, so it lowers to
+  `Core::IndexSet`: the backends read the count from the header, allocate a fresh
+  `[len, …]` block, copy it with a **runtime loop**, and overwrite element `i`
+  (the source block is left untouched). `tests/run/slices.mv` asserts
+  interp == Cranelift == wasm.
 - **monomorphized generics (MARV-26):** monomorphization is a lowering-time pass
   (`spec/01` §§3.3–3.4), so a generic call has already specialized to a concrete
   def (`max@i64`) with its interface methods dispatched to the coherent `impl`
@@ -63,8 +72,8 @@ The integer/boolean core the M0/M1 front end can express and lower:
 Every scalar lives in a 64-bit register in *both* backends, so their wrapping
 arithmetic matches — the property that makes the differential test meaningful.
 Constructs the Cranelift backend cannot lower (`perform` — now expressible from
-source, MARV-6, and lowered by the WASM backend — first-class closures, floats,
-slice element stores whose length is not statically known) are interpreted where
+source, MARV-6, and lowered by the WASM backend — first-class closures, floats)
+are interpreted where
 the interpreter can, and Cranelift returns an honest `unsupported` rather than
 emitting wrong code. New constructs land in *both* backends together so agreement
 is preserved.
@@ -104,6 +113,16 @@ other aggregates (an array that never escapes stays a register/local bundle).
 Arrays are *structural* (`Core::Array` carries the element type, not a nominal
 hash) and are measured/indexed rather than projected.
 
+A **slice** `[]T` (MARV-33) is the *same* `[len, e0, …]` block — the only
+difference is that its length is a runtime value, not a compile-time one, so
+`len`/index need no new machinery. What the array path cannot reuse is the
+element store: with an unknown length the static unroll is impossible, so a slice
+store lowers to `Core::IndexSet` and the backends emit an **allocate-copy-store**
+— read the count from the header, allocate a fresh `len + 1`-word block, copy it
+with a runtime loop, then overwrite the one element. The result is a new block (a
+functional update; the source is untouched, `spec/01` §4). A fixed-length array
+coerces to a slice at no runtime cost (the layout is identical).
+
 ## Capabilities are injected, never ambient
 
 `marv run --grant CAP,…` is the sandbox (`spec/03` §4.5). The entry point's
@@ -136,6 +155,7 @@ the results are equal to each other and to a hand-computed golden value:
 | `shapes.mv`     | payload-carrying variants + `Match` arms that bind fields (`binds > 0`) — MARV-9 |
 | `generics.mv`   | a monomorphized generic (`max[T: Ord]` matching on `Ordering`, specialized to `i64` and dispatched to `impl Ord[i64]`) — runnable on all three backends since the enum got a layout (MARV-9); closes the gap noted in MARV-5 — MARV-26 |
 | `arrays.mv`     | array literals + `len` + index read `a[i]` + index store `a[i] = e` (functional element update); a `len`-bounded `while` loop over an array — MARV-30 |
+| `slices.mv`     | runtime-length slices `[]T`: construct (array→slice), `len`/index, a `Core::IndexSet` element store over a runtime length, and `total` over a slice of structs (`sales[i].amount`) — MARV-33 |
 
 The negative case is `uses_ungranted_cap.core.json`: a Core-IR snapshot whose
 `leak(fs: Fs, path: str)` body `perform`s `Fs` while declaring the empty
@@ -208,13 +228,13 @@ cd web && python3 -m http.server 8087   # then open http://localhost:8087/
   logging, currying, recursion, `match`); a Cranelift JIT and a WebAssembly
   backend over the integer/boolean subset **plus heap-boxed aggregates and enums
   with field-binding `match`** (MARV-9) **plus fixed-length arrays with
-  `len`/index/store** (MARV-30); `marv run`, `marv build --target
+  `len`/index/store** (MARV-30) **plus runtime-length slices `[]T` with
+  `len`/index and an allocate-copy-store element store** (MARV-33); `marv run`, `marv build --target
   native-cranelift`, `marv build --target wasm-component`; the three-way
   differential gate (interpreter ↔ Cranelift ↔ wasm) and a browser sandbox demo.
 - **Next:** ahead-of-time object/executable emission and an LLVM backend for
   release builds (MARV-10); a real allocator/garbage reclamation (both backends
-  currently leak — `spec/01` §4); slices (`[]T`) with a runtime length header and
-  element stores over them; string/aggregate-typed capability operands and full
+  currently leak — `spec/01` §4); string/aggregate-typed capability operands and full
   component-model / WIT packaging. The interpreter remains the oracle each backend
   is differentially
   tested against.

@@ -251,6 +251,11 @@ fn collect_core_syms(c: &Core, out: &mut Vec<Hash>) {
             collect_type_syms(elem, out);
             items.iter().for_each(|a| atom(a, out));
         }
+        Core::IndexSet { base, index, value } => {
+            atom(base, out);
+            atom(index, out);
+            atom(value, out);
+        }
         Core::Match {
             scrutinee,
             branches,
@@ -363,6 +368,11 @@ fn subst_core(c: &Core, subst: &dyn Fn(Hash) -> Option<Hash>) -> Core {
         Core::Array { elem, items } => Core::Array {
             elem: subst_type(elem, subst),
             items: items.iter().map(|a| subst_atom(a, subst)).collect(),
+        },
+        Core::IndexSet { base, index, value } => Core::IndexSet {
+            base: subst_atom(base, subst),
+            index: subst_atom(index, subst),
+            value: subst_atom(value, subst),
         },
         Core::Match {
             scrutinee,
