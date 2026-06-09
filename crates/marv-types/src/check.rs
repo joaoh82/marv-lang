@@ -444,9 +444,7 @@ impl<'a> Checker<'a> {
 
             Core::Array { elem, items } => self.synth_array(elem, items, env),
 
-            Core::IndexSet { base, index, value } => {
-                self.synth_index_set(base, index, value, env)
-            }
+            Core::IndexSet { base, index, value } => self.synth_index_set(base, index, value, env),
 
             Core::Proj { base, idx } => {
                 let bt = self.atom_ty(base, env);
@@ -1424,16 +1422,9 @@ fn compatible(a: &Ty, b: &Ty) -> bool {
 fn coerces_to(target: &Type, source: &Type) -> bool {
     match (target, source) {
         (Type::Slice(t), Type::Array(s, _)) => type_eq(t, s),
-        (
-            Type::Ref {
-                mutable: mt,
-                of: t,
-            },
-            Type::Ref {
-                mutable: ms,
-                of: s,
-            },
-        ) => mt == ms && coerces_to(t, s),
+        (Type::Ref { mutable: mt, of: t }, Type::Ref { mutable: ms, of: s }) => {
+            mt == ms && coerces_to(t, s)
+        }
         _ => false,
     }
 }
