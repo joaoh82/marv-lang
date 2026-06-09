@@ -10,6 +10,14 @@ pure fn sum(xs: &[]i64) -> i64 {
     total
 }
 
+pure fn sum_for(xs: &[]i64) -> i64 {
+    var total: i64 = 0
+    for x in xs {
+        total = (total + x)
+    }
+    total
+}
+
 pure fn set_first(xs: []i64, v: i64) -> i64 {
     var ys: []i64 = xs
     ys[0] = v
@@ -18,5 +26,5 @@ pure fn set_first(xs: []i64, v: i64) -> i64 {
 
 pure fn main() -> i64 {
     let xs: []i64 = [1, 2, 3, 4]
-    (sum(&xs) + set_first(xs, 10))
+    ((sum(&xs) + sum_for(&xs)) + set_first(xs, 10))
 }

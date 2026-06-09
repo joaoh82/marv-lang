@@ -214,6 +214,16 @@ fn corpus_cases() -> Vec<(&'static str, &'static str, Vec<i64>, i64)> {
         // `examples/report.mv`'s `total`: a `while` over `len(sales)` reading
         // `sales[i].amount` from a slice of structs (MARV-33 + MARV-20 slice half).
         ("slices.mv", "total", vec![], 42),
+        // `for x in s` over a runtime-length slice (MARV-20): the desugared
+        // len/index loop drives a collection whose length is a runtime value.
+        ("slices.mv", "sum_for", vec![], 20),
+        // `for` over a slice of structs (`examples/report.mv`'s `total` shape).
+        ("slices.mv", "total_for", vec![], 42),
+        // nested `for`s: builder-depth-keyed index names stay unique.
+        ("slices.mv", "nested_for", vec![], 180),
+        // two sequential `for`s share one depth-keyed index name; the second
+        // shadows the first without clobbering it.
+        ("slices.mv", "rescan_for", vec![], 66),
     ]
 }
 

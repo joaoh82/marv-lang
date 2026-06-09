@@ -45,7 +45,10 @@ mutable value semantics — rebinding in ANF, field updates rebuild the aggregat
 node's `state`, body yields the next-state tuple, the loop yields the final tuple; Tier-1
 `invariant` checking in the interpreter; SSA loop blocks in Cranelift + WASM via compile-time
 register/local tuples; `examples/loops.mv` runs and agrees across all three backends). `for`
-parses + desugars to an index loop but awaits slice/`len` (MARV-7) to execute; a loop body whose
+desugars to an index loop and **executes end to end** over arrays (MARV-30) and runtime-length
+slices (MARV-33); MARV-20 closed it out with differential coverage for `for` over a slice, a
+slice of structs, nested `for`s (depth-keyed index names), and sequential `for`s
+(`tests/run/slices.mv`, `examples/slices.mv`); a loop body whose
 tail is an `if`/`match` now threads the carried `var`s through the branch join (**MARV-21** — each
 branch yields the next-state tuple, kept register/local-resident so the loop stays alloc-free);
 only a `return` tail (early function exit) still awaits lowering; Tier-2 SMT for invariants is MARV-11
@@ -153,6 +156,12 @@ demos assert interp == Cranelift == wasm. This also makes `examples/report.mv`'s
 (a `while` over `len(sales)` reading `sales[i].amount`) runnable, closing the slice half of MARV-20.
 A debug Tier-1 bounds check on a runtime index is a follow-up (today's slice reads/stores trap or
 read out of bounds exactly as the array path does).
+· **MARV-20** `for` execution over slices: with MARV-30/33 supplying the `len`/index runtime,
+the `for` desugar runs end to end with no further front-end work. The differential corpora now
+pin `for` over a `[]i64` slice, `for` over a slice of structs (the `report.mv` `total` shape),
+nested `for`s (the builder-depth-keyed `#for<d>` index names stay unique), and two sequential
+`for`s in one block (same depth ⇒ same index name; the second shadows the first harmlessly).
+`examples/slices.mv` gained a `for`-based `sum_for`; interp == Cranelift == wasm throughout.
 
 ## Recommended order
 

@@ -155,7 +155,7 @@ the results are equal to each other and to a hand-computed golden value:
 | `shapes.mv`     | payload-carrying variants + `Match` arms that bind fields (`binds > 0`) — MARV-9 |
 | `generics.mv`   | a monomorphized generic (`max[T: Ord]` matching on `Ordering`, specialized to `i64` and dispatched to `impl Ord[i64]`) — runnable on all three backends since the enum got a layout (MARV-9); closes the gap noted in MARV-5 — MARV-26 |
 | `arrays.mv`     | array literals + `len` + index read `a[i]` + index store `a[i] = e` (functional element update); a `len`-bounded `while` loop over an array — MARV-30 |
-| `slices.mv`     | runtime-length slices `[]T`: construct (array→slice), `len`/index, a `Core::IndexSet` element store over a runtime length, and `total` over a slice of structs (`sales[i].amount`) — MARV-33 |
+| `slices.mv`     | runtime-length slices `[]T`: construct (array→slice), `len`/index, a `Core::IndexSet` element store over a runtime length, and `total` over a slice of structs (`sales[i].amount`) — MARV-33; `for x in s` over a slice and over a slice of structs, nested `for`s (depth-keyed index names), and sequential `for`s — MARV-20 |
 
 The negative case is `uses_ungranted_cap.core.json`: a Core-IR snapshot whose
 `leak(fs: Fs, path: str)` body `perform`s `Fs` while declaring the empty
