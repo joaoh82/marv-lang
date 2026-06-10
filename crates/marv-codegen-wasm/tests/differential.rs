@@ -244,6 +244,132 @@ fn wasm_agrees_with_interpreter() {
     }
 }
 
+/// The out-of-bounds corpus (MARV-34): `(file, entry, args)` whose runtime
+/// subscript falls outside `0..len`. Debug builds must *abort* on every backend
+/// — the interpreter with a structured Tier-1 report, wasm with an
+/// `unreachable` trap (a host abort hook would be an import, breaking the
+/// "a pure module imports nothing" manifest). The Cranelift half is asserted by
+/// the twin corpus in `marv-codegen-cl/tests/differential.rs`.
+fn oob_cases() -> Vec<(&'static str, &'static str, Vec<i64>)> {
+    vec![
+        // slice read at `len` and at a negative subscript.
+        ("slices.mv", "nth", vec![4]),
+        ("slices.mv", "nth", vec![-1]),
+        // slice element store (`Core::IndexSet`) at `len`.
+        ("slices.mv", "set_sum", vec![3]),
+        // fixed-length array read at `len` (the same `Prim::Index` path).
+        ("arrays.mv", "nth", vec![4]),
+    ]
+}
+
+#[test]
+fn out_of_bounds_traps_under_wasm_and_errors_in_the_interpreter() {
+    for (file, entry, args) in oob_cases() {
+        let (module_path, defs, world) = load_source(file);
+
+        // Interpreter: a structured Tier-1 violation, never a value.
+        let arg_strs: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+        let program = Program::new(&module_path, defs.clone(), world.clone());
+        let err = program
+            .run(entry, &[], &arg_strs)
+            .expect_err("an out-of-bounds subscript must abort the run");
+        assert!(
+            matches!(err, marv_interp::RunError::BoundsCheckFailed { .. }),
+            "{file}:{entry}({args:?}): expected a Tier-1 bounds violation, got {err:?}"
+        );
+
+        // wasm: the debug module traps on the emitted `unreachable`.
+        let artifact = marv_codegen_wasm::compile(&module_path, &defs, &world)
+            .unwrap_or_else(|e| panic!("wasm compile: {e}"));
+        let engine = Engine::default();
+        let module = Module::new(&engine, &artifact.bytes).expect("wasmtime module");
+        let mut store = Store::new(&engine, ());
+        let instance = Instance::new(&mut store, &module, &[]).expect("instantiate");
+        let qualified = format!("{module_path}.{entry}");
+        let func = instance
+            .get_func(&mut store, &qualified)
+            .unwrap_or_else(|| panic!("export `{qualified}` not found"));
+        let params: Vec<Val> = args.iter().map(|a| Val::I64(*a)).collect();
+        let mut results = [Val::I64(0)];
+        let trapped = func.call(&mut store, &params, &mut results);
+        assert!(
+            trapped.is_err(),
+            "{file}:{entry}({args:?}): expected a wasm trap, got {:?}",
+            results[0]
+        );
+    }
+}
+
+/// Pin the byte-level half of the release claim: an *indexing* module's debug
+/// bytes contain the check (≠ release bytes), and a module with no runtime
+/// indexing compiles byte-identically in both modes — so the docs' "release
+/// in-bounds codegen is byte-identical to the unchecked output" stays an
+/// enforced property, not a comment. (A future edit that, say, hoists the
+/// check's scratch locals outside the `bounds_checks` gate would change
+/// release bytes with every result-level test still green.)
+#[test]
+fn release_mode_bytes_pin_the_check_presence() {
+    let debug = marv_codegen_wasm::Options {
+        bounds_checks: true,
+    };
+    let release = marv_codegen_wasm::Options {
+        bounds_checks: false,
+    };
+
+    let (module_path, defs, world) = load_source("slices.mv");
+    let d = marv_codegen_wasm::compile_with(&module_path, &defs, &world, &debug).unwrap();
+    let r = marv_codegen_wasm::compile_with(&module_path, &defs, &world, &release).unwrap();
+    assert_ne!(
+        d.bytes, r.bytes,
+        "an indexing module must carry the bounds check in debug mode"
+    );
+
+    let (module_path, defs, world) = load_source("factorial.mv");
+    let d = marv_codegen_wasm::compile_with(&module_path, &defs, &world, &debug).unwrap();
+    let r = marv_codegen_wasm::compile_with(&module_path, &defs, &world, &release).unwrap();
+    assert_eq!(
+        d.bytes, r.bytes,
+        "a module with no runtime indexing must compile identically in both modes"
+    );
+}
+
+/// Release mode (`Options { bounds_checks: false }`) omits the check: the
+/// in-bounds results are unchanged and the emitted module is the pre-MARV-34
+/// one (the byte-level pin above). Out-of-bounds behavior in release is
+/// undefined-by-design and not pinned.
+#[test]
+fn release_mode_in_bounds_results_are_unchanged() {
+    let opts = marv_codegen_wasm::Options {
+        bounds_checks: false,
+    };
+    for (file, entry, args, expected) in [
+        ("slices.mv", "nth", vec![3], 8),
+        ("slices.mv", "set_sum", vec![1], 14),
+        ("arrays.mv", "sum_all", vec![], 15),
+    ] {
+        let (module_path, defs, world) = load_source(file);
+        let artifact = marv_codegen_wasm::compile_with(&module_path, &defs, &world, &opts)
+            .unwrap_or_else(|e| panic!("wasm compile (release): {e}"));
+        let engine = Engine::default();
+        let module = Module::new(&engine, &artifact.bytes).expect("wasmtime module");
+        let mut store = Store::new(&engine, ());
+        let instance = Instance::new(&mut store, &module, &[]).expect("instantiate");
+        let qualified = format!("{module_path}.{entry}");
+        let func = instance
+            .get_func(&mut store, &qualified)
+            .unwrap_or_else(|| panic!("export `{qualified}` not found"));
+        let params: Vec<Val> = args.iter().map(|a| Val::I64(*a)).collect();
+        let mut results = [Val::I64(0)];
+        func.call(&mut store, &params, &mut results)
+            .unwrap_or_else(|e| panic!("call {qualified}: {e}"));
+        assert_eq!(
+            results[0].unwrap_i64(),
+            expected,
+            "{file}:{entry}({args:?}) in release mode"
+        );
+    }
+}
+
 #[test]
 fn a_pure_module_imports_nothing() {
     let (module_path, defs, world) = load_source("factorial.mv");

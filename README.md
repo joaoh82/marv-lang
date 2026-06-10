@@ -96,7 +96,7 @@ cd web && python3 -m http.server 8087   # open http://localhost:8087/
 | `marv fmt [--write\|--check] [files…]` | Canonicalize source. The formatter is the parser's inverse — exactly one form per program. |
 | `marv check <file>` | Type / effect / capability / error-set / reference / linearity checks; fix-carrying diagnostics. |
 | `marv run [--grant CAP,…] [--entry NAME] <file> [args…]` | Interpret an entry point (the semantics oracle). Capabilities enter only via `--grant`. |
-| `marv build [--target native-cranelift\|wasm-component] [--run] [--out PATH] <file>` | Compile via Cranelift (JIT, `--run` to execute) or to a WebAssembly module. |
+| `marv build [--target native-cranelift\|wasm-component] [--run] [--release] [--out PATH] <file>` | Compile via Cranelift (JIT, `--run` to execute) or to a WebAssembly module. Debug builds (default) carry the Tier-1 bounds check; `--release` omits it. |
 | `marv verify [--def NAME] <file>` | Discharge `requires`/`ensures` contracts via SMT: `proved` / `failed` (with a counterexample) / `unsupported` (→ runtime fallback). |
 | `marv commit [--store DIR] <file>` | Freeze definitions into the content-addressed store; report the lockfile delta (new vs. already-reviewed). |
 

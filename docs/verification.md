@@ -24,6 +24,11 @@ an answer:
   `invariant` is checked at the loop header (entry and each re-entry). A violation
   aborts with a structured report (showing the offending concrete values). This
   holds for *all* contracts, regardless of whether Tier 2 can reason about them.
+  Tier 1 also carries the **bounds check** on every runtime array/slice element
+  read and slice element store (MARV-34): a subscript outside `0..len` aborts
+  with the offending index and length — in the interpreter *and* in debug
+  Cranelift/wasm codegen (`marv build --release` omits it; see
+  [run-and-codegen.md](run-and-codegen.md)).
 - **Tier 2 — static proof (verified subset).** `marv verify` (`marv-verify`)
   discharges contracts with an SMT solver (z3, over SMT-LIB via `easy-smt`) for a
   decidable-ish subset, returning a **proof** or a **counterexample**.

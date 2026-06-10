@@ -27,6 +27,7 @@ where each one sits and what must land first. Each task references back here.
 | ~~**MARV-9** aggregate/enum codegen (interp + Cranelift + WASM)~~ ✅ done | 2 · Backends | ~~MARV-1~~ ✅, ~~MARV-4~~ ✅ | 10 | medium |
 | ~~**MARV-30** array literals + `len`/index codegen (+ index store)~~ ✅ done | 2 · Backends | ~~MARV-9~~ ✅, ~~MARV-7~~ ✅ | — | medium |
 | ~~**MARV-33** runtime-length slices `[]T` (construct, `len`/index, element store)~~ ✅ done | 2 · Backends | ~~MARV-30~~ ✅ | 20 | medium |
+| ~~**MARV-34** Tier-1 debug bounds check on runtime array/slice indexing~~ ✅ done | 2 · Backends | ~~MARV-33~~ ✅ | — | medium |
 | **MARV-10** AOT native + LLVM + WASM component/WIT | 2 · Backends | MARV-9 | — | low |
 | **MARV-11** verified-subset expansion + loop invariants + `old`/quantifiers | 3 · Verification | MARV-2, MARV-1 | — | medium |
 | ~~**MARV-12** formatter doc-comments + real source spans~~ ✅ done | 5 · Infra/polish | — *(independent)* | — | medium |
@@ -154,8 +155,22 @@ the interpreter clones the `Value::Agg` fields as the oracle. `tests/run/slices.
 (literal/index/`len`/`while`-loop/store + a `total` over a slice of structs) and both `examples/`
 demos assert interp == Cranelift == wasm. This also makes `examples/report.mv`'s `total` shape
 (a `while` over `len(sales)` reading `sales[i].amount`) runnable, closing the slice half of MARV-20.
-A debug Tier-1 bounds check on a runtime index is a follow-up (today's slice reads/stores trap or
-read out of bounds exactly as the array path does).
+The debug Tier-1 bounds check on a runtime index landed as MARV-34.
+· **MARV-34** Tier-1 debug bounds check on runtime array/slice indexing, closing MARV-33's
+follow-up. A runtime subscript outside `0..len` on an element read `a[i]`/`s[i]` or a slice element
+store `s[i] = e` (`Core::IndexSet`) now **aborts** in debug builds instead of trapping or touching
+adjacent memory — one *unsigned* compare against the `[len, e0, …]` header word (covering negative
+subscripts too). The interpreter reports a structured `RunError::BoundsCheckFailed { index, len }`
+(like `requires`/`invariant` violations); Cranelift calls a `marv_rt_bounds_fail(index, len)` host
+hook that prints the same report and aborts the process; WASM emits an `unreachable` trap (an abort
+hook would be a host *import*, breaking the pure-module-imports-nothing manifest). Both codegen
+crates grew `compile_with(…, Options { bounds_checks })` and the CLI a `marv build --release` flag
+that omits the check — release in-bounds codegen is byte-identical to before. The differential
+harnesses now carry an out-of-bounds corpus asserting all three backends abort (Cranelift via a
+re-spawned child process, since the abort is process-fatal). One honest gap: a *fixed-length array*
+store with a runtime index is unrolled at lowering into per-element selects, so an out-of-range
+index there silently no-ops (memory-safely) on all three backends — guarding it means changing the
+lowering (and every in-bounds program's Core hash), so it stays a follow-up.
 · **MARV-20** `for` execution over slices: with MARV-30/33 supplying the `len`/index runtime,
 the `for` desugar runs end to end with no further front-end work. The differential corpora now
 pin `for` over a `[]i64` slice, `for` over a slice of structs (the `report.mv` `total` shape),

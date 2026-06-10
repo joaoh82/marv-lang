@@ -42,13 +42,16 @@ COMMANDS:
                                non-zero if any input is not already canonical.
     check <file>               Type / effect / capability check a `.mv` source
                                file or a `.core.json` Core-IR snapshot.
-    build [--target T] [--run] [--out PATH] [--entry NAME] <file> [args...]
+    build [--target T] [--run] [--release] [--out PATH] [--entry NAME] <file> [args...]
                                Compile. Refuses to build a file that fails
                                `check`. Targets: `native-cranelift` (default;
                                --run JIT-executes the entry and prints its
                                integer result) and `wasm-component` (writes a
                                .wasm module to --out, default <file>.wasm, and
                                reports the host imports = capabilities it needs).
+                               Debug builds (the default) carry the Tier-1
+                               bounds check on runtime element reads/stores;
+                               --release omits it.
     run [--grant CAP,CAP] [--entry NAME] <file> [args...]
                                Interpret an entry point (the semantics oracle).
                                Capabilities enter only through --grant; the
@@ -461,7 +464,10 @@ fn cmd_build(args: &[String]) -> ExitCode {
 
 /// Cranelift backend: JIT-compile, and with `--run` execute the entry point.
 fn build_native(inv: &Invocation, file: &str, loaded: &Loaded) -> ExitCode {
-    let jit = match codegen::compile(&loaded.module_path, &loaded.defs, &loaded.world) {
+    let opts = codegen::Options {
+        bounds_checks: !inv.release,
+    };
+    let jit = match codegen::compile_with(&loaded.module_path, &loaded.defs, &loaded.world, &opts) {
         Ok(j) => j,
         Err(e) => {
             eprintln!("marv build: {e}");
@@ -504,7 +510,11 @@ fn build_native(inv: &Invocation, file: &str, loaded: &Loaded) -> ExitCode {
 /// WebAssembly backend: emit a `.wasm` module and report its capability
 /// manifest (the host imports it requires; a pure module requires none).
 fn build_wasm(inv: &Invocation, file: &str, loaded: &Loaded) -> ExitCode {
-    let artifact = match wasm::compile(&loaded.module_path, &loaded.defs, &loaded.world) {
+    let opts = wasm::Options {
+        bounds_checks: !inv.release,
+    };
+    let artifact = match wasm::compile_with(&loaded.module_path, &loaded.defs, &loaded.world, &opts)
+    {
         Ok(a) => a,
         Err(e) => {
             eprintln!("marv build: {e}");
@@ -568,6 +578,17 @@ fn cmd_run(args: &[String]) -> ExitCode {
         return ExitCode::FAILURE;
     };
 
+    // The interpreter is the debug runner: Tier-1 checks (contracts, bounds)
+    // always run. Say so rather than silently ignoring the flag — `--release`
+    // changes observable semantics under `build`, so silence here could be
+    // misread as a backend disagreement.
+    if inv.release {
+        eprintln!(
+            "marv run: note: --release is ignored — the interpreter is the debug runner and \
+             always performs Tier-1 checks (use `marv build --release` for unchecked codegen)"
+        );
+    }
+
     let loaded = match load(file) {
         Ok(l) => l,
         Err(e) => {
@@ -612,6 +633,9 @@ fn cmd_run(args: &[String]) -> ExitCode {
 struct Invocation {
     target: String,
     run: bool,
+    /// `--release`: omit the Tier-1 debug checks (today: the runtime bounds
+    /// check, MARV-34) from the compiled artifact.
+    release: bool,
     entry: String,
     grant: Vec<String>,
     /// Output path for `build` artifacts (`--out`/`-o`); defaults per target.
@@ -627,6 +651,7 @@ fn parse_invocation(args: &[String]) -> Result<Invocation, String> {
     let mut inv = Invocation {
         target: "native-cranelift".to_string(),
         run: false,
+        release: false,
         entry: String::new(),
         grant: Vec::new(),
         out: None,
@@ -647,6 +672,7 @@ fn parse_invocation(args: &[String]) -> Result<Invocation, String> {
             // even if they look like flags.
             "--" => only_args = true,
             "--run" => inv.run = true,
+            "--release" => inv.release = true,
             "--target" => inv.target = take_value(args, &mut i, "--target")?,
             "--out" | "-o" => inv.out = Some(take_value(args, &mut i, "--out")?),
             "--entry" => inv.entry = take_value(args, &mut i, "--entry")?,

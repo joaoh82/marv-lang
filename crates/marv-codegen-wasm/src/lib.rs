@@ -170,6 +170,26 @@ fn is_no_slot(t: &Type, world: &World) -> bool {
     }
 }
 
+/// Codegen options (the debug/release distinction, `spec/01` §7).
+#[derive(Debug, Clone)]
+pub struct Options {
+    /// Emit the Tier-1 bounds check on every runtime element read/store
+    /// (MARV-34). On by default (debug builds); release builds switch it off,
+    /// keeping their in-bounds codegen byte-identical to the pre-MARV-34
+    /// output. The abort is a wasm `unreachable` trap — a host-imported abort
+    /// would put an import in *pure* modules, breaking the "a pure module
+    /// imports nothing" sandbox manifest, so the trap carries no message.
+    pub bounds_checks: bool,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Options {
+            bounds_checks: true,
+        }
+    }
+}
+
 /// Compile a set of definitions to a WebAssembly module.
 ///
 /// Functions are keyed (and called) by `symbol_hash("<module>.<name>")` and
@@ -179,6 +199,17 @@ pub fn compile(
     module_path: &str,
     defs: &[(String, Def)],
     world: &World,
+) -> Result<WasmArtifact, WasmError> {
+    compile_with(module_path, defs, world, &Options::default())
+}
+
+/// [`compile`] with explicit [`Options`] — the entry release builds use to omit
+/// the Tier-1 bounds checks (MARV-34).
+pub fn compile_with(
+    module_path: &str,
+    defs: &[(String, Def)],
+    world: &World,
+    opts: &Options,
 ) -> Result<WasmArtifact, WasmError> {
     // ---- gather functions, in definition order --------------------------
     // Skip generic templates (signatures mentioning a `Type::Var`): they have no
@@ -258,7 +289,7 @@ pub fn compile(
 
     let mut code_sec = CodeSection::new();
     for (h, _, def) in &fns {
-        let func = compile_fn(*h, def, world, &metas, &fn_index, &import_index)?;
+        let func = compile_fn(*h, def, world, &metas, &fn_index, &import_index, opts)?;
         code_sec.function(&func);
     }
 
@@ -482,6 +513,7 @@ enum Slot {
     Tuple { tag: u32, fields: Vec<Slot> },
 }
 
+#[allow(clippy::too_many_arguments)]
 fn compile_fn(
     h: Hash,
     def: &Def,
@@ -489,6 +521,7 @@ fn compile_fn(
     metas: &HashMap<Hash, FnMeta>,
     fn_index: &HashMap<Hash, u32>,
     import_index: &HashMap<(String, u32), u32>,
+    opts: &Options,
 ) -> Result<Function, WasmError> {
     let meta = &metas[&h];
     let body = def
@@ -519,6 +552,7 @@ fn compile_fn(
         metas,
         fn_index,
         import_index,
+        bounds_checks: opts.bounds_checks,
         insts: Vec::new(),
         env,
         tys,
@@ -545,6 +579,9 @@ struct Trans<'a> {
     metas: &'a HashMap<Hash, FnMeta>,
     fn_index: &'a HashMap<Hash, u32>,
     import_index: &'a HashMap<(String, u32), u32>,
+    /// Whether to emit the Tier-1 bounds check on runtime element reads/stores
+    /// (MARV-34): on in debug builds, off in release.
+    bounds_checks: bool,
     insts: Vec<Instruction<'static>>,
     env: Vec<Slot>,
     tys: Vec<Option<Type>>,
@@ -914,6 +951,10 @@ impl Trans<'_> {
         let i = self.atom_to_word_local(index)?;
         let v = self.atom_to_word_local(value)?;
 
+        // Tier-1 bounds check (debug builds, MARV-34): trap unless the
+        // subscript falls inside `0..len`, before any allocation or copying.
+        self.emit_bounds_check(ptr, i);
+
         // The header word holds the element count; the block is `len + 1` words.
         let total = self.alloc_local();
         self.emit(Instruction::LocalGet(ptr));
@@ -1004,6 +1045,30 @@ impl Trans<'_> {
         self.emit(Instruction::I64Add);
         self.emit(Instruction::GlobalSet(BUMP));
         base
+    }
+
+    /// Emit the Tier-1 debug bounds check around a runtime element access
+    /// (`spec/01` §7, MARV-34), with the block pointer and the subscript in the
+    /// locals `ptr`/`i`: load the length from the header word and trap
+    /// (`unreachable`) unless `0 <= i < len`. One *unsigned* comparison covers
+    /// both ends (a negative `i64` is a huge `u64`). The trap carries no
+    /// message — an abort hook would be a host import, which would break the
+    /// "a pure module imports nothing" sandbox manifest. No-op when
+    /// `bounds_checks` is off (release builds), like the Cranelift twin —
+    /// though the `Index` call site still gates externally, because its
+    /// operand-stashing stack shuffle must be skipped along with the check.
+    fn emit_bounds_check(&mut self, ptr: u32, i: u32) {
+        if !self.bounds_checks {
+            return;
+        }
+        self.emit(Instruction::LocalGet(i));
+        self.emit(Instruction::LocalGet(ptr));
+        self.emit(Instruction::I32WrapI64);
+        self.emit(Instruction::I64Load(memarg(0))); // len (the header word)
+        self.emit(Instruction::I64GeU);
+        self.emit(Instruction::If(BlockType::Empty));
+        self.emit(Instruction::Unreachable);
+        self.emit(Instruction::End);
     }
 
     /// Project field `idx`. A compile-time tuple selects the field directly; a
@@ -1229,6 +1294,17 @@ impl Trans<'_> {
                 self.emit(Instruction::I64Load(memarg(0)));
             }
             Index => {
+                // Tier-1 bounds check (debug builds, MARV-34): stash the operands
+                // ([ptr, i] on the stack) into locals, trap unless `0 <= i < len`,
+                // then restore the stack for the address math below.
+                if self.bounds_checks {
+                    let li = self.alloc_local();
+                    let lp = self.alloc_local();
+                    self.emit(Instruction::LocalSet(li)); // pops i
+                    self.emit(Instruction::LocalTee(lp)); // ptr stays on the stack
+                    self.emit_bounds_check(lp, li);
+                    self.emit(Instruction::LocalGet(li)); // stack is [ptr, i] again
+                }
                 // addr = ptr + (i + 1) * SLOT, then load the element word. Stack on
                 // entry is [ptr, i]; fold it down to a single address.
                 self.emit(Instruction::I64Const(SLOT as i64));

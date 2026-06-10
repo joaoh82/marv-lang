@@ -113,6 +113,10 @@ there are errors.
 - **`[args...]`** — fill the entry's non-capability value parameters, in order
   (parsed at each parameter's type).
 
+`marv run` is the **debug runner**: Tier-1 checks (contracts and the runtime
+bounds check, MARV-34) always run. `--release` is a `build` flag; passing it to
+`run` prints a note and is otherwise ignored.
+
 The entry's result is printed to stdout; any capability effects it performed are
 logged to stderr as `effect: <cap> op#<n> [<args>]`.
 
@@ -126,7 +130,7 @@ marv run examples/hello.mv                              # refused: capability `I
 ## `marv build`
 
 ```
-marv build [--target T] [--run] [--out PATH] [--entry NAME] <file> [args...]
+marv build [--target T] [--run] [--release] [--out PATH] [--entry NAME] <file> [args...]
 ```
 
 Compiles with the selected backend. Like `run`, it first runs `check` and
@@ -137,6 +141,13 @@ capability absent from its effect row fails to build (`spec/03` §5).
   later milestone. Unknown targets are rejected.
 - **`--run`** *(native only)* — after compiling, JIT-executes the entry point and
   prints its integer result. Without it, `build` reports success and the arity.
+- **`--release`** — omit the Tier-1 debug checks from the compiled artifact.
+  Today that is the runtime **bounds check** (MARV-34): debug builds (the
+  default) abort on an array/slice subscript outside `0..len` — Cranelift with a
+  structured report on stderr, wasm with an `unreachable` trap — while release
+  builds emit the unchecked pre-MARV-34 code. The interpreter (`marv run`) is
+  the debug runner and always checks. See
+  [run-and-codegen.md](run-and-codegen.md).
 - **`--out PATH`** *(wasm only)* — where to write the `.wasm` module (default
   `<file>.wasm`).
 - **`--entry`** / **`[args...]`** — as for `run` (integer arguments).

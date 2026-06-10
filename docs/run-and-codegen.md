@@ -123,6 +123,33 @@ with a runtime loop, then overwrite the one element. The result is a new block (
 functional update; the source is untouched, `spec/01` §4). A fixed-length array
 coerces to a slice at no runtime cost (the layout is identical).
 
+### The Tier-1 bounds check (MARV-34)
+
+A runtime subscript outside `0..len` — an element read `a[i]`/`s[i]` or a slice
+element store `s[i] = e` — is a **Tier-1 contract violation** (`spec/01` §7) in
+debug builds, not a trap or an adjacent-memory access. The check is one unsigned
+comparison against the header word (`i (u64) < len` covers both ends, since a
+negative `i64` is a huge `u64`):
+
+- the **interpreter** aborts the run with a structured
+  `RunError::BoundsCheckFailed { index, len }` report, exactly like a violated
+  `requires`/`invariant`;
+- **Cranelift** branches to a host `marv_rt_bounds_fail(index, len)` hook that
+  prints the same report to stderr and aborts the process (an abort hook rather
+  than a bare trap, so the report can carry the offending values);
+- **WASM** emits an `unreachable` trap, which the embedding surfaces as a failed
+  call. The trap carries no message by design: an abort *hook* would be a host
+  import, and a pure module must keep importing nothing (the sandbox manifest).
+
+`marv build --release` omits the check from both codegen backends; release-mode
+in-bounds codegen is byte-identical to the pre-check output. The interpreter is
+the debug runner and always checks (as it does for contracts). One honest gap:
+a **fixed-length array** store `a[i] = e` with a runtime `i` is unrolled at
+lowering time into per-element selects, so an out-of-range `i` there silently
+leaves the array unchanged on all three backends — memory-safe by construction,
+but a no-op rather than an abort. Guarding it means changing the lowering (and
+every in-bounds program's Core hash), so it stays a follow-up.
+
 ## Capabilities are injected, never ambient
 
 `marv run --grant CAP,…` is the sandbox (`spec/03` §4.5). The entry point's
@@ -156,6 +183,15 @@ the results are equal to each other and to a hand-computed golden value:
 | `generics.mv`   | a monomorphized generic (`max[T: Ord]` matching on `Ordering`, specialized to `i64` and dispatched to `impl Ord[i64]`) — runnable on all three backends since the enum got a layout (MARV-9); closes the gap noted in MARV-5 — MARV-26 |
 | `arrays.mv`     | array literals + `len` + index read `a[i]` + index store `a[i] = e` (functional element update); a `len`-bounded `while` loop over an array — MARV-30 |
 | `slices.mv`     | runtime-length slices `[]T`: construct (array→slice), `len`/index, a `Core::IndexSet` element store over a runtime length, and `total` over a slice of structs (`sales[i].amount`) — MARV-33; `for x in s` over a slice and over a slice of structs, nested `for`s (depth-keyed index names), and sequential `for`s — MARV-20 |
+
+Both differential harnesses also carry an **out-of-bounds corpus** (MARV-34):
+slice reads at `len` and at `-1`, a slice store at `len`, and an array read at
+`len` must *abort* on every backend in debug mode — the interpreter with the
+structured `BoundsCheckFailed` report, Cranelift by aborting a child process
+with the report on stderr (the abort kills the process, so the harness re-spawns
+itself per case), and wasm with an `unreachable` trap under wasmtime. A
+release-mode case pins that `bounds_checks: false` leaves in-bounds results
+unchanged.
 
 The negative case is `uses_ungranted_cap.core.json`: a Core-IR snapshot whose
 `leak(fs: Fs, path: str)` body `perform`s `Fs` while declaring the empty
@@ -229,7 +265,9 @@ cd web && python3 -m http.server 8087   # then open http://localhost:8087/
   backend over the integer/boolean subset **plus heap-boxed aggregates and enums
   with field-binding `match`** (MARV-9) **plus fixed-length arrays with
   `len`/index/store** (MARV-30) **plus runtime-length slices `[]T` with
-  `len`/index and an allocate-copy-store element store** (MARV-33); `marv run`, `marv build --target
+  `len`/index and an allocate-copy-store element store** (MARV-33) **plus the
+  Tier-1 debug bounds check on runtime element reads/stores, with
+  `marv build --release` to omit it** (MARV-34); `marv run`, `marv build --target
   native-cranelift`, `marv build --target wasm-component`; the three-way
   differential gate (interpreter ↔ Cranelift ↔ wasm) and a browser sandbox demo.
 - **Next:** ahead-of-time object/executable emission and an LLVM backend for

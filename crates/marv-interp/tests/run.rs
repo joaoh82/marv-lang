@@ -132,6 +132,49 @@ fn violated_loop_invariant_aborts_with_a_structured_report() {
     }
 }
 
+#[test]
+fn out_of_bounds_slice_read_aborts_with_a_structured_report() {
+    // The Tier-1 bounds check (`spec/01` §7, MARV-34): a runtime subscript at
+    // `len` (and a negative one) aborts the run with the offending index and
+    // the collection's length; an in-bounds read is untouched.
+    let src =
+        "mod demo\n\npure fn nth(i: i64) -> i64 {\n    let s: []i64 = [5, 6, 7, 8]\n    s[i]\n}\n";
+    let prog = program_from_source(src);
+
+    let ok = prog.run("nth", &[], &["3".to_string()]).expect("in bounds");
+    assert_eq!(ok.value, Value::Int(8));
+
+    let err = prog
+        .run("nth", &[], &["4".to_string()])
+        .expect_err("index 4 is past the end of a 4-element slice");
+    assert_eq!(err, RunError::BoundsCheckFailed { index: 4, len: 4 });
+    assert_eq!(
+        err.to_string(),
+        "bounds check failed: index 4 out of range for length 4"
+    );
+
+    let err = prog
+        .run("nth", &[], &["-1".to_string()])
+        .expect_err("a negative index is out of bounds");
+    assert_eq!(err, RunError::BoundsCheckFailed { index: -1, len: 4 });
+}
+
+#[test]
+fn out_of_bounds_slice_store_aborts_with_a_structured_report() {
+    // The element store `s[i] = e` (`Core::IndexSet`) carries the same Tier-1
+    // check as the read: storing at `len` aborts before any element changes.
+    let src = "mod demo\n\npure fn set(i: i64) -> i64 {\n    var s: []i64 = [1, 2, 3]\n    s[i] = 10\n    s[0]\n}\n";
+    let prog = program_from_source(src);
+
+    let ok = prog.run("set", &[], &["0".to_string()]).expect("in bounds");
+    assert_eq!(ok.value, Value::Int(10));
+
+    let err = prog
+        .run("set", &[], &["3".to_string()])
+        .expect_err("index 3 is past the end of a 3-element slice");
+    assert_eq!(err, RunError::BoundsCheckFailed { index: 3, len: 3 });
+}
+
 /// A `touch(fs: Fs)` whose body performs `Fs` op 0. Hand-built because the
 /// surface has no `perform` form yet.
 fn touch_program() -> Program {

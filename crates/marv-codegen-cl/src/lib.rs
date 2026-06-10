@@ -83,6 +83,34 @@ extern "C" fn marv_rt_alloc(n_words: i64) -> i64 {
     ptr
 }
 
+/// The host abort hook a failed Tier-1 bounds check calls in debug builds
+/// (`spec/01` §7, MARV-34): print the structured violation report — the same
+/// shape as the interpreter's `RunError::BoundsCheckFailed` — and abort the
+/// process. Aborting (rather than trapping in JIT code) is what lets the report
+/// carry the offending index and length; the `trap` emitted after this call is
+/// only a block terminator and is never reached.
+extern "C" fn marv_rt_bounds_fail(index: i64, len: i64) {
+    eprintln!("marv: bounds check failed: index {index} out of range for length {len} (Tier 1)");
+    std::process::abort();
+}
+
+/// Codegen options (the debug/release distinction, `spec/01` §7).
+#[derive(Debug, Clone)]
+pub struct Options {
+    /// Emit the Tier-1 bounds check on every runtime element read/store
+    /// (MARV-34). On by default (debug builds); release builds switch it off,
+    /// keeping their in-bounds codegen byte-identical to the pre-MARV-34 output.
+    pub bounds_checks: bool,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Options {
+            bounds_checks: true,
+        }
+    }
+}
+
 /// A backend failure. Like the interpreter's `RunError`, these are conditions
 /// the *codegen* cannot handle — never type errors (the M2 checker has already
 /// run).
@@ -171,6 +199,17 @@ pub fn compile(
     defs: &[(String, Def)],
     world: &World,
 ) -> Result<JitProgram, CodegenError> {
+    compile_with(module_path, defs, world, &Options::default())
+}
+
+/// [`compile`] with explicit [`Options`] — the entry release builds use to omit
+/// the Tier-1 bounds checks (MARV-34).
+pub fn compile_with(
+    module_path: &str,
+    defs: &[(String, Def)],
+    world: &World,
+    opts: &Options,
+) -> Result<JitProgram, CodegenError> {
     let mut module = make_module()?;
 
     // The host allocator is an import every boxing site can call.
@@ -178,6 +217,13 @@ pub fn compile(
     alloc_sig.params.push(AbiParam::new(WORD));
     alloc_sig.returns.push(AbiParam::new(WORD));
     let alloc_id = module.declare_function("marv_rt_alloc", Linkage::Import, &alloc_sig)?;
+
+    // The host abort hook a failed Tier-1 bounds check calls (debug builds).
+    let mut bounds_sig = module.make_signature();
+    bounds_sig.params.push(AbiParam::new(WORD));
+    bounds_sig.params.push(AbiParam::new(WORD));
+    let bounds_fail_id =
+        module.declare_function("marv_rt_bounds_fail", Linkage::Import, &bounds_sig)?;
 
     // Pass 1: declare every function (signature only) so that bodies compiled in
     // pass 2 can reference any callee — including not-yet-compiled and recursive
@@ -234,6 +280,8 @@ pub fn compile(
             &metas,
             world,
             alloc_id,
+            bounds_fail_id,
+            opts,
             &mut ctx,
             &mut fb_ctx,
             *h,
@@ -345,6 +393,7 @@ fn make_module() -> Result<JITModule, CodegenError> {
         .map_err(|e| CodegenError::Backend(e.to_string()))?;
     let mut builder = JITBuilder::with_isa(isa, default_libcall_names());
     builder.symbol("marv_rt_alloc", marv_rt_alloc as *const u8);
+    builder.symbol("marv_rt_bounds_fail", marv_rt_bounds_fail as *const u8);
     Ok(JITModule::new(builder))
 }
 
@@ -355,6 +404,8 @@ fn compile_fn(
     metas: &HashMap<Hash, FnMeta>,
     world: &World,
     alloc_id: FuncId,
+    bounds_fail_id: FuncId,
+    opts: &Options,
     ctx: &mut cranelift::codegen::Context,
     fb_ctx: &mut FunctionBuilderContext,
     h: Hash,
@@ -407,6 +458,9 @@ fn compile_fn(
                 world,
                 alloc_id,
                 alloc_ref: None,
+                bounds_fail_id,
+                bounds_fail_ref: None,
+                bounds_checks: opts.bounds_checks,
                 builder: &mut builder,
                 env,
                 tys,
@@ -454,6 +508,12 @@ struct Trans<'a, 'b> {
     /// The allocator's func-ref in the current function, declared lazily on the
     /// first boxing site.
     alloc_ref: Option<cranelift::codegen::ir::FuncRef>,
+    bounds_fail_id: FuncId,
+    /// The bounds-abort hook's func-ref, declared lazily on the first check site.
+    bounds_fail_ref: Option<cranelift::codegen::ir::FuncRef>,
+    /// Whether to emit the Tier-1 bounds check on runtime element reads/stores
+    /// (MARV-34): on in debug builds, off in release.
+    bounds_checks: bool,
     builder: &'a mut FunctionBuilder<'b>,
     /// Environment indexed by de Bruijn *level* (`env[0]` = outermost binder).
     env: Vec<Slot>,
@@ -814,6 +874,10 @@ impl Trans<'_, '_> {
         let v = self.eval_atom(value)?;
         let v = self.as_word(v)?;
 
+        // Tier-1 bounds check (debug builds, MARV-34): abort unless the
+        // subscript falls inside `0..len`, before any allocation or copying.
+        self.emit_bounds_check(ptr, i);
+
         // The header word holds the element count; the block is `len + 1` words.
         let len = self.builder.ins().load(WORD, MemFlags::trusted(), ptr, 0);
         let total = self.builder.ins().iadd_imm(len, 1);
@@ -958,6 +1022,9 @@ impl Trans<'_, '_> {
             // `i` at word `i + 1`.
             Len => self.builder.ins().load(WORD, MemFlags::trusted(), v(0), 0),
             Index => {
+                // Tier-1 bounds check (debug builds, MARV-34): abort unless the
+                // subscript falls inside `0..len` (the header word).
+                self.emit_bounds_check(v(0), v(1));
                 // addr = base + (i + 1) * SLOT, then load the element word.
                 let plus1 = self.builder.ins().iadd_imm(v(1), 1);
                 let off = self.builder.ins().imul_imm(plus1, SLOT as i64);
@@ -1206,6 +1273,45 @@ impl Trans<'_, '_> {
         };
         let call = self.builder.ins().call(aref, &[n_words]);
         self.builder.inst_results(call)[0]
+    }
+
+    /// Emit the Tier-1 debug bounds check around a runtime element access
+    /// (`spec/01` §7, MARV-34): load the length from the boxed block's header
+    /// word and branch to an abort unless `0 <= i < len`. One *unsigned*
+    /// comparison covers both ends (a negative `i64` is a huge `u64`). The
+    /// abort path calls the host hook, which prints the structured report and
+    /// aborts the process — the `trap` after it is only a block terminator.
+    /// No-op when `bounds_checks` is off (release builds).
+    fn emit_bounds_check(&mut self, ptr: Value, i: Value) {
+        if !self.bounds_checks {
+            return;
+        }
+        let len = self.builder.ins().load(WORD, MemFlags::trusted(), ptr, 0);
+        let oob = self
+            .builder
+            .ins()
+            .icmp(IntCC::UnsignedGreaterThanOrEqual, i, len);
+        let fail = self.builder.create_block();
+        let cont = self.builder.create_block();
+        self.builder.ins().brif(oob, fail, &[], cont, &[]);
+
+        self.builder.switch_to_block(fail);
+        self.builder.seal_block(fail);
+        let bref = match self.bounds_fail_ref {
+            Some(r) => r,
+            None => {
+                let r = self
+                    .module
+                    .declare_func_in_func(self.bounds_fail_id, self.builder.func);
+                self.bounds_fail_ref = Some(r);
+                r
+            }
+        };
+        self.builder.ins().call(bref, &[i, len]);
+        self.builder.ins().trap(TrapCode::unwrap_user(2));
+
+        self.builder.switch_to_block(cont);
+        self.builder.seal_block(cont);
     }
 }
 
