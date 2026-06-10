@@ -54,12 +54,55 @@ FAILED   math.clamp  — postcondition `(result >= lo and result <= hi)` can be 
 
 The agent now has a failing input and the offending clause to iterate against.
 
+## Loops: proving `invariant`s (MARV-22)
+
+A `while` loop is discharged with the standard Hoare-style verification
+conditions over its `invariant` (the conjunction of its `invariant` clauses):
+
+1. **Initiation** — under the `requires` (and the `if` branches guarding the
+   loop), the invariant holds on the initial values of the loop-carried `var`s.
+2. **Consecution** — for an *arbitrary* carried state satisfying the invariant
+   and the loop condition, one pass through the body re-establishes the
+   invariant on the next values (a body whose tail is an `if`/`else` joins
+   branchwise, mirroring MARV-21).
+3. **Use** — after the loop, exactly `invariant ∧ ¬cond` is known about the
+   final carried values; the `ensures` are then discharged from that.
+
+A failed initiation or consecution reports `failed` with a counterexample, e.g.:
+
+```sh
+$ marv verify wrong.mv
+FAILED   wrong.bad_preserve  — loop invariant `s0 <= 0` is not preserved by the loop body
+    obligation: s0 <= 0
+    counterexample: { n = 1, s0 = 0, s0' = 1 }
+```
+
+Core erases names, so carried slots are labeled positionally (`s0`, `s1`, … in
+the order the loop carries them; primed values are post-iteration). Two honest
+caveats:
+
+- **The invariant is all the prover keeps.** An invariant that holds but is too
+  weak to imply an `ensures` yields a counterexample for that postcondition —
+  e.g. `sum_to` with only `invariant (i >= 0)` cannot prove
+  `ensures (result >= 0)`; adding `invariant (sum >= 0)` makes it prove (see
+  [`examples/loops.mv`](../examples/loops.mv)). Such a counterexample is
+  relative to the invariant abstraction: it picks an exit state the invariant
+  *allows*, which a real execution may never reach. Strengthening the invariant
+  is the fix either way.
+- **Proofs are partial correctness.** Tier 2 does not prove termination; a loop
+  that never exits satisfies its `ensures` vacuously.
+
+A loop *without* an invariant still verifies soundly — nothing beyond `¬cond` is
+assumed about its exit state. And a loop `invariant` is an obligation in its own
+right: a function with an invariant but no `requires`/`ensures` is still checked
+(and reported) by `marv verify`.
+
 ## The verified subset (and honest boundaries)
 
 Tier 2 currently covers: **pure** functions; parameters/result of integer or
 boolean type; bodies of arithmetic (`+ - *`), comparisons, boolean `and`/`or`/
-`not`, `let`, and `if`/`else`; contracts built from those comparisons and
-`and`/`or`/`not`.
+`not`, `let`, `if`/`else`, and `while` loops (with or without `invariant`s);
+contracts built from those comparisons and `and`/`or`/`not`.
 
 Outside that subset, `verify` returns `unsupported` with a reason and the
 **fallback** to Tier-1 runtime checks — it never guesses. Notable current
@@ -67,8 +110,8 @@ exclusions (each a deliberate `unsupported`, not an unsound `proved`):
 
 - **Integer `/` and `%`** — marv truncates toward zero while SMT `div`/`mod` are
   Euclidean; rather than emit an unsound encoding, division is out-of-subset.
-- **Function calls, aggregates/ADTs, loops, bounded quantifiers, floats** —
-  future subset extensions.
+- **Function calls, aggregates/ADTs, bounded quantifiers, `old(e)`, floats** —
+  future subset extensions (the rest of MARV-11).
 - **No `z3` on `PATH`** — reported as `unsupported` (solver unavailable), same
   fallback.
 
@@ -91,3 +134,8 @@ convention (distinct from the body's de Bruijn spine): `Var(k)` is the k-th
 parameter and `Var(n)` (n = arity) is `result`. Lowering
 (`marv_core::lower`), the Tier-1 interpreter, and the Tier-2 verifier all share
 it, and `marv_core::render_pred` turns a predicate back into readable text.
+
+Loop-invariant atoms are the exception: they are de Bruijn *indices* into the
+loop-header environment (parameters, enclosing `let`s, then the carried slots
+innermost), the same convention the Tier-1 interpreter evaluates — which is why
+their carried slots render positionally (`s0`, `s1`, …) rather than by name.

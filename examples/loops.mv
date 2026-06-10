@@ -8,6 +8,7 @@ pure fn sum_to(n: i64) -> i64
     var i: i64 = n
     while (i > 0)
         invariant (i >= 0)
+        invariant (sum >= 0)
     {
         sum = (sum + i)
         i = (i - 1)

@@ -212,13 +212,15 @@ ambiguity.
 marv verify [--def NAME] <file>
 ```
 
-Discharges each function's `requires`/`ensures` contracts with the SMT backend
-(Tier 2, `marv-verify`) and prints one of `proved` / `failed` (with a concrete
-counterexample) / `unsupported` per function (`spec/03` §3.3, §4.3). `--def`
-restricts to one definition. Exits non-zero only when a contract is provably
-**violated** (a `failed`); `unsupported` is success (the honest fallback to
-Tier-1 runtime checks). Requires a `z3` binary on `PATH`; without one, every
-function reports `unsupported` and falls back to runtime checking.
+Discharges each function's `requires`/`ensures` contracts — and every `while`
+loop's `invariant`s (MARV-22) — with the SMT backend (Tier 2, `marv-verify`) and
+prints one of `proved` / `failed` (with a concrete counterexample) /
+`unsupported` per function (`spec/03` §3.3, §4.3). A function whose only
+contract is a loop `invariant` is reported too. `--def` restricts to one
+definition. Exits non-zero only when a contract is provably **violated** (a
+`failed`); `unsupported` is success (the honest fallback to Tier-1 runtime
+checks). Requires a `z3` binary on `PATH`; without one, every function reports
+`unsupported` and falls back to runtime checking.
 
 ```sh
 marv verify examples/clamp.mv
