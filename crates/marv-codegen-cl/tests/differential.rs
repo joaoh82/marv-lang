@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use marv_core::ir::Def;
 use marv_core::lower_module;
 use marv_db::CoreModuleSpec;
-use marv_interp::{Program, Value};
+use marv_interp::{Program, RunError, Value};
 use marv_types::{check_def, Code, Severity, World};
 
 /// Absolute path to a file in the repository-level `tests/run/` corpus.
@@ -258,6 +258,104 @@ fn interpreter_and_cranelift_agree() {
             interp, expected,
             "{file}:{entry}({args:?}) produced {interp}, expected {expected}"
         );
+    }
+}
+
+/// The out-of-bounds corpus (MARV-34): `(file, entry, args)` whose runtime
+/// subscript falls outside `0..len`. Debug builds must *abort* on every backend
+/// — never read or write the adjacent memory. The wasm half is asserted by the
+/// twin corpus in `marv-codegen-wasm/tests/differential.rs`.
+fn oob_cases() -> Vec<(&'static str, &'static str, Vec<i64>)> {
+    vec![
+        // slice read at `len` and at a negative subscript.
+        ("slices.mv", "nth", vec![4]),
+        ("slices.mv", "nth", vec![-1]),
+        // slice element store (`Core::IndexSet`) at `len`.
+        ("slices.mv", "set_sum", vec![3]),
+        // fixed-length array read at `len` (the same `Prim::Index` path).
+        ("arrays.mv", "nth", vec![4]),
+    ]
+}
+
+/// The interpreter (the oracle) reports every out-of-bounds case as a
+/// structured Tier-1 violation carrying the index and the length.
+#[test]
+fn out_of_bounds_aborts_in_the_interpreter() {
+    for (file, entry, args) in oob_cases() {
+        let (module_path, defs, world) = load_source(file);
+        let arg_strs: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+        let program = Program::new(&module_path, defs, world);
+        let err = program
+            .run(entry, &[], &arg_strs)
+            .expect_err("an out-of-bounds subscript must abort the run");
+        assert!(
+            matches!(err, RunError::BoundsCheckFailed { .. }),
+            "{file}:{entry}({args:?}): expected a Tier-1 bounds violation, got {err:?}"
+        );
+    }
+}
+
+/// Under Cranelift, a failed bounds check calls the host abort hook, which
+/// prints the structured Tier-1 report and aborts the *process* — so each case
+/// runs in a child process (this test re-executes itself per case) and the
+/// parent asserts the abort and the report.
+#[test]
+fn out_of_bounds_aborts_under_cranelift() {
+    if let Ok(idx) = std::env::var("MARV_CL_OOB_CASE") {
+        // Child mode: run one case; the bounds-fail hook must abort before the
+        // return below. Exiting 0 tells the parent no abort happened.
+        let idx: usize = idx.parse().expect("case index");
+        let (file, entry, args) = oob_cases().swap_remove(idx);
+        let (module_path, defs, world) = load_source(file);
+        let jit = marv_codegen_cl::compile(&module_path, &defs, &world)
+            .unwrap_or_else(|e| panic!("cranelift compile: {e}"));
+        let _ = jit.run_i64(entry, &args);
+        std::process::exit(0);
+    }
+
+    let exe = std::env::current_exe().expect("test executable path");
+    for (idx, (file, entry, args)) in oob_cases().iter().enumerate() {
+        let out = std::process::Command::new(&exe)
+            .args([
+                "out_of_bounds_aborts_under_cranelift",
+                "--exact",
+                "--nocapture",
+            ])
+            .env("MARV_CL_OOB_CASE", idx.to_string())
+            .output()
+            .expect("spawn the child case");
+        assert!(
+            !out.status.success(),
+            "{file}:{entry}({args:?}): the child ran to completion instead of aborting"
+        );
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("bounds check failed"),
+            "{file}:{entry}({args:?}): no structured report on stderr; got: {stderr}"
+        );
+    }
+}
+
+/// Release mode (`Options { bounds_checks: false }`) omits the check: the
+/// in-bounds codegen and results are unchanged. (Out-of-bounds behavior in
+/// release is undefined-by-design — trap or adjacent read — and is not pinned.)
+#[test]
+fn release_mode_in_bounds_results_are_unchanged() {
+    let opts = marv_codegen_cl::Options {
+        bounds_checks: false,
+    };
+    for (file, entry, args, expected) in [
+        ("slices.mv", "nth", vec![3], 8),
+        ("slices.mv", "set_sum", vec![1], 14),
+        ("arrays.mv", "sum_all", vec![], 15),
+    ] {
+        let (module_path, defs, world) = load_source(file);
+        let jit = marv_codegen_cl::compile_with(&module_path, &defs, &world, &opts)
+            .unwrap_or_else(|e| panic!("cranelift compile (release): {e}"));
+        let got = jit
+            .run_i64(entry, &args)
+            .unwrap_or_else(|e| panic!("cranelift run {entry}: {e}"));
+        assert_eq!(got, expected, "{file}:{entry}({args:?}) in release mode");
     }
 }
 

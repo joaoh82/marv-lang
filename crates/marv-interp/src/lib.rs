@@ -100,6 +100,10 @@ pub enum RunError {
     /// not hold when the loop condition was about to be tested. Carries the
     /// rendered clause with the offending concrete values substituted.
     InvariantViolated(String),
+    /// A runtime array/slice subscript fell outside `0..len` (Tier 1, `spec/01`
+    /// §7, MARV-34) — on an element read `a[i]` or a slice element store
+    /// `s[i] = e`. Carries the offending index and the collection's length.
+    BoundsCheckFailed { index: i64, len: i64 },
 }
 
 /// Which contract a Tier-1 failure came from, for the error variant/message.
@@ -129,6 +133,10 @@ impl std::fmt::Display for RunError {
             RunError::PreconditionFailed(p) => write!(f, "precondition violated: requires {p}"),
             RunError::PostconditionFailed(p) => write!(f, "postcondition violated: ensures {p}"),
             RunError::InvariantViolated(p) => write!(f, "loop invariant violated: {p}"),
+            RunError::BoundsCheckFailed { index, len } => write!(
+                f,
+                "bounds check failed: index {index} out of range for length {len}"
+            ),
         }
     }
 }
@@ -453,16 +461,19 @@ impl Program {
                 let v = self.eval_atom(value, env)?;
                 match base {
                     Value::Agg { tag, mut fields } => {
+                        // Tier-1 bounds check (`spec/01` §7, MARV-34): the
+                        // subscript must fall inside `0..len`, else the run
+                        // aborts with a structured report.
                         let idx = usize::try_from(i).ok().filter(|&i| i < fields.len());
                         match idx {
                             Some(i) => {
                                 fields[i] = v;
                                 Ok(Value::Agg { tag, fields })
                             }
-                            None => Err(RunError::Unsupported(format!(
-                                "element store index {i} out of bounds (len {})",
-                                fields.len()
-                            ))),
+                            None => Err(RunError::BoundsCheckFailed {
+                                index: i,
+                                len: fields.len() as i64,
+                            }),
                         }
                     }
                     other => Err(RunError::Unsupported(format!(
@@ -805,7 +816,8 @@ fn lit_value(l: &Literal) -> Value {
 
 /// Evaluate a total primitive over already-evaluated atomic operands
 /// (`spec/02` §C `Prim`). The M2 checker has already type-checked the operands,
-/// so the only residual dynamic failure is division by zero.
+/// so the residual dynamic failures are division by zero and an out-of-range
+/// runtime subscript (the Tier-1 bounds check, MARV-34).
 fn eval_prim(op: PrimOp, args: &[Value]) -> Result<Value, RunError> {
     use PrimOp::*;
     let int = |v: &Value| match v {
@@ -894,10 +906,16 @@ fn eval_prim(op: PrimOp, args: &[Value]) -> Result<Value, RunError> {
             _ => Err(RunError::Unsupported("len of non-collection".into())),
         },
         Index => match (a, b) {
-            (Some(Value::Agg { fields, .. }), Some(Value::Int(i))) => fields
-                .get(*i as usize)
-                .cloned()
-                .ok_or_else(|| RunError::Unsupported("index out of range".into())),
+            // Tier-1 bounds check (`spec/01` §7, MARV-34): a subscript outside
+            // `0..len` aborts the run with a structured report (the negative
+            // case folds in because `i as usize` wraps far past any length).
+            (Some(Value::Agg { fields, .. }), Some(Value::Int(i))) => usize::try_from(*i)
+                .ok()
+                .and_then(|idx| fields.get(idx).cloned())
+                .ok_or(RunError::BoundsCheckFailed {
+                    index: *i,
+                    len: fields.len() as i64,
+                }),
             _ => Err(RunError::Unsupported("index of non-collection".into())),
         },
     }
