@@ -15,6 +15,13 @@
 //! incrementality (one tracked struct per def) is a later refinement — today the
 //! grain is the file, which already gives the milestone's "edit one file,
 //! recompute only it" property.
+//!
+//! Lowering here is strictly **single-file** (`lower_module`): a file that
+//! constructs or matches an enum imported from another module surfaces the
+//! explicit `UnresolvedImportedEnum` lower error (MARV-18) rather than a wrong
+//! lowering — resolving a snapshot's module *set* through these queries is
+//! store work (MARV-14). The CLI's `check`/`run` path does resolve `import
+//! std.*` to source and lowers the set together (`marv_cli::pipeline`).
 
 use std::collections::HashMap;
 

@@ -110,3 +110,97 @@ pure fn is_red(c: Color) -> bool {
         "`_` arm should satisfy exhaustiveness: {errs:?}"
     );
 }
+
+#[test]
+fn generic_enum_ctor_satisfies_declared_generic_return() {
+    // A `Ctor` result carries no type arguments (`Nominal { args: [] }` — the
+    // names-erased Core records only the nominal hash and tag), so it must
+    // satisfy a declared parameterized return of the *same* enum, both at a
+    // concrete instantiation (`Box[i64]`) and inside a generic body
+    // (`Box[T]`). This is what `std/result.mv`'s `ok` relies on (MARV-18).
+    let src = "\
+mod demo
+
+enum Box[T] {
+    Empty,
+    Full(T),
+}
+
+pure fn fill[T](x: T) -> Box[T] {
+    Box.Full(x)
+}
+
+pure fn empty_i64() -> Box[i64] {
+    Box.Empty
+}
+";
+    let errs: Vec<_> = diagnostics(src)
+        .into_iter()
+        .filter(|(_, d)| d.severity == Severity::Error)
+        .collect();
+    assert!(errs.is_empty(), "expected a clean check, got: {errs:?}");
+}
+
+#[test]
+fn ctor_of_a_different_enum_still_mismatches_generic_return() {
+    // The unparameterized-Ctor compatibility is per-nominal: constructing some
+    // *other* enum where `Box[i64]` is declared still fails E0101.
+    let src = "\
+mod demo
+
+enum Box[T] {
+    Empty,
+    Full(T),
+}
+
+enum Hue {
+    A,
+    B,
+}
+
+pure fn wrong() -> Box[i64] {
+    Hue.A
+}
+";
+    let errs: Vec<_> = diagnostics(src)
+        .into_iter()
+        .filter(|(_, d)| d.code == Code::TypeMismatch)
+        .collect();
+    assert!(
+        !errs.is_empty(),
+        "constructing a different enum must still be a type error"
+    );
+}
+
+#[test]
+fn concrete_use_of_generic_enum_checks_clean() {
+    // A *non-generic* function constructing and matching a generic enum at a
+    // concrete instantiation: the declaration's field types are unresolved
+    // parameters (`T`), so the constructed field (`i64`) and the arm-bound
+    // payload check against a wildcard, not a mismatch (MARV-18 — the
+    // `examples/optionals.mv` shape).
+    let src = "\
+mod demo
+
+enum Box[T] {
+    Empty,
+    Full(T),
+}
+
+pure fn wrap(n: i64) -> Box[i64] {
+    Box.Full(n)
+}
+
+pure fn or_zero(b: Box[i64]) -> i64 {
+    match b {
+        Box.Empty => 0,
+        Box.Full(x) => x,
+    }
+}
+";
+    let errs: Vec<_> = diagnostics(src)
+        .into_iter()
+        .filter(|(_, d)| d.severity == Severity::Error)
+        .collect();
+    assert!(errs.is_empty(), "expected a clean check, got: {errs:?}");
+}

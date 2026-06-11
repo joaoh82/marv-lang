@@ -1,0 +1,24 @@
+mod optionals
+import std.option (Option)
+
+/// `n` itself when it is positive, `Option.None` otherwise — absence is a
+/// value (`spec/01` §6); there is no null.
+pure fn positive(n: i64) -> Option[i64] {
+    if (n > 0) {
+        Option.Some(n)
+    } else {
+        Option.None
+    }
+}
+
+/// Unwrap with a fallback, by exhaustive `match` over the imported enum.
+pure fn or_zero(opt: Option[i64]) -> i64 {
+    match opt {
+        Option.None => 0,
+        Option.Some(x) => x,
+    }
+}
+
+pure fn main() -> i64 {
+    or_zero(positive(42))
+}

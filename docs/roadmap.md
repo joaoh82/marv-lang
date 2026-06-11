@@ -114,6 +114,18 @@ cross-module linking is MARV-14). `std/capabilities.mv` parses/checks; `examples
 rows, and run under `marv run --grant Io`. Cranelift n/a (rejects `Perform`); WASM lowers a
 `perform` to a host import but capability *narrowing* on WASM, and `linear` capabilities (a `Conn`
 that must be `close`d), are follow-ups.
+· **MARV-18** single-file lowering of imported enum constructors / matches: the CLI's
+`import std.*` resolution (MARV-6) now serves enums too — `marv check std/result.mv` standalone
+lowers the `Option.Some(x)`/`Option.None` it builds to real `Ctor`s with the `std.option.Option`
+nominal and declaration-order tags, and checks clean. The checker learned the two compatibility
+rules this needs: a `Ctor` result (which carries no type arguments) satisfies a declared generic
+reference of the same nominal, and an unresolved type parameter (`T` in a generic enum's field, at
+a concrete construction/match site) compares as a wildcard — monomorphized instances still check
+at concrete types. An imported enum whose source can't be resolved (missing `std` module, or a
+non-`std` import — general linking is MARV-14) is now the explicit `UnresolvedImportedEnum` lower
+error instead of a misleading projection error or a silently wrong method-call desugar.
+`examples/optionals.mv` shows the user-code shape and runs. The salsa/protocol path
+(`marv-db`) still analyzes one file at a time — snapshot-level module sets land with MARV-14.
 
 Done (Phase 2 · Backends): **MARV-9** aggregate/enum codegen across interp + Cranelift + WASM
 (`spec/02` §C). Both native backends gained a **real runtime representation** for aggregates: every

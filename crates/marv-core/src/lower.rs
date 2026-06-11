@@ -72,6 +72,13 @@ pub enum LowerError {
     MixedEnumPatterns { expected: String, found: String },
     /// A constructor pattern naming a variant no in-scope enum declares.
     UnknownConstructor { name: String },
+    /// A constructor or `match` pattern heads on an *imported* name whose
+    /// defining module is not part of the lowered set, so its variants/tags are
+    /// unknown. Single-file lowering resolves an imported enum only when its
+    /// module is lowered alongside (the CLI's `std` discovery, or
+    /// [`lower_modules`]); anything else must fail loudly rather than fall
+    /// through to a misleading projection error or a silently-wrong call.
+    UnresolvedImportedEnum { name: String, module: String },
     /// A struct literal `Name { .. }` whose `Name` is not an in-module struct.
     UnknownStruct { name: String },
     /// A struct literal that omits a field the struct declares.
@@ -136,6 +143,13 @@ impl std::fmt::Display for LowerError {
             LowerError::UnknownConstructor { name } => {
                 write!(f, "no enum in scope declares a constructor `{name}`")
             }
+            LowerError::UnresolvedImportedEnum { name, module } => write!(
+                f,
+                "cannot resolve `{name}`: it is imported from `{module}`, but that module's \
+                 source was not lowered with this one (an imported enum's constructors resolve \
+                 only when its module is in the lowered set — for a `std` import, make the \
+                 `std/` directory discoverable or set `MARV_STD`)"
+            ),
             LowerError::UnknownStruct { name } => {
                 write!(f, "no struct `{name}` is declared in this module")
             }
@@ -292,7 +306,10 @@ pub struct TypeArg {
 /// module. To lower a module that constructs or matches an enum imported from
 /// another file (e.g. `std/result.mv` using `Option`), lower them together with
 /// [`lower_modules`], which shares one constructor/interface/impl registry across
-/// the set.
+/// the set — this is what the CLI does after resolving a file's `import std.*`
+/// statements to their source modules. A constructor or `match` pattern that
+/// heads on an imported name the registry does not know fails with the explicit
+/// [`LowerError::UnresolvedImportedEnum`] (never a silently wrong lowering).
 pub fn lower_module(m: &Module) -> Result<LoweredModule, LowerError> {
     Ok(lower_modules(std::slice::from_ref(m))?
         .into_iter()
@@ -700,6 +717,11 @@ struct Lowerer {
     /// Names declared at module scope (structs + fns), used to module-qualify
     /// references so a free name resolves to a stable, module-scoped symbol.
     local_items: HashSet<String>,
+    /// Imported item names → the dotted module path each was imported from
+    /// (`import std.option (Option)` maps `Option` → `std.option`). Used to turn
+    /// a constructor/pattern reference to an imported enum the registry does
+    /// *not* know into a clear [`LowerError::UnresolvedImportedEnum`].
+    imports: HashMap<String, String>,
     /// Struct declarations by source name, for projection-index resolution.
     structs: HashMap<String, Vec<Field>>,
     /// In-module function return types, for best-effort projection typing.
@@ -727,6 +749,13 @@ impl Lowerer {
         subst: HashMap<String, SType>,
         spec: Option<SpecCtx>,
     ) -> Self {
+        let mut imports = HashMap::new();
+        for imp in &m.imports {
+            let module = imp.path.join(".");
+            for n in imp.names.iter().flatten() {
+                imports.insert(n.clone(), module.clone());
+            }
+        }
         let mut local_items = HashSet::new();
         let mut structs = HashMap::new();
         let mut fn_rets = HashMap::new();
@@ -746,6 +775,7 @@ impl Lowerer {
         Lowerer {
             module_path: m.name.join("."),
             local_items,
+            imports,
             structs,
             fn_rets,
             reg,
@@ -1415,11 +1445,7 @@ impl Lowerer {
                     }
                 }
                 Pattern::Ctor { path, fields } => {
-                    let key = path.join(".");
-                    let cref = self
-                        .reg
-                        .ctor(&key)
-                        .ok_or_else(|| LowerError::UnknownConstructor { name: key.clone() })?;
+                    let cref = self.pattern_ctor(path)?;
                     if cref.enum_qual != enum_qual {
                         return Err(LowerError::MixedEnumPatterns {
                             expected: enum_qual.clone(),
@@ -1482,11 +1508,7 @@ impl Lowerer {
     fn match_enum(&self, m: &MatchExpr) -> Result<String, LowerError> {
         for arm in &m.arms {
             if let Pattern::Ctor { path, .. } = &arm.pat {
-                let key = path.join(".");
-                let cref = self
-                    .reg
-                    .ctor(&key)
-                    .ok_or_else(|| LowerError::UnknownConstructor { name: key.clone() })?;
+                let cref = self.pattern_ctor(path)?;
                 return Ok(cref.enum_qual.clone());
             }
         }
@@ -1568,6 +1590,7 @@ impl Lowerer {
                 if let Some(c) = self.field_nullary_ctor(base, field, env) {
                     return Ok(b.push(ctor_node(&c, Vec::new())));
                 }
+                self.check_import_base(base, env)?;
                 let ab = self.emit_atom(base, env, b)?;
                 let idx = self.resolve_proj(base, field, env)?;
                 Ok(b.push(Core::Proj { base: ab, idx }))
@@ -1595,6 +1618,9 @@ impl Lowerer {
                 if let Some(c) = self.callee_ctor(callee, env) {
                     let node = self.emit_ctor(&c, args, env, b)?;
                     return Ok(b.push(node));
+                }
+                if let Expr::Field(base, _) = &**callee {
+                    self.check_import_base(base, env)?;
                 }
                 if let Some(node) = self.perform_call(callee, args, env, b)? {
                     return Ok(b.push(node));
@@ -1719,6 +1745,7 @@ impl Lowerer {
                 if let Some(c) = self.field_nullary_ctor(base, field, env) {
                     return Ok(ctor_node(&c, Vec::new()));
                 }
+                self.check_import_base(base, env)?;
                 let ab = self.emit_atom(base, env, b)?;
                 let idx = self.resolve_proj(base, field, env)?;
                 Ok(Core::Proj { base: ab, idx })
@@ -1729,6 +1756,9 @@ impl Lowerer {
                 }
                 if let Some(c) = self.callee_ctor(callee, env) {
                     return self.emit_ctor(&c, args, env, b);
+                }
+                if let Expr::Field(base, _) = &**callee {
+                    self.check_import_base(base, env)?;
                 }
                 if let Some(node) = self.perform_call(callee, args, env, b)? {
                     return Ok(node);
@@ -1754,6 +1784,55 @@ impl Lowerer {
     /// shadows the name (checked by the caller) and the variant has no payload.
     fn nullary_ctor(&self, name: &str) -> Option<CtorRef> {
         self.reg.ctor(name).filter(|c| c.arity == 0).cloned()
+    }
+
+    /// The clear error for `name` heading a constructor reference when `name`
+    /// is an *import* the enum registry does not know: its defining module is
+    /// not in the lowered set, so its variants cannot resolve. `None` when
+    /// `name` is not an import or the registry knows it (resolution proceeds
+    /// normally).
+    fn unresolved_import(&self, name: &str) -> Option<LowerError> {
+        if self.reg.enum_qualified(name).is_some() {
+            return None;
+        }
+        self.imports
+            .get(name)
+            .map(|module| LowerError::UnresolvedImportedEnum {
+                name: name.to_string(),
+                module: module.clone(),
+            })
+    }
+
+    /// Guard a `Base.x` reference (projection or call) whose base is a plain
+    /// non-local name: if that name is an unresolvable import, fail with
+    /// [`LowerError::UnresolvedImportedEnum`] instead of letting the reference
+    /// fall through to the projection path (`UnresolvedProjection`) or the
+    /// method-call desugar (a semantically wrong `App`).
+    fn check_import_base(&self, base: &Expr, env: &[Binding]) -> Result<(), LowerError> {
+        let Expr::Var(en) = base else { return Ok(()) };
+        if self.resolve_local(en, env).is_some() {
+            return Ok(());
+        }
+        match self.unresolved_import(en) {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
+    }
+
+    /// Resolve a `match` constructor pattern's path against the registry,
+    /// producing the import-aware error when the head names an unresolvable
+    /// imported enum.
+    fn pattern_ctor(&self, path: &[String]) -> Result<&CtorRef, LowerError> {
+        let key = path.join(".");
+        if let Some(c) = self.reg.ctor(&key) {
+            return Ok(c);
+        }
+        if path.len() > 1 {
+            if let Some(e) = self.unresolved_import(&path[0]) {
+                return Err(e);
+            }
+        }
+        Err(LowerError::UnknownConstructor { name: key })
     }
 
     /// `Enum.Variant` used without a call, as a nullary constructor — when `base`

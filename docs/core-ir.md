@@ -75,10 +75,17 @@ sites in the source:
 Constructors and `match` resolve against an enum registry built from the modules
 being lowered: `lower_module` sees the current module's enums, while
 `lower_modules` shares one registry across a set (a prelude plus its dependents)
-so a `match`/constructor can reference an enum imported from another file — which
-is how `std/result.mv` resolves the `Option` it imports. The variant *names* the
-checker needs for exhaustiveness travel as non-hashed `DefEntry::enum_variants`
-metadata, since the names-erased `Def` cannot carry them.
+so a `match`/constructor can reference an enum imported from another file. The
+CLI's single-file path resolves a file's `import std.*` statements to their
+source modules and lowers the whole set this way (MARV-18) — `marv check
+std/result.mv` on its own lowers `Option.Some(x)`/`Option.None` to real `Ctor`s
+with the `std.option.Option` nominal. A constructor or `match` pattern heading
+on an imported name the registry does *not* know (the module is missing, or the
+set was not resolved) fails with the explicit `UnresolvedImportedEnum` lower
+error rather than a misleading projection error or a silently wrong method-call
+desugar. The variant *names* the checker needs for exhaustiveness travel as
+non-hashed `DefEntry::enum_variants` metadata, since the names-erased `Def`
+cannot carry them.
 
 `while`/`for` lower to `Core::Loop { state, invariant, cond, body }` (`spec/02`
 §D): the loop-carried `var`s become the node's `state`, the body evaluates to
