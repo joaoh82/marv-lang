@@ -29,7 +29,7 @@ where each one sits and what must land first. Each task references back here.
 | ~~**MARV-33** runtime-length slices `[]T` (construct, `len`/index, element store)~~ ✅ done | 2 · Backends | ~~MARV-30~~ ✅ | 20 | medium |
 | ~~**MARV-34** Tier-1 debug bounds check on runtime array/slice indexing~~ ✅ done | 2 · Backends | ~~MARV-33~~ ✅ | — | medium |
 | **MARV-10** AOT native + LLVM + WASM component/WIT | 2 · Backends | MARV-9 | — | low |
-| **MARV-11** verified-subset expansion + loop invariants + `old`/quantifiers | 3 · Verification | MARV-2, MARV-1 | — | medium |
+| **MARV-11** verified-subset expansion + loop invariants + `old`/quantifiers — loop-invariant slice ✅ done (**MARV-22**: Hoare-style initiation/consecution/use VCs in `marv-verify`; `examples/loops.mv` proves; remaining: ADTs, arrays, bounded quantifiers, `old(e)`) | 3 · Verification | ~~MARV-2~~ ✅, ~~MARV-1~~ ✅ | 22 | medium |
 | ~~**MARV-12** formatter doc-comments + real source spans~~ ✅ done | 5 · Infra/polish | — *(independent)* | — | medium |
 | **MARV-13** port more compiler passes to marv (self-hosting) | 4 · Self-hosting | Phase-1 surface *(incremental now)* | — | low |
 | **MARV-14** persistent on-disk store + cross-module resolution | 4 · Store | — *(std linking wants Phase 1)* | — | low |
@@ -52,7 +52,8 @@ slice of structs, nested `for`s (depth-keyed index names), and sequential `for`s
 (`tests/run/slices.mv`, `examples/slices.mv`); a loop body whose
 tail is an `if`/`match` now threads the carried `var`s through the branch join (**MARV-21** — each
 branch yields the next-state tuple, kept register/local-resident so the loop stays alloc-free);
-only a `return` tail (early function exit) still awaits lowering; Tier-2 SMT for invariants is MARV-11
+only a `return` tail (early function exit) still awaits lowering; Tier-2 SMT discharge of
+loop invariants landed as **MARV-22** (the loop slice of MARV-11)
 · **MARV-3** error handling (`error E { … }` decls, `!T`/bare-`!` error unions → `Result[T,
 error-union]`, `E.Variant` → `Core::Raise`, postfix `?`; **full cross-call error-set inference**
 via a fixpoint over the call graph in `marv-db`, surfaced through `marv/errorSet`; exhaustive

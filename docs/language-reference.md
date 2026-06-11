@@ -254,10 +254,10 @@ Three tiers, and the toolchain is honest about which gave an answer:
 - **Tier 1** — runtime contracts. `marv run` checks every `requires`/`ensures` against actual
   values, and every loop `invariant` each time the condition is tested (loop entry and every
   re-entry); violations abort with a structured report showing the offending concrete values.
-- **Tier 2** — SMT proof for the verified subset (pure functions over ints/bools today; ADTs,
-  arrays, bounded quantifiers, loop invariants are roadmap). `marv verify` returns `proved`,
-  `failed` with a **counterexample**, or `unsupported` (→ falls back to Tier 1). See
-  [verification.md](verification.md).
+- **Tier 2** — SMT proof for the verified subset (pure functions over ints/bools, including
+  `while` loops via their `invariant`s — MARV-22; ADTs, arrays, bounded quantifiers, `old(e)`
+  are roadmap). `marv verify` returns `proved`, `failed` with a **counterexample**, or
+  `unsupported` (→ falls back to Tier 1). See [verification.md](verification.md).
 
 ## 8. Modules & content-addressed reuse **[impl]**
 

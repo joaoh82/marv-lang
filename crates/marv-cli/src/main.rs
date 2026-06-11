@@ -233,8 +233,12 @@ fn cmd_verify(args: &[String]) -> ExitCode {
                 continue;
             }
         }
-        // Only functions that carry contracts are worth reporting.
-        if def.requires.is_empty() && def.ensures.is_empty() {
+        // Only functions that carry contracts are worth reporting. A loop
+        // `invariant` is a contract too (MARV-22).
+        if def.requires.is_empty()
+            && def.ensures.is_empty()
+            && !marv_verify::has_loop_invariant(def)
+        {
             continue;
         }
         verified_any = true;

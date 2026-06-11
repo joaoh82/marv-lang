@@ -483,3 +483,87 @@ pure fn factorial(n: i64) -> i64 {
     assert_eq!(second["committed"][0]["reviewed"], true);
     assert_eq!(second["storeSize"], 1);
 }
+
+/// MARV-22 — `verify` discharges loop invariants over the protocol: a loop
+/// with a strong enough invariant proves; a wrong invariant fails with the
+/// carried state (positional `s{j}` labels, primed post-iteration values) in
+/// the counterexample. Skips without a z3 binary, like the clamp test above.
+const LOOP_PAIR: &str = "\
+mod loops
+
+pure fn sum_to(n: i64) -> i64
+    requires n >= 0
+    ensures result >= 0
+{
+    var sum: i64 = 0
+    var i: i64 = n
+    while (i > 0)
+        invariant (i >= 0)
+        invariant (sum >= 0)
+    {
+        sum = (sum + i)
+        i = (i - 1)
+    }
+    sum
+}
+
+pure fn badloop(n: i64) -> i64
+    requires n >= 0
+{
+    var i: i64 = 0
+    while (i < n)
+        invariant (i <= 0)
+    {
+        i = (i + 1)
+    }
+    i
+}
+";
+
+#[test]
+fn verify_discharges_loop_invariants_over_the_protocol() {
+    let mut server = Server::new();
+    let opened = call(
+        &mut server,
+        "marv/openSnapshot",
+        json!({ "files": [{ "path": "loops.mv", "text": LOOP_PAIR }] }),
+    );
+    let snap = opened.get("snapshotId").cloned().unwrap();
+
+    let ok = call(
+        &mut server,
+        "marv/verify",
+        json!({ "snapshotId": snap, "def": "loops.sum_to" }),
+    );
+    if ok.get("status").and_then(Value::as_str) == Some("unsupported")
+        && ok
+            .get("reason")
+            .and_then(Value::as_str)
+            .is_some_and(|r| r.contains("z3"))
+    {
+        eprintln!("skipping: no z3 solver available");
+        return;
+    }
+    assert_eq!(ok["status"], "proved", "sum_to's loop should prove: {ok:#}");
+
+    let bad = call(
+        &mut server,
+        "marv/verify",
+        json!({ "snapshotId": snap, "def": "loops.badloop" }),
+    );
+    assert_eq!(
+        bad["status"], "failed",
+        "a wrong invariant should fail: {bad:#}"
+    );
+    assert!(
+        bad["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("not preserved")),
+        "the consecution failure is named: {bad:#}"
+    );
+    let cx = &bad["counterexample"];
+    assert!(
+        cx.get("s0").is_some() && cx.get("s0'").is_some(),
+        "carried state (pre and post) in the counterexample: {bad:#}"
+    );
+}
