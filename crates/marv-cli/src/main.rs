@@ -49,9 +49,14 @@ COMMANDS:
                                integer result) and `wasm-component` (writes a
                                .wasm module to --out, default <file>.wasm, and
                                reports the host imports = capabilities it needs).
-                               Debug builds (the default) carry the Tier-1
-                               bounds check on runtime element reads/stores;
-                               --release omits it.
+                               Only definitions reachable from the entry
+                               (--entry, else `main`, else the sole function)
+                               are compiled, so an unreferenced sibling the
+                               backend can't lower yet doesn't block the build;
+                               without a resolvable entry the whole module is
+                               compiled. Debug builds (the default) carry the
+                               Tier-1 bounds check on runtime element
+                               reads/stores; --release omits it.
     run [--grant CAP,CAP] [--entry NAME] <file> [args...]
                                Interpret an entry point (the semantics oracle).
                                Capabilities enter only through --grant; the
@@ -419,7 +424,9 @@ fn cmd_check(args: &[String]) -> ExitCode {
 ///
 /// Targets: `native-cranelift` (Cranelift JIT; `--run` executes it) and
 /// `wasm-component` (a WebAssembly module written to `--out`, default
-/// `<file>.wasm`). Both refuse code that fails `check`.
+/// `<file>.wasm`). Both refuse code that fails `check`, and both compile only
+/// the definitions reachable from the entry (MARV-8) — `commit`/audit flows
+/// keep operating on every definition.
 fn cmd_build(args: &[String]) -> ExitCode {
     let inv = match parse_invocation(args) {
         Ok(i) => i,
@@ -471,7 +478,16 @@ fn build_native(inv: &Invocation, file: &str, loaded: &Loaded) -> ExitCode {
     let opts = codegen::Options {
         bounds_checks: !inv.release,
     };
-    let jit = match codegen::compile_with(&loaded.module_path, &loaded.defs, &loaded.world, &opts) {
+    // Compile only what the entry reaches (MARV-8): a sibling definition the
+    // backend cannot lower yet must not block a build that never calls it.
+    // Whole-module compilation remains the audit path (`compile_with`).
+    let jit = match codegen::compile_reachable(
+        &loaded.module_path,
+        &loaded.defs,
+        &loaded.world,
+        &opts,
+        &inv.entry,
+    ) {
         Ok(j) => j,
         Err(e) => {
             eprintln!("marv build: {e}");
@@ -517,8 +533,15 @@ fn build_wasm(inv: &Invocation, file: &str, loaded: &Loaded) -> ExitCode {
     let opts = wasm::Options {
         bounds_checks: !inv.release,
     };
-    let artifact = match wasm::compile_with(&loaded.module_path, &loaded.defs, &loaded.world, &opts)
-    {
+    // Same reachability pruning as the native path (MARV-8): only the entry's
+    // closure is compiled and exported.
+    let artifact = match wasm::compile_reachable(
+        &loaded.module_path,
+        &loaded.defs,
+        &loaded.world,
+        &opts,
+        &inv.entry,
+    ) {
         Ok(a) => a,
         Err(e) => {
             eprintln!("marv build: {e}");

@@ -204,13 +204,44 @@ pub fn compile(
 }
 
 /// [`compile`] with explicit [`Options`] — the entry release builds use to omit
-/// the Tier-1 bounds checks (MARV-34).
+/// the Tier-1 bounds checks (MARV-34). Compiles the **whole module**; audit
+/// flows and the differential corpus want every definition.
 pub fn compile_with(
     module_path: &str,
     defs: &[(String, Def)],
     world: &World,
     opts: &Options,
 ) -> Result<WasmArtifact, WasmError> {
+    compile_inner(module_path, defs, world, opts, None)
+}
+
+/// [`compile_with`], but compile (and export) only the definitions **reachable
+/// from `entry`** (MARV-8): a sibling function using a construct this backend
+/// does not lower yet no longer blocks the build, as long as the entry never
+/// references it. `entry` resolves the way the other backends resolve one
+/// (explicit name, else `main`, else the sole function); when it resolves to
+/// nothing the whole module is compiled.
+pub fn compile_reachable(
+    module_path: &str,
+    defs: &[(String, Def)],
+    world: &World,
+    opts: &Options,
+    entry: &str,
+) -> Result<WasmArtifact, WasmError> {
+    compile_inner(module_path, defs, world, opts, Some(entry))
+}
+
+fn compile_inner(
+    module_path: &str,
+    defs: &[(String, Def)],
+    world: &World,
+    opts: &Options,
+    entry: Option<&str>,
+) -> Result<WasmArtifact, WasmError> {
+    // With an entry to prune from, only its transitive dependency closure is
+    // compiled and exported (MARV-8).
+    let mask = entry.map(|e| marv_core::reach::reachable_mask(module_path, defs, e));
+
     // ---- gather functions, in definition order --------------------------
     // Skip generic templates (signatures mentioning a `Type::Var`): they have no
     // concrete ABI and are never called directly — only their monomorphizations
@@ -218,8 +249,11 @@ pub fn compile_with(
     // resolve only in a specialized, impl-dispatched context (`spec/01` §§3.3–3.4).
     let fns: Vec<(Hash, &str, &Def)> = defs
         .iter()
-        .filter(|(_, d)| d.kind == DefKind::Fn && !d.ty.is_polymorphic())
-        .map(|(name, d)| (symbol_hash(&qualify(module_path, name)), name.as_str(), d))
+        .enumerate()
+        .filter(|(idx, (_, d))| {
+            d.kind == DefKind::Fn && !d.ty.is_polymorphic() && mask.as_ref().is_none_or(|m| m[*idx])
+        })
+        .map(|(_, (name, d))| (symbol_hash(&qualify(module_path, name)), name.as_str(), d))
         .collect();
 
     let mut metas: HashMap<Hash, FnMeta> = HashMap::new();

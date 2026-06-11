@@ -22,7 +22,9 @@ host-allocated heap, WASM in a linear memory — so `Ctor`/`Proj`/n-way `Match` 
 identically to the interpreter's tagged `Value`. Both compute scalars at 64-bit width so they match
 the oracle exactly. Constructs they don't lower yet (first-class closures, floats, `len`/index over
 arrays) return an honest `unsupported` rather than emitting wrong code — and land in *both* backends
-together so agreement is preserved. The WASM backend additionally lowers `perform` to a host-import
+together so agreement is preserved. A definition the entry never reaches doesn't block a build:
+`marv build` compiles only the entry's transitive closure (MARV-8), so a module can mix supported
+and not-yet-supported functions. The WASM backend additionally lowers `perform` to a host-import
 call. Neither native backend reclaims memory yet (no GC, `spec/01` §4).
 
 ## Capabilities across hosts

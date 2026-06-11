@@ -384,3 +384,29 @@ fn capability_outside_effect_row_fails_to_compile() {
         "the snapshot must fail to compile"
     );
 }
+
+/// MARV-8: a module whose entry uses only the supported subset builds even when
+/// a sibling definition uses a construct this backend cannot lower (here a
+/// method call that lowers to an unresolved global). Whole-module compilation —
+/// the `commit`/audit path — still refuses the same module.
+#[test]
+fn reachability_pruned_compile_skips_unsupported_sibling() {
+    let (module_path, defs, world) = load_source("pruned_sibling.mv");
+
+    // Whole-module: the sibling's unresolved method call blocks the build.
+    let whole = marv_codegen_cl::compile(&module_path, &defs, &world);
+    assert!(
+        whole.is_err(),
+        "whole-module compilation must still reject the unsupported sibling"
+    );
+
+    // Pruned to the entry: the sibling is unreachable, so the build succeeds
+    // and agrees with the interpreter oracle.
+    let opts = marv_codegen_cl::Options::default();
+    let jit = marv_codegen_cl::compile_reachable(&module_path, &defs, &world, &opts, "double")
+        .unwrap_or_else(|e| panic!("pruned cranelift compile: {e}"));
+    let got = jit.run_i64("double", &[21]).expect("run pruned entry");
+    let want = interp_i64(&module_path, defs, world, "double", &[21]);
+    assert_eq!(got, 42);
+    assert_eq!(got, want, "pruned build agrees with the oracle");
+}

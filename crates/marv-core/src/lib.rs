@@ -37,6 +37,7 @@ pub mod hash;
 pub mod ir;
 pub mod lower;
 pub mod pred;
+pub mod reach;
 
 pub use hash::{content_hash, symbol_hash};
 pub use ir::*;

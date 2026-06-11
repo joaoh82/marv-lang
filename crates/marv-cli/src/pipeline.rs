@@ -428,6 +428,35 @@ enum Color {
         );
     }
 
+    /// The MARV-8 acceptance path: `examples/geometry.mv` mixes
+    /// backend-supported functions (`max`) with ones the Cranelift backend
+    /// cannot lower yet (`translate`'s method call). Building pruned to the
+    /// `max` entry succeeds; whole-module compilation (the audit path) still
+    /// refuses the same module.
+    #[test]
+    fn build_of_geometry_prunes_to_the_entry() {
+        let path = repo_root().join("examples/geometry.mv");
+        let loaded = load(path.to_str().unwrap()).unwrap_or_else(|e| panic!("load: {e}"));
+        assert!(!any_errors(&loaded.check()), "geometry.mv checks clean");
+
+        let whole = marv_codegen_cl::compile(&loaded.module_path, &loaded.defs, &loaded.world);
+        assert!(
+            whole.is_err(),
+            "whole-module compilation still rejects the unsupported sibling"
+        );
+
+        let opts = marv_codegen_cl::Options::default();
+        let jit = marv_codegen_cl::compile_reachable(
+            &loaded.module_path,
+            &loaded.defs,
+            &loaded.world,
+            &opts,
+            "max",
+        )
+        .unwrap_or_else(|e| panic!("pruned compile of geometry.mv: {e}"));
+        assert_eq!(jit.run_i64("max", &[3, 7]).expect("run max"), 7);
+    }
+
     /// When the imported enum's source cannot be resolved (the module is not in
     /// `std/`), loading fails with the explicit unresolved-import error — not a
     /// misleading projection error or a silently wrong lowering.
