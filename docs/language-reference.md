@@ -71,7 +71,14 @@ up only at the cast boundary; per-width **arithmetic** wrapping remains roadmap.
   slice (`[N]T` → `[]T`, also through a `&` reference), and an element store `s[i] = e` over a
   runtime length lowers to `Core::IndexSet` (an allocate-copy-store the backends emit, since the
   static unroll cannot express an unknown length). Differential-tested in `tests/run/slices.mv`
-  **[impl, MARV-33]**.
+  **[impl, MARV-33]**. Element **reads** (`a[i]`/`s[i]`) and slice element **stores** are
+  **bounds-checked at runtime** in debug builds **[impl, MARV-34]**: a runtime index outside
+  `0..len` aborts on all three backends — a structured `BoundsCheckFailed { index, len }`
+  report on the interpreter and Cranelift, a bare `unreachable` trap on WASM (a pure module
+  imports nothing) — and `marv build --release` elides the check (a statically-provable
+  in-bounds index is elidable in principle). See the Tier-1 bounds-check section of
+  `docs/run-and-codegen.md` for the per-backend mechanism and the one documented gap (a
+  fixed-length-array store with a runtime index is a memory-safe no-op, not a trap).
 - **optional** `?T` = `Option[T]` — the only way to express absence. `Option`/`Result` are
   written in marv (`std/`) and parse + lower **[impl]**; the `?T`/`!T` *sugar* and the postfix
   `?` propagation operator now parse and lower too **[impl]** (`!T` → `Result[T, error-union]`;
