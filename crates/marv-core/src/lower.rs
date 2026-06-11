@@ -72,6 +72,21 @@ pub enum LowerError {
     MixedEnumPatterns { expected: String, found: String },
     /// A constructor pattern naming a variant no in-scope enum declares.
     UnknownConstructor { name: String },
+    /// A reference `Enum.Variant` (constructor call, nullary reference, or
+    /// `match` pattern) whose `Enum` *is* a known enum/error but whose variant
+    /// it does not declare — e.g. the typo `Option.Sum(x)`. Carries the declared
+    /// variant names (declaration order) so the diagnostic can suggest the
+    /// nearest one. Before MARV-37 this fell through to the method-call desugar
+    /// and lowered to a semantically wrong `App` the checker accepted silently.
+    UnknownEnumVariant {
+        enum_name: String,
+        variant: String,
+        declared: Vec<String>,
+    },
+    /// A constructor with a payload referenced without being applied (a bare
+    /// `Option.Some` where the variant takes arguments). Constructors are not
+    /// first-class values; the reference must be a call.
+    UnappliedConstructor { name: String, arity: usize },
     /// A constructor or `match` pattern heads on an *imported* name whose
     /// defining module is not part of the lowered set, so its variants/tags are
     /// unknown. Single-file lowering resolves an imported enum only when its
@@ -143,6 +158,31 @@ impl std::fmt::Display for LowerError {
             LowerError::UnknownConstructor { name } => {
                 write!(f, "no enum in scope declares a constructor `{name}`")
             }
+            LowerError::UnknownEnumVariant {
+                enum_name,
+                variant,
+                declared,
+            } => {
+                write!(
+                    f,
+                    "`{enum_name}` declares no variant `{variant}` (its variants are {})",
+                    declared
+                        .iter()
+                        .map(|v| format!("`{v}`"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )?;
+                if let Some(s) = closest_name(variant, declared) {
+                    write!(f, " — did you mean `{enum_name}.{s}`?")?;
+                }
+                Ok(())
+            }
+            LowerError::UnappliedConstructor { name, arity } => write!(
+                f,
+                "constructor `{name}` takes {arity} argument{} and must be applied \
+                 (`{name}(…)`); a constructor is not a first-class value",
+                if *arity == 1 { "" } else { "s" }
+            ),
             LowerError::UnresolvedImportedEnum { name, module } => write!(
                 f,
                 "cannot resolve `{name}`: it is imported from `{module}`, but that module's \
@@ -179,6 +219,39 @@ impl std::fmt::Display for LowerError {
 }
 
 impl std::error::Error for LowerError {}
+
+/// The candidate closest to `name` by edit distance, for "did you mean"
+/// suggestions — only when the distance is small relative to the name (a typo,
+/// not an unrelated word). Ties keep the first candidate (declaration order),
+/// so the suggestion is deterministic.
+fn closest_name<'a>(name: &str, candidates: &'a [String]) -> Option<&'a String> {
+    let best = candidates
+        .iter()
+        .map(|c| (edit_distance(name, c), c))
+        .min_by_key(|(d, _)| *d)?;
+    (best.0 <= 1 + name.len() / 3).then_some(best.1)
+}
+
+/// Levenshtein distance over chars (the candidate sets are a handful of short
+/// variant names, so the simple O(n·m) row DP is plenty).
+fn edit_distance(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut row: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.chars().enumerate() {
+        let mut prev = row[0]; // row[i-1][j-1]
+        row[0] = i + 1;
+        for (j, &cb) in b.iter().enumerate() {
+            let cur = row[j + 1];
+            row[j + 1] = if ca == cb {
+                prev
+            } else {
+                1 + prev.min(cur).min(row[j])
+            };
+            prev = cur;
+        }
+    }
+    row[b.len()]
+}
 
 /// One variant of a lowered enum: its source name (display only — *not* part of
 /// the content hash, `spec/02` §F) and its Core field types in tag order. This
@@ -309,7 +382,11 @@ pub struct TypeArg {
 /// the set — this is what the CLI does after resolving a file's `import std.*`
 /// statements to their source modules. A constructor or `match` pattern that
 /// heads on an imported name the registry does not know fails with the explicit
-/// [`LowerError::UnresolvedImportedEnum`] (never a silently wrong lowering).
+/// [`LowerError::UnresolvedImportedEnum`]; one that heads on a *known* enum
+/// (local or resolved-imported) but names a variant it does not declare fails
+/// with [`LowerError::UnknownEnumVariant`], and a payload variant referenced
+/// without arguments with [`LowerError::UnappliedConstructor`] (never a
+/// silently wrong lowering).
 pub fn lower_module(m: &Module) -> Result<LoweredModule, LowerError> {
     Ok(lower_modules(std::slice::from_ref(m))?
         .into_iter()
@@ -428,6 +505,10 @@ struct EnumReg {
     enum_qual: HashMap<String, String>,
     /// Fully-qualified enum name → its variant count (for exhaustive lowering).
     variant_count: HashMap<String, usize>,
+    /// Fully-qualified enum name → its declared variant names, in declaration
+    /// order (for the unknown-variant diagnostic and its deterministic
+    /// nearest-name suggestion).
+    variant_names: HashMap<String, Vec<String>>,
 }
 
 impl EnumReg {
@@ -464,6 +545,10 @@ impl EnumReg {
                 reg.enum_qual.insert(name.to_string(), qual.clone());
                 reg.enum_qual.insert(qual.clone(), qual.clone());
                 reg.variant_count.insert(qual.clone(), variants.len());
+                reg.variant_names.insert(
+                    qual.clone(),
+                    variants.iter().map(|(v, _)| v.to_string()).collect(),
+                );
                 for (tag, (vname, arity)) in variants.iter().enumerate() {
                     let cref = CtorRef {
                         enum_qual: qual.clone(),
@@ -1590,7 +1675,7 @@ impl Lowerer {
                 if let Some(c) = self.field_nullary_ctor(base, field, env) {
                     return Ok(b.push(ctor_node(&c, Vec::new())));
                 }
-                self.check_import_base(base, env)?;
+                self.check_field_base(base, field, env)?;
                 let ab = self.emit_atom(base, env, b)?;
                 let idx = self.resolve_proj(base, field, env)?;
                 Ok(b.push(Core::Proj { base: ab, idx }))
@@ -1619,8 +1704,8 @@ impl Lowerer {
                     let node = self.emit_ctor(&c, args, env, b)?;
                     return Ok(b.push(node));
                 }
-                if let Expr::Field(base, _) = &**callee {
-                    self.check_import_base(base, env)?;
+                if let Expr::Field(base, method) = &**callee {
+                    self.check_field_base(base, method, env)?;
                 }
                 if let Some(node) = self.perform_call(callee, args, env, b)? {
                     return Ok(b.push(node));
@@ -1745,7 +1830,7 @@ impl Lowerer {
                 if let Some(c) = self.field_nullary_ctor(base, field, env) {
                     return Ok(ctor_node(&c, Vec::new()));
                 }
-                self.check_import_base(base, env)?;
+                self.check_field_base(base, field, env)?;
                 let ab = self.emit_atom(base, env, b)?;
                 let idx = self.resolve_proj(base, field, env)?;
                 Ok(Core::Proj { base: ab, idx })
@@ -1757,8 +1842,8 @@ impl Lowerer {
                 if let Some(c) = self.callee_ctor(callee, env) {
                     return self.emit_ctor(&c, args, env, b);
                 }
-                if let Expr::Field(base, _) = &**callee {
-                    self.check_import_base(base, env)?;
+                if let Expr::Field(base, method) = &**callee {
+                    self.check_field_base(base, method, env)?;
                 }
                 if let Some(node) = self.perform_call(callee, args, env, b)? {
                     return Ok(node);
@@ -1803,25 +1888,70 @@ impl Lowerer {
             })
     }
 
-    /// Guard a `Base.x` reference (projection or call) whose base is a plain
-    /// non-local name: if that name is an unresolvable import, fail with
-    /// [`LowerError::UnresolvedImportedEnum`] instead of letting the reference
-    /// fall through to the projection path (`UnresolvedProjection`) or the
-    /// method-call desugar (a semantically wrong `App`).
-    fn check_import_base(&self, base: &Expr, env: &[Binding]) -> Result<(), LowerError> {
+    /// Guard a `Base.field` reference (projection or call) whose base is a
+    /// plain non-local name, after constructor resolution has already failed.
+    /// Two cases must error here instead of falling through to the projection
+    /// path (`UnresolvedProjection`) or the method-call desugar (a semantically
+    /// wrong `App` the checker accepts silently):
+    ///
+    /// - the base is an *unresolvable import* (its module is not in the lowered
+    ///   set) → [`LowerError::UnresolvedImportedEnum`] (MARV-18);
+    /// - the base **is** a known enum/error, so `Base.field` can only be a
+    ///   variant reference: an undeclared variant (the typo `Option.Sum`) →
+    ///   [`LowerError::UnknownEnumVariant`], and a declared payload variant
+    ///   referenced without arguments (a bare `Option.Some`) →
+    ///   [`LowerError::UnappliedConstructor`] (MARV-37).
+    ///
+    /// A local binding always wins (checked first), so capability method calls
+    /// (`io.fs()`) and the ordinary method-call desugar (`point.dist(other)`)
+    /// are untouched.
+    fn check_field_base(
+        &self,
+        base: &Expr,
+        field: &str,
+        env: &[Binding],
+    ) -> Result<(), LowerError> {
         let Expr::Var(en) = base else { return Ok(()) };
         if self.resolve_local(en, env).is_some() {
             return Ok(());
         }
-        match self.unresolved_import(en) {
-            Some(e) => Err(e),
-            None => Ok(()),
+        if let Some(e) = self.unresolved_import(en) {
+            return Err(e);
+        }
+        if let Some(qual) = self.reg.enum_qualified(en) {
+            // Reached only when the ctor lookup failed or the arity-0 filter
+            // rejected a payload variant — distinguish the two.
+            if let Some(c) = self.reg.ctor(&format!("{en}.{field}")) {
+                return Err(LowerError::UnappliedConstructor {
+                    name: format!("{en}.{field}"),
+                    arity: c.arity,
+                });
+            }
+            return Err(self.unknown_variant(en, qual.clone(), field));
+        }
+        Ok(())
+    }
+
+    /// Build the unknown-variant error for `enum_name.variant`, carrying the
+    /// enum's declared variant names (declaration order) for the suggestion.
+    fn unknown_variant(&self, enum_name: &str, qual: String, variant: &str) -> LowerError {
+        LowerError::UnknownEnumVariant {
+            declared: self
+                .reg
+                .variant_names
+                .get(&qual)
+                .cloned()
+                .unwrap_or_default(),
+            enum_name: enum_name.to_string(),
+            variant: variant.to_string(),
         }
     }
 
     /// Resolve a `match` constructor pattern's path against the registry,
     /// producing the import-aware error when the head names an unresolvable
-    /// imported enum.
+    /// imported enum, and the unknown-variant error (with the declared
+    /// variants) when the head names a *known* enum that does not declare the
+    /// pattern's variant.
     fn pattern_ctor(&self, path: &[String]) -> Result<&CtorRef, LowerError> {
         let key = path.join(".");
         if let Some(c) = self.reg.ctor(&key) {
@@ -1830,6 +1960,11 @@ impl Lowerer {
         if path.len() > 1 {
             if let Some(e) = self.unresolved_import(&path[0]) {
                 return Err(e);
+            }
+            let (variant, head) = path.split_last().expect("len > 1");
+            let head = head.join(".");
+            if let Some(qual) = self.reg.enum_qualified(&head) {
+                return Err(self.unknown_variant(&head, qual.clone(), variant));
             }
         }
         Err(LowerError::UnknownConstructor { name: key })

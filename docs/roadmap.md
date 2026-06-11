@@ -126,6 +126,16 @@ non-`std` import — general linking is MARV-14) is now the explicit `Unresolved
 error instead of a misleading projection error or a silently wrong method-call desugar.
 `examples/optionals.mv` shows the user-code shape and runs. The salsa/protocol path
 (`marv-db`) still analyzes one file at a time — snapshot-level module sets land with MARV-14.
+· **MARV-37** unknown variant of a *known* enum errors at lowering: `Option.Sum(x)` (and the
+unapplied `Option.Sum`, and the `match` pattern form) against a known local or resolved-imported
+enum previously fell through to the method-call desugar / projection path and **passed `marv
+check` silently** (the unknown global typed as `Unknown`). Now any `Enum.Variant` reference whose
+enum is known but whose variant is undeclared is the explicit `UnknownEnumVariant` lower error —
+naming the enum, listing its declared variants, and suggesting the nearest one (`did you mean
+`Option.Some`?`) — and a declared payload variant referenced without arguments (a bare
+`Option.Some`) is `UnappliedConstructor`. Local bindings still shadow these readings, so
+capability narrowing (`io.fs()`) and the ordinary method-call desugar are untouched. This closes
+the hole MARV-18 left open (it covered only *unresolvable* imported enums).
 
 Done (Phase 2 · Backends): **MARV-9** aggregate/enum codegen across interp + Cranelift + WASM
 (`spec/02` §C). Both native backends gained a **real runtime representation** for aggregates: every
