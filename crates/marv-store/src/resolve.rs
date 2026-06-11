@@ -25,6 +25,7 @@
 use std::collections::HashMap;
 
 use marv_core::ir::*;
+use marv_core::reach::collect_global_syms;
 use marv_core::{content_hash, symbol_hash};
 
 /// Domain separators (versioned) for the three derived hashes below.
@@ -195,96 +196,8 @@ fn member_hash(comp: &Hash, pos: u32) -> Hash {
 
 // ---- global-reference substitution -------------------------------------
 
-/// Collect every `Global` symbol hash a definition mentions (body + type).
-fn collect_global_syms(def: &Def, out: &mut Vec<Hash>) {
-    collect_type_syms(&def.ty, out);
-    if let Some(body) = &def.body {
-        collect_core_syms(body, out);
-    }
-}
-
-fn collect_type_syms(t: &Type, out: &mut Vec<Hash>) {
-    match t {
-        Type::Nominal { def, args } => {
-            out.push(*def);
-            args.iter().for_each(|a| collect_type_syms(a, out));
-        }
-        Type::Array(inner, _) | Type::Slice(inner) | Type::Linear(inner) => {
-            collect_type_syms(inner, out)
-        }
-        Type::Ref { of, .. } => collect_type_syms(of, out),
-        Type::Tuple(es) => es.iter().for_each(|e| collect_type_syms(e, out)),
-        Type::Arrow { param, ret, .. } => {
-            collect_type_syms(param, out);
-            collect_type_syms(ret, out);
-        }
-        _ => {}
-    }
-}
-
-fn collect_core_syms(c: &Core, out: &mut Vec<Hash>) {
-    let atom = |a: &Atom, out: &mut Vec<Hash>| {
-        if let Atom::Global(h) = a {
-            out.push(*h);
-        }
-    };
-    match c {
-        Core::Atom(a) => atom(a, out),
-        Core::Let { value, body } => {
-            collect_core_syms(value, out);
-            collect_core_syms(body, out);
-        }
-        Core::Lam { param, body, .. } => {
-            collect_type_syms(param, out);
-            collect_core_syms(body, out);
-        }
-        Core::App { func, arg } => {
-            atom(func, out);
-            atom(arg, out);
-        }
-        Core::Ctor { ty, fields, .. } => {
-            out.push(*ty);
-            fields.iter().for_each(|a| atom(a, out));
-        }
-        Core::Proj { base, .. } => atom(base, out),
-        Core::Array { elem, items } => {
-            collect_type_syms(elem, out);
-            items.iter().for_each(|a| atom(a, out));
-        }
-        Core::IndexSet { base, index, value } => {
-            atom(base, out);
-            atom(index, out);
-            atom(value, out);
-        }
-        Core::Match {
-            scrutinee,
-            branches,
-        } => {
-            atom(scrutinee, out);
-            branches
-                .iter()
-                .for_each(|b| collect_core_syms(&b.body, out));
-        }
-        Core::Prim { args, .. } => args.iter().for_each(|a| atom(a, out)),
-        Core::Cast { value, to } => {
-            atom(value, out);
-            collect_type_syms(to, out);
-        }
-        Core::Ref { of, .. } => atom(of, out),
-        Core::Perform { cap, args, .. } => {
-            atom(cap, out);
-            args.iter().for_each(|a| atom(a, out));
-        }
-        Core::Raise { error, args } => {
-            out.push(*error);
-            args.iter().for_each(|a| atom(a, out));
-        }
-        Core::Loop { cond, body, .. } => {
-            collect_core_syms(cond, out);
-            collect_core_syms(body, out);
-        }
-    }
-}
+// The symbol collector these passes share with entry-reachability pruning
+// lives in `marv_core::reach` ([`collect_global_syms`], MARV-8).
 
 /// Rewrite a definition's `Global`/`Nominal` references via `subst` (a symbol
 /// hash → replacement hash map; `None` leaves the reference unchanged).

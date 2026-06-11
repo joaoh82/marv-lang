@@ -143,6 +143,24 @@ Compiles with the selected backend. Like `run`, it first runs `check` and
 **refuses to compile** code with errors — this is where a program that uses a
 capability absent from its effect row fails to build (`spec/03` §5).
 
+Both targets compile **only the definitions reachable from the entry point**
+(MARV-8) — the entry's transitive closure over the same dependency edges the
+content store links (`marv-store::resolve`). A sibling definition that uses a
+construct the backend cannot lower yet no longer blocks the build, as long as
+the entry never references it:
+
+```sh
+marv build examples/geometry.mv --entry max --run 3 7   # 7 — `translate` is
+                                                        # unreachable, so its
+                                                        # unsupported method
+                                                        # call is irrelevant
+```
+
+The entry resolves as for `run`: `--entry NAME` (bare or qualified), else
+`main`, else the sole function. When none of those resolves (no `main` among
+several functions), the **whole module** is compiled — and `commit`/audit flows
+always operate on every definition; pruning is a `build` behavior only.
+
 - **`--target`** — `native-cranelift` (default) or `wasm-component`. LLVM is a
   later milestone. Unknown targets are rejected.
 - **`--run`** *(native only)* — after compiling, JIT-executes the entry point and

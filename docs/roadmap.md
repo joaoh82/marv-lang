@@ -23,7 +23,7 @@ where each one sits and what must land first. Each task references back here.
 | ~~**MARV-5** generics + interfaces/impl (monomorphization)~~ ✅ done | 1 · Surface | ~~MARV-1~~ ✅ | 6 | medium |
 | ~~**MARV-6** capabilities/`perform` from source~~ ✅ done | 1 · Surface | ~~MARV-5~~ ✅, ~~MARV-3~~ ✅ | — | medium |
 | ~~**MARV-7** scalars & collections (str/char, slices/arrays, `as`)~~ ✅ done | 1 · Surface | — (pairs w/ 4) | — | medium |
-| **MARV-8** reachability-pruned compilation | 2 · Backends | — *(independent)* | — | medium |
+| ~~**MARV-8** reachability-pruned compilation~~ ✅ done | 2 · Backends | — *(independent)* | — | medium |
 | ~~**MARV-9** aggregate/enum codegen (interp + Cranelift + WASM)~~ ✅ done | 2 · Backends | ~~MARV-1~~ ✅, ~~MARV-4~~ ✅ | 10 | medium |
 | ~~**MARV-30** array literals + `len`/index codegen (+ index store)~~ ✅ done | 2 · Backends | ~~MARV-9~~ ✅, ~~MARV-7~~ ✅ | — | medium |
 | ~~**MARV-33** runtime-length slices `[]T` (construct, `len`/index, element store)~~ ✅ done | 2 · Backends | ~~MARV-30~~ ✅ | 20 | medium |
@@ -200,6 +200,20 @@ pin `for` over a `[]i64` slice, `for` over a slice of structs (the `report.mv` `
 nested `for`s (the builder-depth-keyed `#for<d>` index names stay unique), and two sequential
 `for`s in one block (same depth ⇒ same index name; the second shadows the first harmlessly).
 `examples/slices.mv` gained a `for`-based `sum_for`; interp == Cranelift == wasm throughout.
+· **MARV-8** reachability-pruned builds: `marv build` compiles **only the definitions reachable
+from the entry point**, so a module that mixes backend-supported functions with not-yet-supported
+ones builds as long as the entry never references the unsupported ones (the M4/M5 annoyance —
+`examples/geometry.mv`'s `max` now builds and runs on both backends despite its sibling
+`translate`, whose method call doesn't lower yet). `marv_core::reach::reachable_mask` resolves the
+entry exactly as the backends do at call time (explicit `--entry`, bare or qualified, else `main`,
+else the sole function) and walks its transitive closure over the same `Global`/`Nominal` edges
+the content store links (`collect_global_syms` moved from `marv-store::resolve` into
+`marv-core::reach` and is shared by both). Both codegen crates gained
+`compile_reachable(…, entry)`; the wasm artifact exports only the pruned closure. When no entry
+resolves, the whole module compiles (pre-MARV-8 behavior, same `NoSuchEntry`/unsupported errors);
+whole-module `compile`/`compile_with` remains the API for `commit`/audit flows and the
+differential corpus, and the checker still checks every definition — pruning is codegen-only.
+`tests/run/pruned_sibling.mv` pins the behavior in both backend harnesses.
 
 ## Recommended order
 
@@ -218,8 +232,8 @@ they unblock the rest. Then:
   MARV-11 verification expansion (after 2).
 - **Longer horizon:** MARV-13 more self-hosting, MARV-14 persistent store.
 
-**Parallel track (no surface dependency — pick up anytime):** MARV-8 (reachability-pruned
-builds) and MARV-12 (doc-comments + spans). Good independent work to run alongside the spine.
+**Parallel track (no surface dependency — pick up anytime):** ~~MARV-8 (reachability-pruned
+builds)~~ ✅ and ~~MARV-12 (doc-comments + spans)~~ ✅ are both done — the track is clear.
 
 ## Phases
 
@@ -232,8 +246,8 @@ builds) and MARV-12 (doc-comments + spans). Good independent work to run alongsi
   `while`/`for` loops with `invariant` clauses, generic type arguments (`Option[T]`), the binary
   operators, calls/recursion (incl. monomorphized generic calls), field projection, and
   `requires`/`ensures` contracts.
-- **Phase 2 · Backends.** Reachability-pruned builds; runtime layout for aggregates/enums
-  across all three backends in lockstep; then AOT/LLVM/WASM-component packaging.
+- **Phase 2 · Backends.** Reachability-pruned builds (**done**, MARV-8); runtime layout for
+  aggregates/enums across all three backends in lockstep; then AOT/LLVM/WASM-component packaging.
 - **Phase 3 · Verification.** Extend the Tier-2 verified subset (ADTs, arrays, bounded
   quantifiers, sound integer division) and loop invariants (Tier 1 + Tier 2), keeping every
   gap an honest `unsupported`.

@@ -1,0 +1,11 @@
+mod pruned
+
+struct Point { x: i64, y: i64 }
+
+pure fn double(a: i64) -> i64 {
+    (a + a)
+}
+
+fn nudge(p: &mut Point, dx: i64) {
+    p.bump(dx)
+}

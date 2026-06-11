@@ -444,3 +444,48 @@ fn a_capability_using_module_imports_that_capability() {
         .collect();
     assert_eq!(imports, vec![("Net".to_string(), "op0".to_string())]);
 }
+
+/// MARV-8: a module whose entry uses only the supported subset builds even when
+/// a sibling definition uses a construct this backend cannot lower (here a
+/// method call that lowers to an application of a non-function). The pruned
+/// artifact exports only the entry's reachable closure; whole-module
+/// compilation — the `commit`/audit path — still refuses the same module.
+#[test]
+fn reachability_pruned_compile_skips_unsupported_sibling() {
+    let (module_path, defs, world) = load_source("pruned_sibling.mv");
+
+    // Whole-module: the sibling blocks the build.
+    let whole = marv_codegen_wasm::compile(&module_path, &defs, &world);
+    assert!(
+        whole.is_err(),
+        "whole-module compilation must still reject the unsupported sibling"
+    );
+
+    // Pruned to the entry: builds, exports exactly the entry, runs, and agrees
+    // with the interpreter oracle.
+    let opts = marv_codegen_wasm::Options::default();
+    let artifact =
+        marv_codegen_wasm::compile_reachable(&module_path, &defs, &world, &opts, "double")
+            .unwrap_or_else(|e| panic!("pruned wasm compile: {e}"));
+    let exported: Vec<&str> = artifact.exports.iter().map(|e| e.name.as_str()).collect();
+    assert_eq!(
+        exported,
+        ["pruned.double"],
+        "only the reachable closure is exported"
+    );
+
+    let engine = Engine::default();
+    let module = Module::new(&engine, &artifact.bytes).expect("wasmtime module");
+    let mut store = Store::new(&engine, ());
+    let instance = Instance::new(&mut store, &module, &[]).expect("instantiate (no imports)");
+    let func = instance
+        .get_func(&mut store, "pruned.double")
+        .expect("export `pruned.double` not found");
+    let mut results = [Val::I64(0)];
+    func.call(&mut store, &[Val::I64(21)], &mut results)
+        .expect("call pruned.double");
+    let got = results[0].unwrap_i64();
+    let want = interp_i64(&module_path, defs, world, "double", &[21]);
+    assert_eq!(got, 42);
+    assert_eq!(got, want, "pruned build agrees with the oracle");
+}

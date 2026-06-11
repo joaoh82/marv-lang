@@ -78,6 +78,26 @@ the interpreter can, and Cranelift returns an honest `unsupported` rather than
 emitting wrong code. New constructs land in *both* backends together so agreement
 is preserved.
 
+### Reachability-pruned builds (MARV-8)
+
+`marv build` compiles **only the definitions reachable from the entry point**:
+`marv_core::reach::reachable_mask` resolves the entry (explicit `--entry`, else
+`main`, else the sole function) and walks its transitive dependency closure —
+the same `Global`/`Nominal` edges the content store links into the Merkle DAG
+(`marv-store::resolve`). Both backends (`compile_reachable` in
+`marv-codegen-cl` and `marv-codegen-wasm`) declare and compile only that
+closure, and the wasm artifact exports only it. So a module that mixes
+supported functions with not-yet-supported ones builds as long as the entry
+never references the unsupported ones — `examples/geometry.mv`'s `max` builds
+and runs even though its sibling `translate` does not lower yet.
+
+When no entry resolves (no `main` among several functions, or a `--entry` name
+that matches nothing), the whole module is compiled, preserving the usual
+`NoSuchEntry`/unsupported errors. Whole-module compilation (`compile` /
+`compile_with`) remains the API for audit flows and the differential corpus —
+pruning never changes what `commit` freezes or what the checker checks (every
+definition, always).
+
 ### Aggregate & enum representation (MARV-9)
 
 Every marv value is one machine word. A scalar *is* that word; an aggregate is a

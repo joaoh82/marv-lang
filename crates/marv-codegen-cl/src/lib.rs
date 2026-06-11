@@ -203,13 +203,44 @@ pub fn compile(
 }
 
 /// [`compile`] with explicit [`Options`] — the entry release builds use to omit
-/// the Tier-1 bounds checks (MARV-34).
+/// the Tier-1 bounds checks (MARV-34). Compiles the **whole module**; audit
+/// flows and the differential corpus want every definition.
 pub fn compile_with(
     module_path: &str,
     defs: &[(String, Def)],
     world: &World,
     opts: &Options,
 ) -> Result<JitProgram, CodegenError> {
+    compile_inner(module_path, defs, world, opts, None)
+}
+
+/// [`compile_with`], but compile only the definitions **reachable from
+/// `entry`** (MARV-8): a sibling function using a construct this backend does
+/// not lower yet no longer blocks the build, as long as the entry never
+/// references it. `entry` resolves like [`JitProgram::run_i64`]'s (explicit
+/// name, else `main`, else the sole function); when it resolves to nothing the
+/// whole module is compiled, so the usual `NoSuchEntry` error still surfaces.
+pub fn compile_reachable(
+    module_path: &str,
+    defs: &[(String, Def)],
+    world: &World,
+    opts: &Options,
+    entry: &str,
+) -> Result<JitProgram, CodegenError> {
+    compile_inner(module_path, defs, world, opts, Some(entry))
+}
+
+fn compile_inner(
+    module_path: &str,
+    defs: &[(String, Def)],
+    world: &World,
+    opts: &Options,
+    entry: Option<&str>,
+) -> Result<JitProgram, CodegenError> {
+    // With an entry to prune from, only its transitive dependency closure is
+    // declared and compiled (MARV-8).
+    let mask = entry.map(|e| marv_core::reach::reachable_mask(module_path, defs, e));
+
     let mut module = make_module()?;
 
     // The host allocator is an import every boxing site can call.
@@ -233,6 +264,10 @@ pub fn compile_with(
     let mut order: Vec<(Hash, usize)> = Vec::new();
     for (idx, (name, def)) in defs.iter().enumerate() {
         if def.kind != DefKind::Fn {
+            continue;
+        }
+        // Entry-unreachable definitions are not compiled at all (MARV-8).
+        if mask.as_ref().is_some_and(|m| !m[idx]) {
             continue;
         }
         // Skip generic templates (signatures mentioning a `Type::Var`): they have
