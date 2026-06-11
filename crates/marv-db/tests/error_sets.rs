@@ -140,3 +140,24 @@ fn raise_without_error_union_is_reported() {
         a.diagnostics
     );
 }
+
+/// The salsa/protocol path lowers strictly single-file (MARV-18): a file that
+/// constructs an enum imported from another module surfaces the explicit
+/// unresolved-import lower error in `parse_error` — never a silently wrong
+/// analysis. (The CLI path resolves `import std.*` to source and lowers the
+/// set together; snapshot-level module sets are MARV-14.)
+#[test]
+fn imported_enum_ctor_is_a_clear_error_single_file() {
+    let a = analyze(
+        "mod demo\nimport std.option (Option)\n\npure fn some(x: i64) -> Option[i64] {\n    \
+         Option.Some(x)\n}\n",
+    );
+    let err = a
+        .parse_error
+        .expect("single-file analysis of an imported enum ctor must fail");
+    assert!(
+        err.contains("cannot resolve `Option`") && err.contains("std.option"),
+        "error names the import and its module: {err}"
+    );
+    assert!(a.defs.is_empty(), "no defs are reported on a failed lower");
+}
