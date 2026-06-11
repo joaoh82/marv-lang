@@ -13,8 +13,23 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Create the release (with auto-generated notes) exactly once, before any
+  # build job touches it. Running `generate_release_notes` inside the build
+  # matrix appended one copy of the notes per matrix job (MARV-2).
+  release:
+    name: create release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v3
+        with:
+          generate_release_notes: true
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
+
   build:
     name: build ${{ matrix.target }}
+    needs: release
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -55,12 +70,12 @@ jobs:
           tar czf "${dist}.tar.gz" "$dist"
           shasum -a 256 "${dist}.tar.gz" > "${dist}.tar.gz.sha256"
 
+      # Upload assets only — no release-info keys, so the body created by the
+      # `release` job is left untouched (the action retains existing release
+      # info when keys like `body`/`generate_release_notes` are unset).
       - name: Upload to release
         uses: softprops/action-gh-release@v3
         with:
           files: |
             marv-*.tar.gz
             marv-*.tar.gz.sha256
-          generate_release_notes: true
-          draft: false
-          prerelease: ${{ contains(github.ref_name, '-') }}
