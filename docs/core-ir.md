@@ -83,7 +83,15 @@ with the `std.option.Option` nominal. A constructor or `match` pattern heading
 on an imported name the registry does *not* know (the module is missing, or the
 set was not resolved) fails with the explicit `UnresolvedImportedEnum` lower
 error rather than a misleading projection error or a silently wrong method-call
-desugar. The variant *names* the checker needs for exhaustiveness travel as
+desugar. When the head **is** a known enum (local or resolved-imported), a
+reference to a variant it does not declare — the typo `Option.Sum(x)`, applied
+or not, in an expression or a `match` pattern — fails with `UnknownEnumVariant`,
+which names the enum, lists its declared variants, and suggests the nearest one
+(MARV-37); a declared payload variant referenced without arguments (a bare
+`Option.Some`) fails with `UnappliedConstructor`. A local binding always shadows
+these readings, so capability calls (`io.fs()`) and the ordinary method-call
+desugar (`point.dist(other)`) are unaffected. The variant *names* the checker
+needs for exhaustiveness travel as
 non-hashed `DefEntry::enum_variants` metadata, since the names-erased `Def`
 cannot carry them.
 

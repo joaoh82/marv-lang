@@ -270,10 +270,11 @@ fn collect_ctors(c: &Core) -> Vec<(Hash, u32, usize)> {
 /// lowering the module set together can (the CLI's std resolution, or
 /// [`lower_modules`]). Each reference form must fail with the explicit
 /// [`LowerError::UnresolvedImportedEnum`], never a misleading projection error
-/// or a silently wrong method-call desugar.
+/// or a silently wrong method-call desugar. (Also reused by the MARV-37 tests
+/// below for in-module lowering that must fail.)
 fn lower_err(src: &str) -> marv_core::LowerError {
     let m = parse(src).unwrap_or_else(|e| panic!("parse failed: {e}\n{src}"));
-    lower_module(&m).expect_err("single-file lowering of an imported enum should fail")
+    lower_module(&m).expect_err("lowering should fail")
 }
 
 fn assert_unresolved_option(err: marv_core::LowerError) {
@@ -313,4 +314,130 @@ fn imported_enum_match_pattern_errors_clearly() {
         "mod demo\nimport std.option (Option)\n\npure fn or_zero(opt: Option[i64]) -> i64 {\n    \
          match opt {\n        Option.Some(x) => x,\n        Option.None => 0,\n    }\n}\n",
     ));
+}
+
+// ---- unknown variant of a *known* enum (MARV-37) --------------------------
+
+/// `Enum.Variant` where `Enum` is a known (local or resolved-imported) enum but
+/// `Variant` is not declared — e.g. the typo `Option.Sum(x)` — must fail with
+/// [`marv_core::LowerError::UnknownEnumVariant`], never fall through to the
+/// method-call desugar (a silently wrong `App`) or the projection path. A
+/// declared payload variant referenced *unapplied* (a bare `Option.Some`) is a
+/// dedicated [`marv_core::LowerError::UnappliedConstructor`].
+const STD_OPTION: &str = "\
+mod std.option
+
+enum Option[T] {
+    None,
+    Some(T),
+}
+";
+
+/// Lower `src` together with the `std.option` module (the resolved-import
+/// setup the CLI produces), expecting a lower error.
+fn lower_with_option_err(src: &str) -> marv_core::LowerError {
+    let opt = parse(STD_OPTION).expect("parse std.option");
+    let m = parse(src).unwrap_or_else(|e| panic!("parse failed: {e}\n{src}"));
+    lower_modules(&[opt, m]).expect_err("lowering an unknown variant should fail")
+}
+
+fn assert_unknown_sum(err: marv_core::LowerError) {
+    match &err {
+        marv_core::LowerError::UnknownEnumVariant {
+            enum_name,
+            variant,
+            declared,
+        } => {
+            assert_eq!(enum_name, "Option");
+            assert_eq!(variant, "Sum");
+            assert_eq!(declared, &["None", "Some"]);
+        }
+        other => panic!("expected UnknownEnumVariant, got: {other:?}"),
+    }
+    // The diagnostic names the enum, lists its variants, and suggests the
+    // nearest declared name.
+    let msg = err.to_string();
+    assert!(
+        msg.contains("did you mean `Option.Some`?"),
+        "suggestion missing from: {msg}"
+    );
+}
+
+#[test]
+fn local_enum_unknown_variant_payload_ctor_errors() {
+    // Previously desugared to a method call (`App(Global(Sum), x)`) the checker
+    // typed as `Unknown` and accepted silently.
+    assert_unknown_sum(lower_err(
+        "mod demo\n\nenum Option[T] {\n    None,\n    Some(T),\n}\n\n\
+         pure fn some(x: i64) -> Option[i64] {\n    Option.Sum(x)\n}\n",
+    ));
+}
+
+#[test]
+fn local_enum_unknown_variant_nullary_ref_errors() {
+    // Previously fell through to the projection path (`UnresolvedProjection`).
+    assert_unknown_sum(lower_err(
+        "mod demo\n\nenum Option[T] {\n    None,\n    Some(T),\n}\n\n\
+         pure fn none() -> Option[i64] {\n    Option.Sum\n}\n",
+    ));
+}
+
+#[test]
+fn imported_enum_unknown_variant_payload_ctor_errors() {
+    assert_unknown_sum(lower_with_option_err(
+        "mod demo\nimport std.option (Option)\n\n\
+         pure fn some(x: i64) -> Option[i64] {\n    Option.Sum(x)\n}\n",
+    ));
+}
+
+#[test]
+fn imported_enum_unknown_variant_nullary_ref_errors() {
+    assert_unknown_sum(lower_with_option_err(
+        "mod demo\nimport std.option (Option)\n\n\
+         pure fn none() -> Option[i64] {\n    Option.Sum\n}\n",
+    ));
+}
+
+#[test]
+fn match_pattern_unknown_variant_of_known_enum_errors() {
+    // Previously the generic `UnknownConstructor` ("no enum in scope declares
+    // …"), which is misleading when the enum *is* in scope.
+    let err = lower_err(
+        "mod demo\n\nenum Color {\n    Red,\n    Green,\n    Blue,\n}\n\n\
+         pure fn rank(c: Color) -> i64 {\n    match c {\n        Color.Rd => 1,\n        \
+         _ => 0,\n    }\n}\n",
+    );
+    match &err {
+        marv_core::LowerError::UnknownEnumVariant {
+            enum_name,
+            variant,
+            declared,
+        } => {
+            assert_eq!(enum_name, "Color");
+            assert_eq!(variant, "Rd");
+            assert_eq!(declared, &["Red", "Green", "Blue"]);
+        }
+        other => panic!("expected UnknownEnumVariant, got: {other:?}"),
+    }
+    assert!(
+        err.to_string().contains("did you mean `Color.Red`?"),
+        "suggestion missing from: {err}"
+    );
+}
+
+#[test]
+fn unapplied_payload_ctor_errors() {
+    // A *declared* payload variant referenced without arguments previously fell
+    // through to the projection path; it is its own clear error.
+    let err = lower_err(
+        "mod demo\n\nenum Option[T] {\n    None,\n    Some(T),\n}\n\n\
+         pure fn some() -> Option[i64] {\n    Option.Some\n}\n",
+    );
+    match err {
+        marv_core::LowerError::UnappliedConstructor { name, arity } => {
+            assert_eq!(name, "Option.Some");
+            assert_eq!(arity, 1);
+        }
+        other => panic!("expected UnappliedConstructor, got: {other:?}"),
+    }
 }
