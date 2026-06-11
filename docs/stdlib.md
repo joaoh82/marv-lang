@@ -7,7 +7,11 @@ the capability interfaces every program links against (`spec/01` §§3, 5, 6).
 > parses, lowers, and checks, and a program that `import std.io (Io)` and calls
 > `io.stdout().write(...)` or narrows `io.fs()` checks its inferred effect row and runs under
 > `marv run --grant` (the CLI resolves `import std.*` to these files — see
-> [`cli.md`](cli.md)). Enums, generics, and `?`/`!` sugar are likewise real. Still pending:
+> [`cli.md`](cli.md)). Enums, generics, and `?`/`!` sugar are likewise real, and the
+> resolution covers imported **enum constructors and `match`es** (MARV-18): each `std/` file —
+> and any program importing one — checks standalone (`marv check std/result.mv` resolves the
+> `Option.Some(x)` / `Option.None` it builds to the imported enum's constructors;
+> `examples/optionals.mv` does the same from user code). Still pending:
 > cross-*module* error-set propagation and the persistent content store that links defs by
 > hash (MARV-14), and `linear` capabilities (so a `Conn` must be `close`d). The capability
 > *model* is also exercised over the Core IR and on WebAssembly (host imports).

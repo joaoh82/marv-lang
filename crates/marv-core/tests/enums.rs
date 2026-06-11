@@ -225,5 +225,92 @@ fn std_prelude_lowers_cross_module() {
         .iter()
         .find(|d| d.name == "ok")
         .expect("ok def");
-    assert!(ok.def.body.is_some(), "`ok` lowered to a body");
+    let body = ok.def.body.as_ref().expect("`ok` lowered to a body");
+    // `Option.Some(x)` / `Option.None` are *real* constructors of the imported
+    // enum: `Ctor`s with the `std.option.Option` nominal and declaration-order
+    // tags (None = 0, Some = 1) — not a method-call desugar.
+    let option = marv_core::symbol_hash("std.option.Option");
+    let ctors = collect_ctors(body);
+    assert!(
+        ctors.contains(&(option, 1, 1)),
+        "`Option.Some(x)` is a tag-1, one-field Ctor of std.option.Option: {ctors:?}"
+    );
+    assert!(
+        ctors.contains(&(option, 0, 0)),
+        "`Option.None` is a tag-0, nullary Ctor of std.option.Option: {ctors:?}"
+    );
+}
+
+/// Every `Ctor` in a Core term, as `(nominal hash, tag, field count)`.
+fn collect_ctors(c: &Core) -> Vec<(Hash, u32, usize)> {
+    let mut out = Vec::new();
+    fn walk(c: &Core, out: &mut Vec<(Hash, u32, usize)>) {
+        match c {
+            Core::Ctor { ty, tag, fields } => out.push((*ty, *tag, fields.len())),
+            Core::Let { value, body } => {
+                walk(value, out);
+                walk(body, out);
+            }
+            Core::Lam { body, .. } => walk(body, out),
+            Core::Match { branches, .. } => branches.iter().for_each(|b| walk(&b.body, out)),
+            Core::Loop { cond, body, .. } => {
+                walk(cond, out);
+                walk(body, out);
+            }
+            _ => {}
+        }
+    }
+    walk(c, &mut out);
+    out
+}
+
+// ---- single-file lowering of *imported* enums (MARV-18) ------------------
+
+/// Single-file `lower_module` cannot see an imported enum's declaration — only
+/// lowering the module set together can (the CLI's std resolution, or
+/// [`lower_modules`]). Each reference form must fail with the explicit
+/// [`LowerError::UnresolvedImportedEnum`], never a misleading projection error
+/// or a silently wrong method-call desugar.
+fn lower_err(src: &str) -> marv_core::LowerError {
+    let m = parse(src).unwrap_or_else(|e| panic!("parse failed: {e}\n{src}"));
+    lower_module(&m).expect_err("single-file lowering of an imported enum should fail")
+}
+
+fn assert_unresolved_option(err: marv_core::LowerError) {
+    match err {
+        marv_core::LowerError::UnresolvedImportedEnum { name, module } => {
+            assert_eq!(name, "Option");
+            assert_eq!(module, "std.option");
+        }
+        other => panic!("expected UnresolvedImportedEnum, got: {other:?}"),
+    }
+}
+
+#[test]
+fn imported_enum_nullary_ctor_errors_clearly() {
+    // Previously fell through to the projection path (`UnresolvedProjection`).
+    assert_unresolved_option(lower_err(
+        "mod demo\nimport std.option (Option)\n\npure fn none() -> Option[i64] {\n    \
+         Option.None\n}\n",
+    ));
+}
+
+#[test]
+fn imported_enum_payload_ctor_errors_clearly() {
+    // Previously desugared to a method call — it lowered without error but was
+    // semantically wrong (an `App`, not a `Ctor`).
+    assert_unresolved_option(lower_err(
+        "mod demo\nimport std.option (Option)\n\npure fn some(x: i64) -> Option[i64] {\n    \
+         Option.Some(x)\n}\n",
+    ));
+}
+
+#[test]
+fn imported_enum_match_pattern_errors_clearly() {
+    // Previously `UnknownConstructor` (true but unhelpful — the constructor is
+    // declared, just not in the lowered set).
+    assert_unresolved_option(lower_err(
+        "mod demo\nimport std.option (Option)\n\npure fn or_zero(opt: Option[i64]) -> i64 {\n    \
+         match opt {\n        Option.Some(x) => x,\n        Option.None => 0,\n    }\n}\n",
+    ));
 }

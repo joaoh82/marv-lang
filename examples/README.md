@@ -21,6 +21,7 @@ fixture source for the test suite. As of M4 the integer/boolean subset is
 | [`casts.mv`](casts.mv) | **Runnable (MARV-7):** `char` literals (`'\n'`), `as` casts (`(n as u8)`, widening + narrowing), the fixed-array type `[N]T`, and `len(str)`. Integer casts truncate/wrap to width identically on the interpreter, Cranelift, and WASM (`tests/run/casts.mv`); a constant that overflows its narrowing target (`256 as u8`) fails `marv check` with `E0104`. |
 | [`arrays.mv`](arrays.mv) | **Runnable (MARV-30):** array literals `[e0, …]`, indexed read `a[i]`, `len(a)`, the index store `a[i] = e` (a functional element update under mutable value semantics), and a `len`-bounded `while`/`for`. `marv run examples/arrays.mv` yields `42`; it runs identically on the interpreter, Cranelift JIT, and WASM (differential corpus [`tests/run/arrays.mv`](../tests/run/arrays.mv)). |
 | [`slices.mv`](slices.mv) | **Runnable (MARV-33 + MARV-20):** runtime-length slices `[]T` — an array literal bound to `[]i64` (the slice constructor), a `len`-bounded `while` over a `&[]i64` reference, a `for x in xs` over the same slice (the desugared index loop executing for real), and the element store `ys[0] = v` (`Core::IndexSet`, a functional update over a runtime length). `marv run examples/slices.mv` yields `30`; the same shapes are pinned three-way (interpreter / Cranelift / WASM) in the differential corpus [`tests/run/slices.mv`](../tests/run/slices.mv). |
+| [`optionals.mv`](optionals.mv) | **Runnable (MARV-18):** constructing and matching an enum **imported from another module**, checked as a single file — `import std.option (Option)`, then `Option.Some(n)` / `Option.None` and an exhaustive `match`, resolved to the imported enum's real constructors (correct tags, `std.option.Option` nominal) by the CLI's `std` resolution. `marv check examples/optionals.mv` is clean; `marv run --entry main examples/optionals.mv` yields `42`. |
 | [`generics.mv`](generics.mv) | **Runnable (MARV-5):** generics + an `interface`/`impl` with a bound. `max[T: Ord](a, b)` calls the interface method `cmp`; `main` calls `max(3, 7)`, which **monomorphizes** to `max@i32` and **dispatches** `cmp` to the coherent `impl Ord[i32]`. `marv run --entry main examples/generics.mv` yields `7`; `marv resolve-impl examples/generics.mv` reports the selected impl; instantiating at a type with no impl (e.g. `max(true, false)`) fails `marv check` with `E0160`. Since the `Ordering` enum got a runtime layout (MARV-9), the monomorphized program also runs on the Cranelift JIT and WASM — an `i64` variant lives in the differential corpus as [`tests/run/generics.mv`](../tests/run/generics.mv) (MARV-26). |
 
 Every example now parses, formats, and checks through the **real** front end — the
@@ -29,9 +30,10 @@ fallback is no longer needed for any of them). `hello`, `read_file`, and `report
 when capabilities & `perform` from source landed (MARV-6); `clamp.mv` joined in M6 with
 `requires`/`ensures`; `color.mv` when `enum`/`match` landed; `generics.mv` when
 `interface`/`impl` + generic bounds landed (MARV-5); `arrays.mv` when array codegen landed
-(MARV-30); `slices.mv` when runtime-length slices landed (MARV-33 + MARV-20).
+(MARV-30); `slices.mv` when runtime-length slices landed (MARV-33 + MARV-20);
+`optionals.mv` when single-file lowering of imported enums landed (MARV-18).
 `factorial.mv`, `arithmetic.mv`, `color.mv`, `mutation.mv`, `loops.mv`,
-`generics.mv`, `arrays.mv`, and `slices.mv` additionally lie inside the
+`generics.mv`, `arrays.mv`, `slices.mv`, and `optionals.mv` additionally lie inside the
 *executable* subset, so the interpreter runs them (`marv run`); the integer ones
 (`factorial`, `arithmetic`, `loops`, `arrays`, `slices`) also run on the Cranelift JIT (`marv build --run`)
 and WebAssembly (`marv build --target wasm-component`, then via wasmtime or the browser

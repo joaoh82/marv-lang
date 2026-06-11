@@ -1405,10 +1405,73 @@ fn compatible(a: &Ty, b: &Ty) -> bool {
         (Ty::Unknown, _) | (_, Ty::Unknown) => true,
         (Ty::IntLit, Ty::IntLit) => true,
         (Ty::IntLit, Ty::Known(Type::Int(_))) | (Ty::Known(Type::Int(_)), Ty::IntLit) => true,
+        // An unresolved type parameter accepts a literal (see `type_compat`).
+        (Ty::IntLit, Ty::Known(Type::Var(_))) | (Ty::Known(Type::Var(_)), Ty::IntLit) => true,
         (Ty::IntLit, _) | (_, Ty::IntLit) => false,
         // `a` is the expected (target) type and `b` the actual (source) at every
         // call site, so the array→slice coercion is checked directionally here.
-        (Ty::Known(x), Ty::Known(y)) => type_eq(x, y) || coerces_to(x, y),
+        (Ty::Known(x), Ty::Known(y)) => {
+            type_compat(x, y) || coerces_to(x, y) || ctor_erased_nominal_eq(x, y)
+        }
+    }
+}
+
+/// Structural compatibility with unresolved type parameters as wildcards. A
+/// [`Type::Var`] is a generic parameter the current context cannot resolve — a
+/// generic *enum's* field type at a construction or `match` site
+/// (`Option.Some(n)` checks `i64` against the declaration's `T`), or a generic
+/// function's un-instantiated base body — so it is compatible with anything
+/// here. This looseness is confined to [`compatible`]: every monomorphized
+/// instance is still checked at its concrete types, and [`type_eq`] stays exact
+/// for every other comparison.
+fn type_compat(a: &Type, b: &Type) -> bool {
+    use Type::*;
+    match (a, b) {
+        (Var(_), _) | (_, Var(_)) => true,
+        (Array(e1, n1), Array(e2, n2)) => n1 == n2 && type_compat(e1, e2),
+        (Slice(e1), Slice(e2)) => type_compat(e1, e2),
+        (Tuple(xs), Tuple(ys)) => {
+            xs.len() == ys.len() && xs.iter().zip(ys).all(|(x, y)| type_compat(x, y))
+        }
+        (
+            Arrow {
+                param: p1, ret: r1, ..
+            },
+            Arrow {
+                param: p2, ret: r2, ..
+            },
+        ) => type_compat(p1, p2) && type_compat(r1, r2),
+        (Nominal { def: d1, args: a1 }, Nominal { def: d2, args: a2 }) => {
+            d1 == d2 && a1.len() == a2.len() && a1.iter().zip(a2).all(|(x, y)| type_compat(x, y))
+        }
+        (
+            Ref {
+                mutable: m1,
+                of: o1,
+            },
+            Ref {
+                mutable: m2,
+                of: o2,
+            },
+        ) => m1 == m2 && type_compat(o1, o2),
+        (Linear(x), Linear(y)) => type_compat(x, y),
+        _ => type_eq(a, b),
+    }
+}
+
+/// A constructed value ([`Core::Ctor`]) carries no type arguments — `synth_ctor`
+/// types it as `Nominal { def, args: [] }` — while a declared generic reference
+/// (`Option[T]`) carries them. The same `def` with exactly one side
+/// unparameterized is therefore compatible: the instantiation is not recoverable
+/// at the `Ctor` site (the names-erased Core records only the nominal hash and
+/// tag), so the checker trusts the parameterized side. Two *parameterized*
+/// references still compare argument-by-argument in [`type_eq`].
+fn ctor_erased_nominal_eq(a: &Type, b: &Type) -> bool {
+    match (a, b) {
+        (Type::Nominal { def: d1, args: a1 }, Type::Nominal { def: d2, args: a2 }) => {
+            d1 == d2 && (a1.is_empty() != a2.is_empty())
+        }
+        _ => false,
     }
 }
 

@@ -281,3 +281,175 @@ pub fn print_diags(diags: &[(String, Diagnostic)]) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use marv_core::ir::{Core, Hash};
+    use marv_core::symbol_hash;
+
+    fn repo_root() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(2)
+            .expect("repo root is two levels above crates/marv-cli")
+            .to_path_buf()
+    }
+
+    /// Every `Ctor` in a Core term, as `(nominal hash, tag, field count)`.
+    fn collect_ctors(c: &Core, out: &mut Vec<(Hash, u32, usize)>) {
+        match c {
+            Core::Ctor { ty, tag, fields } => out.push((*ty, *tag, fields.len())),
+            Core::Let { value, body } => {
+                collect_ctors(value, out);
+                collect_ctors(body, out);
+            }
+            Core::Lam { body, .. } => collect_ctors(body, out),
+            Core::Match { branches, .. } => {
+                branches.iter().for_each(|b| collect_ctors(&b.body, out))
+            }
+            Core::Loop { cond, body, .. } => {
+                collect_ctors(cond, out);
+                collect_ctors(body, out);
+            }
+            _ => {}
+        }
+    }
+
+    fn ctors_of(loaded: &Loaded, name: &str) -> Vec<(Hash, u32, usize)> {
+        let def = &loaded
+            .defs
+            .iter()
+            .find(|(n, _)| n == name)
+            .unwrap_or_else(|| panic!("no def `{name}`"))
+            .1;
+        let mut out = Vec::new();
+        if let Some(body) = &def.body {
+            collect_ctors(body, &mut out);
+        }
+        out
+    }
+
+    /// The MARV-18 acceptance path: `marv check std/result.mv` as a single file
+    /// resolves the imported `Option`'s constructors to real `Ctor`s with the
+    /// `std.option.Option` nominal and declaration-order tags, and checks clean.
+    #[test]
+    fn single_file_check_of_std_result_is_clean() {
+        let path = repo_root().join("std/result.mv");
+        let loaded = load(path.to_str().unwrap()).unwrap_or_else(|e| panic!("load: {e}"));
+        let diags = loaded.check();
+        assert!(
+            !any_errors(&diags),
+            "expected a clean check, got: {:?}",
+            diags
+                .iter()
+                .map(|(n, d)| format!("{n}: {}", d.message))
+                .collect::<Vec<_>>()
+        );
+        let option = symbol_hash("std.option.Option");
+        let ctors = ctors_of(&loaded, "ok");
+        assert!(
+            ctors.contains(&(option, 1, 1)),
+            "`Option.Some(x)` is a tag-1 Ctor of std.option.Option: {ctors:?}"
+        );
+        assert!(
+            ctors.contains(&(option, 0, 0)),
+            "`Option.None` is a tag-0 Ctor of std.option.Option: {ctors:?}"
+        );
+    }
+
+    /// A scratch workspace: `<tmp>/std/` holds the prelude modules given as
+    /// `(file name, source)`, and `<tmp>/<main>` holds the file under test
+    /// (`find_std_dir` discovers `std/` as the file's sibling). The directory is
+    /// removed on drop.
+    struct Workspace {
+        dir: PathBuf,
+        main: PathBuf,
+    }
+
+    impl Workspace {
+        fn new(tag: &str, std_files: &[(&str, &str)], main: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!("marv18-{tag}-{}", std::process::id()));
+            let std_dir = dir.join("std");
+            std::fs::create_dir_all(&std_dir).expect("create std dir");
+            for (name, src) in std_files {
+                std::fs::write(std_dir.join(name), src).expect("write std file");
+            }
+            let main_path = dir.join("main.mv");
+            std::fs::write(&main_path, main).expect("write main file");
+            Workspace {
+                dir,
+                main: main_path,
+            }
+        }
+    }
+
+    impl Drop for Workspace {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    const PALETTE: &str = "\
+mod std.palette
+
+enum Color {
+    Red,
+    Rgb(i64),
+}
+";
+
+    /// The single-file path over an arbitrary (non-`std/result.mv`) module that
+    /// imports, constructs, and matches an enum from another module.
+    #[test]
+    fn single_file_path_resolves_imported_enum() {
+        let ws = Workspace::new(
+            "ok",
+            &[("palette.mv", PALETTE)],
+            "mod main\nimport std.palette (Color)\n\npure fn wrap(x: i64) -> Color {\n    \
+             Color.Rgb(x)\n}\n\npure fn brightness(c: Color) -> i64 {\n    match c {\n        \
+             Color.Red => 100,\n        Color.Rgb(v) => v,\n    }\n}\n",
+        );
+        let loaded = load(ws.main.to_str().unwrap()).unwrap_or_else(|e| panic!("load: {e}"));
+        let diags = loaded.check();
+        assert!(
+            !any_errors(&diags),
+            "expected a clean check, got: {:?}",
+            diags
+                .iter()
+                .map(|(n, d)| format!("{n}: {}", d.message))
+                .collect::<Vec<_>>()
+        );
+        let color = symbol_hash("std.palette.Color");
+        let ctors = ctors_of(&loaded, "wrap");
+        assert!(
+            ctors.contains(&(color, 1, 1)),
+            "`Color.Rgb(x)` is a tag-1 Ctor of std.palette.Color: {ctors:?}"
+        );
+    }
+
+    /// When the imported enum's source cannot be resolved (the module is not in
+    /// `std/`), loading fails with the explicit unresolved-import error — not a
+    /// misleading projection error or a silently wrong lowering.
+    #[test]
+    fn unresolvable_imported_enum_is_a_clear_error() {
+        let ws = Workspace::new(
+            "err",
+            // `std/` exists (so discovery succeeds) but has no `palette` module.
+            &[(
+                "option.mv",
+                "mod std.option\n\nenum Option[T] {\n    None,\n    Some(T),\n}\n",
+            )],
+            "mod main\nimport std.palette (Color)\n\npure fn wrap(x: i64) -> Color {\n    \
+             Color.Rgb(x)\n}\n",
+        );
+        let err = match load(ws.main.to_str().unwrap()) {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("load should fail when the imported enum is unresolvable"),
+        };
+        assert!(
+            err.contains("cannot resolve `Color`") && err.contains("std.palette"),
+            "error names the import and its module: {err}"
+        );
+    }
+}

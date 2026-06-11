@@ -32,9 +32,15 @@ lowered through the front end) or a `*.core.json` **Core-IR snapshot**
 (e.g. `import std.io (Io)`), the CLI locates the `std/` source directory — the
 `MARV_STD` environment variable if set, else the nearest ancestor of the file that
 contains one — parses the imported modules (transitively), and lowers them
-alongside your file so the capability interfaces are in scope. General
-cross-module linking via the content store is MARV-14; this is the minimal
-resolution the capability surface needs.
+alongside your file so the imported declarations are in scope: capability
+interfaces, and (MARV-18) **enums** — a single file that constructs or matches an
+imported enum (`Option.Some(x)`, `match res { Result.Ok(x) => … }`) lowers it to
+real constructors with the imported enum's nominal and tags, so
+`marv check std/result.mv` works standalone. If an imported enum's source cannot
+be resolved (the named `std` module has no file, or the import is not `std.*`),
+referencing its constructors is a clear lower error naming the import and its
+module. General cross-module linking via the content store is MARV-14; this is
+the minimal resolution the capability and enum surfaces need.
 
 ## `marv fmt`
 
