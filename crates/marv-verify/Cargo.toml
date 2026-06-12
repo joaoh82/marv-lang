@@ -8,6 +8,7 @@ repository.workspace = true
 
 [dependencies]
 marv-core = { path = "../marv-core" }
+marv-types = { path = "../marv-types" }
 easy-smt = "0.3.2"
 
 [dev-dependencies]

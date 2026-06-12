@@ -451,14 +451,14 @@ impl Server {
         let snap = self.snapshot(params)?.clone();
         let name = self.def_param(params)?;
         for f in &snap.files {
-            let Ok((_module_path, defs)) = marv_db::verify_inputs(f.kind, &f.text) else {
+            let Ok((_module_path, defs, world)) = marv_db::verify_inputs(f.kind, &f.text) else {
                 continue;
             };
             if let Some(vd) = defs
                 .into_iter()
                 .find(|d| d.qualified == name || d.name == name)
             {
-                let outcome = marv_verify::verify_def(&vd.def, &vd.params);
+                let outcome = marv_verify::verify_def(&vd.def, &vd.params, &world);
                 let mut result = verify_result_json(&outcome);
                 // Point the agent at the verified definition's source (MARV-12).
                 if let (Some(s), Some(obj)) = (vd.span.as_ref(), result.as_object_mut()) {
@@ -481,7 +481,7 @@ impl Server {
         let (mut added, mut deduped) = (0u64, 0u64);
 
         for f in &snap.files {
-            let Ok((module_path, defs)) = marv_db::verify_inputs(f.kind, &f.text) else {
+            let Ok((module_path, defs, _world)) = marv_db::verify_inputs(f.kind, &f.text) else {
                 continue;
             };
             let pairs: Vec<(String, marv_core::ir::Def)> =

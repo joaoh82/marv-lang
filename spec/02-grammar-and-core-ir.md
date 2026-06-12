@@ -129,7 +129,9 @@ primary        = literal | path | "(" , expr , ")" | block
 field_init     = ident , ":" , expr ;
 args           = expr , { "," , expr } ;
 literal        = int_lit | float_lit | str_lit | char_lit | bool_lit | "(" , ")" ;
-quant_expr     = ( "forall" | "exists" ) , ident , "in" , expr , ":" , expr ; (* contracts only *)
+quant_expr     = ( "forall" | "exists" ) , ident , "in" , expr , ".." , expr ,
+                 ":" , expr ;                  (* contracts only; domain [lo, hi) *)
+old_expr       = "old" , "(" , expr , ")" ;    (* ensures only; pre-state of expr *)
 ```
 
 The grammar is intentionally **LL(k)-friendly and unambiguous** so a hand-written
@@ -212,12 +214,43 @@ pub enum Core {
 pub struct Branch { pub binds: u32, pub body: Core }   // `binds` = ctor arity introduced
 
 /// First-order predicate language used by contracts (Tier 2 proof obligations).
+/// Comparisons range over the contract *expression* language `CExpr` (MARV-11);
+/// `forall`/`exists` quantify one integer over a half-open range `[lo, hi)`,
+/// the domain evaluated outside the binder's scope.
+///
+/// Variable conventions: in `requires`/`ensures`, `Var(k)` is the k-th parameter,
+/// `Var(n)` (n = arity) is `result`, and `Var(n + 1 + j)` is the j-th *enclosing*
+/// quantifier binder counted from the outermost. In a loop `invariant`, variables
+/// are de Bruijn indices into the loop-header environment, and each quantifier
+/// binds index 0 within its body (a real binder, like any Core binder).
 pub enum Pred {
     True, False,
-    Cmp(CmpOp, Atom, Atom),
+    Cmp(CmpOp, CExpr, CExpr),
     And(Box<Pred>, Box<Pred>), Or(Box<Pred>, Box<Pred>), Not(Box<Pred>),
-    Forall { domain: (Atom, Atom), body: Box<Pred> },   // bounded range [lo, hi)
-    Exists { domain: (Atom, Atom), body: Box<Pred> },
+    Forall { domain: (CExpr, CExpr), body: Box<Pred> }, // bounded range [lo, hi)
+    Exists { domain: (CExpr, CExpr), body: Box<Pred> },
+}
+
+/// Contract expression: an atom, or compound integer arithmetic / `len` /
+/// indexing / struct-field projection over contract values (MARV-11). On the
+/// wire, the `Atom` case serializes transparently (exactly as a bare `Atom`),
+/// so pre-MARV-11 Core JSON parses unchanged; in the §F encoding, atom operands
+/// keep their original tag bytes (0–2) and compound nodes extend the prefix
+/// code (Bin = 3, Neg = 4, Len = 5, Index = 6, Proj = 7) — existing content
+/// hashes are unaffected. `old(e)` in `ensures` erases at lowering: parameters
+/// are immutable values, so the pre-state of a contract expression is the
+/// expression itself.
+pub enum CExpr {
+    Atom(Atom),
+    Node(Box<CNode>),
+}
+
+pub enum CNode {
+    Bin(ArithOp, CExpr, CExpr),  // + - * / %  (truncating / and %, like PrimOp)
+    Neg(CExpr),                  // -e
+    Len(CExpr),                  // len(e)
+    Index(CExpr, CExpr),         // base[index]
+    Proj(CExpr, u32),            // base.field, by declaration index (names erased)
 }
 
 /// A top-level, content-addressed definition. Its `Hash` is computed over this struct

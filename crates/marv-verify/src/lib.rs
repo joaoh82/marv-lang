@@ -1,8 +1,8 @@
 //! # marv-verify — SMT contract discharge (milestone M6, Tier 2)
 //!
 //! The verified-subset half of marv's layered verification (`spec/01` §7). Given
-//! a **pure** function over integers and booleans, [`verify_def`] discharges its
-//! `ensures` postconditions against the function body and its `requires`
+//! a **pure** function, [`verify_def`] discharges its `ensures` postconditions
+//! (and loop `invariant`s) against the function body and its `requires`
 //! preconditions using an SMT solver (z3, driven over SMT-LIB by `easy-smt`),
 //! returning one of:
 //!
@@ -11,7 +11,8 @@
 //!   concrete **counterexample** assignment the agent can iterate against
 //!   (`spec/03` §4.3).
 //! - [`VerifyOutcome::Unsupported`] — the function is outside the decidable-ish
-//!   subset; the honest answer is to fall back to Tier-1 runtime checks.
+//!   subset (or the solver answered `unknown`); the honest answer is to fall
+//!   back to Tier-1 runtime checks.
 //! - [`VerifyOutcome::SolverUnavailable`] — no SMT solver could be launched;
 //!   like `Unsupported`, callers fall back to runtime checks.
 //!
@@ -24,6 +25,38 @@
 //! assumption. Then, per postcondition `P`, the solver is asked whether
 //! `requires ∧ res = body ∧ ¬P` is satisfiable: **unsat** proves `P`; **sat**
 //! yields a model = counterexample.
+//!
+//! ## The verified subset (MARV-11)
+//!
+//! Beyond ints and bools, the encoding covers:
+//!
+//! - **Truncating `/` and `%`.** SMT-LIB `div`/`mod` are Euclidean (the
+//!   remainder is always non-negative) while marv truncates toward zero; the
+//!   encoding corrects the Euclidean quotient by ±1 on the inexact negative
+//!   cases, so `-7 / 2` proves as `-3`, not `-4`. Division by zero traps at
+//!   runtime (Tier 1); Tier 2 treats it as an unspecified integer, which is
+//!   sound for partial correctness — a trapping execution never reaches the
+//!   postcondition (a counterexample whose divisor is 0 may thus be spurious).
+//! - **Arrays and slices** of ints/bools, as SMT arrays paired with a length
+//!   term (`[N]T` has a literal length; a slice's is an unconstrained
+//!   non-negative constant). `len`, indexing, array literals, and slice element
+//!   stores all encode; out-of-bounds reads are unspecified values (the runtime
+//!   traps — same partial-correctness argument as division).
+//! - **Structs and enums**, encoded *unpacked*: a value is an integer tag plus
+//!   per-variant field terms (no SMT datatypes needed). Construction, `match`
+//!   (branch-joined with `ite`), and struct projection encode; parameters of
+//!   nominal type are havocked from their declaration in the [`World`]
+//!   (recursive types are honestly `unsupported`).
+//! - **Bounded quantifiers** `forall i in lo..hi: P` / `exists …` in contracts
+//!   and invariants, encoded as guarded SMT quantifiers over the integers.
+//! - **`old(e)`** in `ensures` — erased at lowering (parameters are immutable
+//!   values, so the pre-state of a contract expression is the expression).
+//!
+//! Everything else stays an explicit `unsupported`, never a silent wrong
+//! `proved`. Two honest caveats: integer terms are *mathematical* integers, so
+//! 64-bit wraparound at runtime is not modeled; and quantifiers plus nonlinear
+//! arithmetic can drive the solver to `unknown`, which reports as
+//! `unsupported` (a per-query soft timeout keeps `verify` from hanging).
 //!
 //! ## Loops (MARV-22)
 //!
@@ -43,19 +76,27 @@
 //! invariant that holds but is too weak to imply an `ensures` shows up as a
 //! counterexample for that postcondition — the agent's cue to strengthen it. A
 //! loop *without* an invariant is still sound to pass through: nothing is
-//! assumed about its exit state beyond `¬cond`.
+//! assumed about its exit state beyond `¬cond`. Carried state may be scalar,
+//! array, or (declared, non-recursive) ADT-valued.
 //!
 //! Contract atoms use the flat convention `marv_core::lower` emits: `Var(k)` is
 //! the k-th parameter and `Var(n)` (n = arity) is `result`. Loop-invariant
 //! atoms instead use de Bruijn *indices* into the loop-header environment (the
 //! same convention the Tier-1 interpreter evaluates); Core erases names, so the
 //! carried slots render positionally as `s0`, `s1`, … in obligations and
-//! counterexamples (primed, `s0'`, for post-iteration values).
+//! counterexamples (primed, `s0'`, for post-iteration values), and quantifier
+//! binders render as `i`, `i1`, ….
 
 use easy_smt::{Context, ContextBuilder, Response, SExpr};
 
 use marv_core::ir::*;
-use marv_core::render_pred;
+use marv_core::{render_pred_with, PredVars};
+use marv_types::World;
+
+/// Soft per-query solver timeout (milliseconds). Quantifiers and nonlinear
+/// arithmetic can make z3 diverge; past this budget it answers `unknown`,
+/// which reports as an honest `unsupported`.
+const SOLVER_TIMEOUT_MS: i64 = 10_000;
 
 /// The result of discharging a definition's contracts (`spec/03` §3.3, §4.3).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -110,8 +151,11 @@ fn core_has_invariant(c: &Core) -> bool {
 }
 
 /// Verify one definition's contracts. `param_names` labels the parameters for
-/// counterexamples and obligation messages (missing names render as `arg{i}`).
-pub fn verify_def(def: &Def, param_names: &[String]) -> VerifyOutcome {
+/// counterexamples and obligation messages (missing names render as `arg{i}`);
+/// `world` resolves nominal (struct/enum) parameter and carried-state types so
+/// they can be havocked — pass an empty [`World`] when no declarations are
+/// available, at the cost of ADT-typed parameters reporting `unsupported`.
+pub fn verify_def(def: &Def, param_names: &[String], world: &World) -> VerifyOutcome {
     // Only pure functions with a body are in the verified subset.
     if def.kind != DefKind::Fn {
         return unsupported("only functions carry verifiable contracts");
@@ -120,7 +164,7 @@ pub fn verify_def(def: &Def, param_names: &[String]) -> VerifyOutcome {
         return unsupported("function has no body to verify");
     };
 
-    let (param_tys, ret_ty, eff) = peel_arrow(&def.ty);
+    let (param_tys, _ret_ty, eff) = peel_arrow(&def.ty);
     if !eff.is_empty() {
         return unsupported("Tier-2 verification covers only `pure` functions");
     }
@@ -130,23 +174,6 @@ pub fn verify_def(def: &Def, param_names: &[String]) -> VerifyOutcome {
     let inner = peel_lams(body);
     if def.ensures.is_empty() && !core_has_invariant(inner) {
         return VerifyOutcome::Proved;
-    }
-    // Parameter types must be in the scalar subset. The result type only
-    // matters when an `ensures` mentions it — an invariant-only function may
-    // return anything (e.g. unit).
-    for t in &param_tys {
-        if smt_sort_kind(t).is_none() {
-            return unsupported(&format!(
-                "parameter type `{}` is outside the verified subset (ints/bools)",
-                show_type(t)
-            ));
-        }
-    }
-    if !def.ensures.is_empty() && smt_sort_kind(&ret_ty).is_none() {
-        return unsupported(&format!(
-            "return type `{}` is outside the verified subset (ints/bools)",
-            show_type(&ret_ty)
-        ));
     }
 
     let n = param_tys.len();
@@ -171,8 +198,12 @@ pub fn verify_def(def: &Def, param_names: &[String]) -> VerifyOutcome {
             }
         }
     };
+    // Best-effort soft timeout so a diverging query answers `unknown` instead
+    // of hanging `verify`.
+    let timeout = ctx.numeral(SOLVER_TIMEOUT_MS);
+    let _ = ctx.set_option(":timeout", timeout);
 
-    match discharge(&mut ctx, def, inner, &param_tys, &ret_ty, &label) {
+    match discharge(&mut ctx, def, inner, &param_tys, &label, world) {
         Ok(o) => o,
         Err(VerifyErr::Unsupported(reason)) => VerifyOutcome::Unsupported { reason },
         Err(VerifyErr::Solver(e)) => VerifyOutcome::SolverUnavailable {
@@ -204,39 +235,47 @@ fn discharge(
     def: &Def,
     body: &Core,
     param_tys: &[Type],
-    ret_ty: &Type,
     label: &dyn Fn(u32) -> String,
+    world: &World,
 ) -> Result<VerifyOutcome, VerifyErr> {
-    // Declare a constant per parameter (`p0`, `p1`, …).
-    let mut consts: Vec<SExpr> = Vec::with_capacity(param_tys.len());
-    let mut env: Vec<Sym> = Vec::with_capacity(param_tys.len());
+    let path = ctx.true_();
+    let mut enc = Encoder {
+        ctx,
+        params: Vec::new(),
+        n_params: param_tys.len(),
+        label,
+        loops: 0,
+        fresh: 0,
+        world,
+    };
+
+    // Havoc one symbolic value per parameter (`p0`, `p1`, …).
     for (i, t) in param_tys.iter().enumerate() {
-        let c = ctx.declare_const(format!("p{i}"), sort_of(ctx, t))?;
-        consts.push(c);
-        env.push(Sym::Scalar(
-            c,
-            smt_sort_kind(t).expect("parameter types gated to the scalar subset"),
-        ));
+        let s = match enc.havoc_type(t, &format!("p{i}"), &mut Vec::new()) {
+            Ok(s) => s,
+            Err(Stop::Unsupported(reason)) => {
+                return Ok(VerifyOutcome::Unsupported {
+                    reason: format!("parameter `{}`: {reason}", label(i as u32)),
+                })
+            }
+            Err(Stop::Outcome(o)) => return Ok(o),
+            Err(Stop::Io(e)) => return Err(VerifyErr::Solver(e)),
+        };
+        enc.params.push(s);
     }
 
     // Assume preconditions *before* encoding the body: loop verification
     // conditions discharged during encoding must see them.
     for r in &def.requires {
-        let p = encode_pred(ctx, r, &consts, None).map_err(VerifyErr::Unsupported)?;
-        ctx.assert(p)?;
+        let p = encode_flat_pred(enc.ctx, r, &enc.params, None, &mut Vec::new())
+            .map_err(VerifyErr::Unsupported)?;
+        enc.ctx.assert(p)?;
     }
 
     // Symbolically evaluate the body. Encoding a loop checks its invariant's
     // initiation and consecution obligations in place, so it can short-circuit
     // into a `Failed`/`Unsupported` outcome of its own.
-    let path = ctx.true_();
-    let mut enc = Encoder {
-        ctx,
-        params: consts.clone(),
-        n_params: param_tys.len(),
-        label,
-        loops: 0,
-    };
+    let mut env: Vec<Sym> = enc.params.clone();
     let body_sym = match enc.encode(body, &mut env, path) {
         Ok(s) => s,
         Err(Stop::Unsupported(reason)) => return Ok(VerifyOutcome::Unsupported { reason }),
@@ -250,30 +289,42 @@ fn discharge(
         return Ok(VerifyOutcome::Proved);
     }
 
-    // res = <symbolic body>.
-    let Sym::Scalar(body_term, _) = body_sym else {
-        return Ok(unsupported(
-            "function result is outside the verified subset (ints/bools)",
-        ));
+    // `res = <symbolic body>` — a named constant for scalar results (it reads
+    // well in counterexamples); aggregate results flow through as-is.
+    let params = enc.params.clone();
+    let result_sym = match body_sym {
+        Sym::Scalar(term, kind) => {
+            let res = enc.ctx.declare_const("res", enc.sort(kind))?;
+            let eq = enc.ctx.eq(res, term);
+            enc.ctx.assert(eq)?;
+            Sym::Scalar(res, kind)
+        }
+        other => other,
     };
-    let res = ctx.declare_const("res", sort_of(ctx, ret_ty))?;
-    let eq = ctx.eq(res, body_term);
-    ctx.assert(eq)?;
 
     // Discharge each postcondition: prove ¬(requires ∧ body ∧ ¬ensures) is unsat.
+    let arity = params.len() as u32;
     for ens in &def.ensures {
-        let formula = encode_pred(ctx, ens, &consts, Some(res)).map_err(VerifyErr::Unsupported)?;
-        ctx.push()?;
-        let negated = ctx.not(formula);
-        ctx.assert(negated)?;
-        let resp = ctx.check()?;
+        let formula = encode_flat_pred(enc.ctx, ens, &params, Some(&result_sym), &mut Vec::new())
+            .map_err(VerifyErr::Unsupported)?;
+        enc.ctx.push()?;
+        let negated = enc.ctx.not(formula);
+        enc.ctx.assert(negated)?;
+        let resp = enc.ctx.check()?;
         match resp {
             Response::Unsat => {
-                ctx.pop()?;
+                enc.ctx.pop()?;
             }
             Response::Sat => {
-                let counterexample = model(ctx, &consts, res, label)?;
-                let obligation = render_pred(ens, label);
+                let mut items = enc.named_params();
+                model_items(&label(arity), &result_sym, &mut items);
+                let counterexample = match enc.values(items) {
+                    Ok(v) => v,
+                    Err(Stop::Io(e)) => return Err(VerifyErr::Solver(e)),
+                    Err(Stop::Unsupported(r)) => return Err(VerifyErr::Unsupported(r)),
+                    Err(Stop::Outcome(o)) => return Ok(o),
+                };
+                let obligation = render_pred_with(ens, label, PredVars::Flat { arity });
                 return Ok(VerifyOutcome::Failed {
                     message: format!("postcondition `{obligation}` can be violated"),
                     obligation,
@@ -281,11 +332,11 @@ fn discharge(
                 });
             }
             Response::Unknown => {
-                ctx.pop()?;
+                enc.ctx.pop()?;
                 return Ok(VerifyOutcome::Unsupported {
                     reason: format!(
                         "solver returned `unknown` for `{}`",
-                        render_pred(ens, label)
+                        render_pred_with(ens, label, PredVars::Flat { arity })
                     ),
                 });
             }
@@ -295,25 +346,8 @@ fn discharge(
     Ok(VerifyOutcome::Proved)
 }
 
-/// Read the satisfying assignment back as `(name, value)` pairs.
-fn model(
-    ctx: &mut Context,
-    consts: &[SExpr],
-    res: SExpr,
-    label: &dyn Fn(u32) -> String,
-) -> Result<Vec<(String, String)>, VerifyErr> {
-    let mut query: Vec<SExpr> = consts.to_vec();
-    query.push(res);
-    let values = ctx.get_value(query)?;
-    let mut out = Vec::with_capacity(values.len());
-    for (i, (_, val)) in values.iter().enumerate() {
-        let name = label(i as u32);
-        out.push((name, render_value(ctx, *val)));
-    }
-    Ok(out)
-}
-
-/// Render a model value: an integer, a boolean, or its raw s-expression text.
+/// Render a model value: an integer, a boolean, or its raw s-expression text
+/// (array models print as their store-chain).
 fn render_value(ctx: &Context, v: SExpr) -> String {
     if let Some(n) = ctx.get_i64(v) {
         return n.to_string();
@@ -326,16 +360,35 @@ fn render_value(ctx: &Context, v: SExpr) -> String {
     }
 }
 
-// ---- symbolic body encoding --------------------------------------------
+// ---- symbolic values -----------------------------------------------------
 
-/// A symbolic value: a scalar SMT term with its sort, the carried-state tuple
-/// a [`Core::Loop`] evaluates to (consumed by [`Core::Proj`]), or unit (the
-/// value of an expression statement — bound but never operated on).
+/// A symbolic value:
+///
+/// - `Scalar` — an int/bool SMT term.
+/// - `Array` — an SMT array (`Int → elem`) paired with its length term.
+/// - `Adt` — a struct/enum in the *unpacked* encoding: an integer `tag` term
+///   plus, per variant, its field values (`None` when this value can never
+///   carry that variant, e.g. a direct `Ctor`). Products are tag 0 with a
+///   single variant.
+/// - `Tuple` — the carried-state bundle a [`Core::Loop`] evaluates to
+///   (consumed by [`Core::Proj`]).
+/// - `Unit` — the value of an expression statement; bound but never operated
+///   on.
 #[derive(Clone)]
 enum Sym {
     Unit,
     Scalar(SExpr, SortKind),
-    Tuple(Vec<(SExpr, SortKind)>),
+    Array {
+        arr: SExpr,
+        len: SExpr,
+        elem: SortKind,
+    },
+    Adt {
+        ty: Hash,
+        tag: SExpr,
+        variants: Vec<Option<Vec<Sym>>>,
+    },
+    Tuple(Vec<Sym>),
 }
 
 /// Why encoding stopped: an out-of-subset construct, a finished outcome (a
@@ -356,6 +409,26 @@ fn stop(reason: &str) -> Stop {
     Stop::Unsupported(reason.to_string())
 }
 
+/// Flatten a symbolic value into displayable `(name, term)` pairs for a
+/// counterexample model: scalars directly, arrays as their length plus the
+/// array term, ADTs as their tag.
+fn model_items(name: &str, s: &Sym, out: &mut Vec<(String, SExpr)>) {
+    match s {
+        Sym::Unit => {}
+        Sym::Scalar(e, _) => out.push((name.to_string(), *e)),
+        Sym::Array { arr, len, .. } => {
+            out.push((format!("len({name})"), *len));
+            out.push((name.to_string(), *arr));
+        }
+        Sym::Adt { tag, .. } => out.push((format!("{name}.tag"), *tag)),
+        Sym::Tuple(items) => {
+            for (i, item) in items.iter().enumerate() {
+                model_items(&format!("{name}.{i}"), item, out);
+            }
+        }
+    }
+}
+
 /// Symbolic encoder for function bodies. `env` entries are indexed by de
 /// Bruijn level (atoms resolve as indices from the innermost slot, as the
 /// interpreter does); `path` is the conjunction of the branch conditions
@@ -363,13 +436,17 @@ fn stop(reason: &str) -> Stop {
 /// verification conditions only for the executions that actually reach it.
 struct Encoder<'a, 'b> {
     ctx: &'a mut Context,
-    /// Parameter constants, queried for counterexample models.
-    params: Vec<SExpr>,
+    /// Parameter values, queried for counterexample models.
+    params: Vec<Sym>,
     n_params: usize,
     /// Flat contract-index labels (parameter names / `result`).
     label: &'b dyn Fn(u32) -> String,
     /// Loop counter for fresh havoc/exit constant names (deterministic).
     loops: u32,
+    /// Counter for other fresh constant names (arrays, ADT fields).
+    fresh: u32,
+    /// Struct/enum declarations, for havocking nominal-typed values.
+    world: &'b World,
 }
 
 impl Encoder<'_, '_> {
@@ -386,46 +463,98 @@ impl Encoder<'_, '_> {
             }
 
             Core::Prim { op, args } => {
-                let mut a = Vec::with_capacity(args.len());
+                let mut syms = Vec::with_capacity(args.len());
                 for x in args {
-                    let s = self.atom(x, env)?;
-                    a.push(self.scalar(s, "primitive operand")?.0);
+                    syms.push(self.atom(x, env)?);
                 }
-                let (term, sort) = encode_prim(self.ctx, *op, &a).map_err(Stop::Unsupported)?;
-                Ok(Sym::Scalar(term, sort))
+                self.prim(*op, &syms)
             }
 
             Core::Match {
                 scrutinee,
                 branches,
             } => {
-                // Two-arm boolean `if`/`else` only: branch 0 = false, 1 = true.
-                if branches.len() != 2 || branches.iter().any(|b| b.binds != 0) {
-                    return Err(stop("match other than a two-arm boolean `if`/`else`"));
-                }
                 let s = self.atom(scrutinee, env)?;
-                let (cond, _) = self.scalar(s, "match scrutinee")?;
-                let not_cond = self.ctx.not(cond);
-                let then_path = self.ctx.and(path, cond);
-                let else_path = self.ctx.and(path, not_cond);
-                let then_s = self.encode(&branches[1].body, env, then_path)?;
-                let else_s = self.encode(&branches[0].body, env, else_path)?;
-                match (then_s, else_s) {
-                    (Sym::Unit, Sym::Unit) => Ok(Sym::Unit),
-                    (Sym::Scalar(t, sort), Sym::Scalar(e, _)) => {
-                        Ok(Sym::Scalar(self.ctx.ite(cond, t, e), sort))
-                    }
-                    _ => Err(stop("a loop-state tuple cannot flow through a `match`")),
-                }
+                self.encode_match(s, branches, env, path)
             }
 
             Core::Proj { base, idx } => match self.atom(base, env)? {
                 Sym::Tuple(fields) => fields
                     .get(*idx as usize)
-                    .map(|&(e, s)| Sym::Scalar(e, s))
+                    .cloned()
                     .ok_or_else(|| stop("projection index out of range on loop state")),
-                _ => Err(stop("aggregates/ADTs are outside the verified subset")),
+                // Struct field projection: products are single-variant.
+                Sym::Adt { variants, .. } if variants.len() == 1 => variants[0]
+                    .as_ref()
+                    .and_then(|fs| fs.get(*idx as usize).cloned())
+                    .ok_or_else(|| stop("projection index out of range on struct")),
+                _ => Err(stop("projection on a multi-variant enum value")),
             },
+
+            Core::Ctor { ty, tag, fields } => {
+                let mut fs = Vec::with_capacity(fields.len());
+                for a in fields {
+                    fs.push(self.atom(a, env)?);
+                }
+                // Size the variant table from the declaration when known, so
+                // `match` joins line up; an unknown hash (e.g. the synthetic
+                // loop-state bundle) gets exactly its own slot.
+                let n = if let Some(e) = self.world.enum_decl(ty) {
+                    e.variants.len()
+                } else if self.world.struct_decl(ty).is_some() {
+                    1
+                } else {
+                    *tag as usize + 1
+                };
+                let mut variants: Vec<Option<Vec<Sym>>> = vec![None; n.max(*tag as usize + 1)];
+                variants[*tag as usize] = Some(fs);
+                Ok(Sym::Adt {
+                    ty: *ty,
+                    tag: self.ctx.numeral(*tag as i64),
+                    variants,
+                })
+            }
+
+            Core::Array { elem, items } => {
+                let Some(elem_kind) = smt_sort_kind(elem) else {
+                    return Err(stop(
+                        "array element type is outside the verified subset (ints/bools)",
+                    ));
+                };
+                let name = self.fresh_name("arr");
+                let sort = self.array_sort(elem_kind);
+                let mut arr = self.ctx.declare_const(name, sort)?;
+                for (i, item) in items.iter().enumerate() {
+                    let s = self.atom(item, env)?;
+                    let (v, _) = self.scalar(s, "array element")?;
+                    let idx = self.ctx.numeral(i as i64);
+                    arr = self.ctx.store(arr, idx, v);
+                }
+                Ok(Sym::Array {
+                    arr,
+                    len: self.ctx.numeral(items.len() as i64),
+                    elem: elem_kind,
+                })
+            }
+
+            Core::IndexSet { base, index, value } => {
+                let b = self.atom(base, env)?;
+                let Sym::Array { arr, len, elem } = b else {
+                    return Err(stop("element store on a non-array value"));
+                };
+                let i = self.atom(index, env)?;
+                let (i, _) = self.scalar(i, "store index")?;
+                let v = self.atom(value, env)?;
+                let (v, _) = self.scalar(v, "stored element")?;
+                // An out-of-bounds store traps at runtime (Tier 1, MARV-34);
+                // here it writes a phantom location no in-bounds read sees —
+                // sound for partial correctness.
+                Ok(Sym::Array {
+                    arr: self.ctx.store(arr, i, v),
+                    len,
+                    elem,
+                })
+            }
 
             Core::Loop {
                 state,
@@ -437,12 +566,172 @@ impl Encoder<'_, '_> {
             Core::Cast { .. } => Err(stop("`as` casts are outside the verified subset")),
             Core::Ref { .. } => Err(stop("references are outside the verified subset")),
             Core::App { .. } => Err(stop("function calls are outside the verified subset")),
-            Core::Ctor { .. } | Core::Array { .. } | Core::IndexSet { .. } => {
-                Err(stop("aggregates/ADTs are outside the verified subset"))
-            }
             Core::Perform { .. } => Err(stop("a `perform` makes the function impure")),
             Core::Raise { .. } => Err(stop("`raise` is outside the verified subset")),
             Core::Lam { .. } => Err(stop("nested lambda is outside the verified subset")),
+        }
+    }
+
+    /// Encode a primitive over already-resolved operands. `len`/`index` consume
+    /// arrays; everything else is scalar.
+    fn prim(&mut self, op: PrimOp, args: &[Sym]) -> Result<Sym, Stop> {
+        match op {
+            PrimOp::Len => match args.first() {
+                Some(Sym::Array { len, .. }) => Ok(Sym::Scalar(*len, SortKind::Int)),
+                _ => Err(stop("`len` of a non-array value")),
+            },
+            PrimOp::Index => match (args.first(), args.get(1)) {
+                (Some(Sym::Array { arr, elem, .. }), Some(Sym::Scalar(i, _))) => {
+                    // An out-of-bounds read traps at runtime (Tier 1, MARV-34);
+                    // here it is an unspecified value — sound for partial
+                    // correctness.
+                    Ok(Sym::Scalar(self.ctx.select(*arr, *i), *elem))
+                }
+                _ => Err(stop("`index` of a non-array value")),
+            },
+            _ => {
+                let mut scalars = Vec::with_capacity(args.len());
+                for s in args {
+                    scalars.push(self.scalar(s.clone(), "primitive operand")?.0);
+                }
+                let (term, sort) =
+                    encode_prim(self.ctx, op, &scalars).map_err(Stop::Unsupported)?;
+                Ok(Sym::Scalar(term, sort))
+            }
+        }
+    }
+
+    /// Encode a `match`: a two-arm boolean `if`/`else` over a scalar bool, or a
+    /// tag-indexed match over an (unpacked) enum value, branch results joined
+    /// componentwise with `ite`.
+    fn encode_match(
+        &mut self,
+        scrutinee: Sym,
+        branches: &[Branch],
+        env: &mut Vec<Sym>,
+        path: SExpr,
+    ) -> Result<Sym, Stop> {
+        match scrutinee {
+            Sym::Scalar(cond, SortKind::Bool) => {
+                if branches.len() != 2 || branches.iter().any(|b| b.binds != 0) {
+                    return Err(stop("boolean match must be a two-arm `if`/`else`"));
+                }
+                let not_cond = self.ctx.not(cond);
+                let then_path = self.ctx.and(path, cond);
+                let else_path = self.ctx.and(path, not_cond);
+                let then_s = self.encode(&branches[1].body, env, then_path)?;
+                let else_s = self.encode(&branches[0].body, env, else_path)?;
+                self.merge(cond, then_s, else_s)
+            }
+            Sym::Adt { tag, variants, .. } => {
+                if branches.is_empty() {
+                    return Err(stop("match with no branches"));
+                }
+                let mut arms: Vec<(SExpr, Sym)> = Vec::with_capacity(branches.len());
+                for (k, br) in branches.iter().enumerate() {
+                    let tag_k = self.ctx.numeral(k as i64);
+                    let cond_k = self.ctx.eq(tag, tag_k);
+                    let path_k = self.ctx.and(path, cond_k);
+                    let depth = env.len();
+                    let binds = br.binds as usize;
+                    if binds > 0 {
+                        let Some(Some(fields)) = variants.get(k) else {
+                            return Err(stop(
+                                "enum value's fields for a matched variant are unknown",
+                            ));
+                        };
+                        if fields.len() != binds {
+                            return Err(stop("match branch arity does not fit the variant"));
+                        }
+                        env.extend(fields.iter().cloned());
+                    }
+                    let r = self.encode(&br.body, env, path_k);
+                    env.truncate(depth);
+                    arms.push((cond_k, r?));
+                }
+                // Join right-to-left: the last branch is the `ite` default.
+                let (_, mut acc) = arms.pop().expect("at least one branch");
+                for (cond_k, r) in arms.into_iter().rev() {
+                    acc = self.merge(cond_k, r, acc)?;
+                }
+                Ok(acc)
+            }
+            _ => Err(stop("match scrutinee is outside the verified subset")),
+        }
+    }
+
+    /// Join two branch values with `ite(cond, t, e)`, componentwise for
+    /// aggregates. For ADTs, a variant populated on only one side is taken
+    /// as-is — reading variant k's fields is only ever guarded by `tag == k`,
+    /// which implies the side that carried them.
+    fn merge(&mut self, cond: SExpr, t: Sym, e: Sym) -> Result<Sym, Stop> {
+        match (t, e) {
+            (Sym::Unit, Sym::Unit) => Ok(Sym::Unit),
+            (Sym::Scalar(a, sort), Sym::Scalar(b, _)) => {
+                Ok(Sym::Scalar(self.ctx.ite(cond, a, b), sort))
+            }
+            (
+                Sym::Array {
+                    arr: aa,
+                    len: la,
+                    elem,
+                },
+                Sym::Array {
+                    arr: ab, len: lb, ..
+                },
+            ) => Ok(Sym::Array {
+                arr: self.ctx.ite(cond, aa, ab),
+                len: self.ctx.ite(cond, la, lb),
+                elem,
+            }),
+            (
+                Sym::Adt {
+                    ty,
+                    tag: ta,
+                    variants: va,
+                },
+                Sym::Adt {
+                    tag: tb,
+                    variants: vb,
+                    ..
+                },
+            ) => {
+                let n = va.len().max(vb.len());
+                let mut variants: Vec<Option<Vec<Sym>>> = Vec::with_capacity(n);
+                for k in 0..n {
+                    let a = va.get(k).cloned().flatten();
+                    let b = vb.get(k).cloned().flatten();
+                    variants.push(match (a, b) {
+                        (Some(fa), Some(fb)) => {
+                            if fa.len() != fb.len() {
+                                return Err(stop("branches build the same variant differently"));
+                            }
+                            let mut fs = Vec::with_capacity(fa.len());
+                            for (x, y) in fa.into_iter().zip(fb) {
+                                fs.push(self.merge(cond, x, y)?);
+                            }
+                            Some(fs)
+                        }
+                        (one, other) => one.or(other),
+                    });
+                }
+                Ok(Sym::Adt {
+                    ty,
+                    tag: self.ctx.ite(cond, ta, tb),
+                    variants,
+                })
+            }
+            (Sym::Tuple(a), Sym::Tuple(b)) => {
+                if a.len() != b.len() {
+                    return Err(stop("branches produce differently-sized loop states"));
+                }
+                let mut items = Vec::with_capacity(a.len());
+                for (x, y) in a.into_iter().zip(b) {
+                    items.push(self.merge(cond, x, y)?);
+                }
+                Ok(Sym::Tuple(items))
+            }
+            _ => Err(stop("branches produce differently-shaped values")),
         }
     }
 
@@ -463,10 +752,9 @@ impl Encoder<'_, '_> {
         self.loops += 1;
 
         // Initial values of the carried slots, in the enclosing scope.
-        let mut inits: Vec<(SExpr, SortKind)> = Vec::with_capacity(k);
+        let mut inits: Vec<Sym> = Vec::with_capacity(k);
         for a in state {
-            let s = self.atom(a, env)?;
-            inits.push(self.scalar(s, "loop-carried state")?);
+            inits.push(self.atom(a, env)?);
         }
 
         // Invariant atoms are de Bruijn indices at loop-header depth. Carried
@@ -486,10 +774,12 @@ impl Encoder<'_, '_> {
                 format!("v{level}")
             }
         };
+        let render_inv =
+            |inv: &Pred| -> String { render_pred_with(inv, &inv_label, PredVars::DeBruijn) };
 
         // 1. Initiation: `path ∧ requires ⇒ Inv(init)`.
         if let Some(inv) = invariant {
-            env.extend(inits.iter().map(|&(e, s)| Sym::Scalar(e, s)));
+            env.extend(inits.iter().cloned());
             let inv_init = self.inv_pred(inv, env)?;
             env.truncate(header_depth);
 
@@ -500,14 +790,11 @@ impl Encoder<'_, '_> {
             match self.ctx.check()? {
                 Response::Unsat => self.ctx.pop()?,
                 Response::Sat => {
-                    let obligation = render_pred(inv, &inv_label);
+                    let obligation = render_inv(inv);
                     let mut items = self.named_params();
-                    items.extend(
-                        inits
-                            .iter()
-                            .enumerate()
-                            .map(|(j, &(e, _))| (format!("s{j}"), e)),
-                    );
+                    for (j, s) in inits.iter().enumerate() {
+                        model_items(&format!("s{j}"), s, &mut items);
+                    }
                     let counterexample = self.values(items)?;
                     return Err(Stop::Outcome(VerifyOutcome::Failed {
                         message: format!("loop invariant `{obligation}` can fail on entry"),
@@ -519,7 +806,7 @@ impl Encoder<'_, '_> {
                     return Err(Stop::Outcome(VerifyOutcome::Unsupported {
                         reason: format!(
                             "solver returned `unknown` for loop invariant `{}` (initiation)",
-                            render_pred(inv, &inv_label)
+                            render_inv(inv)
                         ),
                     }));
                 }
@@ -531,14 +818,14 @@ impl Encoder<'_, '_> {
         // without an invariant, so nested loops still get their verification
         // conditions (under the sound, weaker assumption of an unconstrained
         // outer state).
-        let mut havoc: Vec<(SExpr, SortKind)> = Vec::with_capacity(k);
-        for (j, &(_, s)) in inits.iter().enumerate() {
-            let c = self.ctx.declare_const(format!("l{id}s{j}"), self.sort(s))?;
-            havoc.push((c, s));
+        let mut havoc: Vec<Sym> = Vec::with_capacity(k);
+        for (j, init) in inits.iter().enumerate() {
+            let h = self.havoc_like(init, &format!("l{id}s{j}"))?;
+            havoc.push(h);
         }
         self.ctx.push()?;
         self.ctx.assert(path)?;
-        env.extend(havoc.iter().map(|&(e, s)| Sym::Scalar(e, s)));
+        env.extend(havoc.iter().cloned());
         let inv_h = match invariant {
             Some(inv) => {
                 let p = self.inv_pred(inv, env)?;
@@ -555,29 +842,25 @@ impl Encoder<'_, '_> {
         if let Some(ih) = inv_h {
             body_path = self.ctx.and(body_path, ih);
         }
-        let next = self.loop_next(body, env, k, body_path)?;
+        let body_sym = self.encode(body, env, body_path)?;
+        let next = as_state(body_sym, k)?;
         if let Some(inv) = invariant {
             env.truncate(header_depth);
-            env.extend(next.iter().map(|&(e, s)| Sym::Scalar(e, s)));
+            env.extend(next.iter().cloned());
             let inv_next = self.inv_pred(inv, env)?;
             let neg = self.ctx.not(inv_next);
             self.ctx.assert(neg)?;
             match self.ctx.check()? {
                 Response::Unsat => {}
                 Response::Sat => {
-                    let obligation = render_pred(inv, &inv_label);
+                    let obligation = render_inv(inv);
                     let mut items = self.named_params();
-                    items.extend(
-                        havoc
-                            .iter()
-                            .enumerate()
-                            .map(|(j, &(e, _))| (format!("s{j}"), e)),
-                    );
-                    items.extend(
-                        next.iter()
-                            .enumerate()
-                            .map(|(j, &(e, _))| (format!("s{j}'"), e)),
-                    );
+                    for (j, s) in havoc.iter().enumerate() {
+                        model_items(&format!("s{j}"), s, &mut items);
+                    }
+                    for (j, s) in next.iter().enumerate() {
+                        model_items(&format!("s{j}'"), s, &mut items);
+                    }
                     let counterexample = self.values(items)?;
                     return Err(Stop::Outcome(VerifyOutcome::Failed {
                         message: format!(
@@ -591,7 +874,7 @@ impl Encoder<'_, '_> {
                     return Err(Stop::Outcome(VerifyOutcome::Unsupported {
                         reason: format!(
                             "solver returned `unknown` for loop invariant `{}` (consecution)",
-                            render_pred(inv, &inv_label)
+                            render_inv(inv)
                         ),
                     }));
                 }
@@ -603,12 +886,12 @@ impl Encoder<'_, '_> {
         // 3. Use: the loop's value is a fresh exit state, about which exactly
         // `Inv ∧ ¬cond` may be assumed — guarded by `path` so an unreachable
         // (or non-terminating) loop cannot poison the rest of the function.
-        let mut exit: Vec<(SExpr, SortKind)> = Vec::with_capacity(k);
-        for (j, &(_, s)) in inits.iter().enumerate() {
-            let c = self.ctx.declare_const(format!("l{id}x{j}"), self.sort(s))?;
-            exit.push((c, s));
+        let mut exit: Vec<Sym> = Vec::with_capacity(k);
+        for (j, init) in inits.iter().enumerate() {
+            let x = self.havoc_like(init, &format!("l{id}x{j}"))?;
+            exit.push(x);
         }
-        env.extend(exit.iter().map(|&(e, s)| Sym::Scalar(e, s)));
+        env.extend(exit.iter().cloned());
         let inv_x = match invariant {
             Some(inv) => Some(self.inv_pred(inv, env)?),
             None => None,
@@ -625,81 +908,19 @@ impl Encoder<'_, '_> {
         Ok(Sym::Tuple(exit))
     }
 
-    /// Encode a loop body to its next-state tuple: the `let` spine runs, the
-    /// terminal `Ctor` bundles the carried values, and a branch-join `Match`
-    /// tail (MARV-21) merges the per-branch tuples componentwise.
-    fn loop_next(
-        &mut self,
-        body: &Core,
-        env: &mut Vec<Sym>,
-        k: usize,
-        path: SExpr,
-    ) -> Result<Vec<(SExpr, SortKind)>, Stop> {
-        match body {
-            Core::Let { value, body } => {
-                let v = self.encode(value, env, path)?;
-                env.push(v);
-                let r = self.loop_next(body, env, k, path);
-                env.pop();
-                r
-            }
-            Core::Ctor { fields, .. } => {
-                if fields.len() != k {
-                    return Err(stop("loop body did not produce its carried state"));
-                }
-                fields
-                    .iter()
-                    .map(|a| {
-                        let s = self.atom(a, env)?;
-                        self.scalar(s, "loop-carried state")
-                    })
-                    .collect()
-            }
-            Core::Match {
-                scrutinee,
-                branches,
-            } => {
-                if branches.len() != 2 || branches.iter().any(|b| b.binds != 0) {
-                    return Err(stop("match other than a two-arm boolean `if`/`else`"));
-                }
-                let s = self.atom(scrutinee, env)?;
-                let (cond, _) = self.scalar(s, "match scrutinee")?;
-                let not_cond = self.ctx.not(cond);
-                let then_path = self.ctx.and(path, cond);
-                let else_path = self.ctx.and(path, not_cond);
-                let t = self.loop_next(&branches[1].body, env, k, then_path)?;
-                let e = self.loop_next(&branches[0].body, env, k, else_path)?;
-                Ok(t.into_iter()
-                    .zip(e)
-                    .map(|((te, sort), (ee, _))| (self.ctx.ite(cond, te, ee), sort))
-                    .collect())
-            }
-            _ => Err(stop("loop body form is outside the verified subset")),
-        }
-    }
-
     /// Encode a loop-invariant predicate. Unlike `requires`/`ensures` (flat
-    /// convention, [`encode_pred`]), its atoms are de Bruijn *indices* into the
-    /// loop-header environment — the convention `marv_core::lower` finalizes
-    /// and the Tier-1 interpreter evaluates.
-    fn inv_pred(&mut self, p: &Pred, env: &[Sym]) -> Result<SExpr, Stop> {
+    /// convention, [`encode_flat_pred`]), its variables are de Bruijn *indices*
+    /// into the loop-header environment — the convention `marv_core::lower`
+    /// finalizes and the Tier-1 interpreter evaluates. A quantifier binds index
+    /// 0 within its body, so it pushes its bound variable as the innermost slot.
+    fn inv_pred(&mut self, p: &Pred, env: &mut Vec<Sym>) -> Result<SExpr, Stop> {
         match p {
             Pred::True => Ok(self.ctx.true_()),
             Pred::False => Ok(self.ctx.false_()),
             Pred::Cmp(op, l, r) => {
-                let x = self.inv_atom(l, env)?;
-                let y = self.inv_atom(r, env)?;
-                Ok(match op {
-                    CmpOp::Eq => self.ctx.eq(x, y),
-                    CmpOp::Ne => {
-                        let e = self.ctx.eq(x, y);
-                        self.ctx.not(e)
-                    }
-                    CmpOp::Lt => self.ctx.lt(x, y),
-                    CmpOp::Le => self.ctx.lte(x, y),
-                    CmpOp::Gt => self.ctx.gt(x, y),
-                    CmpOp::Ge => self.ctx.gte(x, y),
-                })
+                let x = self.inv_cexpr(l, env)?;
+                let y = self.inv_cexpr(r, env)?;
+                encode_cmp(self.ctx, *op, &x, &y).map_err(Stop::Unsupported)
             }
             Pred::And(l, r) => {
                 let x = self.inv_pred(l, env)?;
@@ -715,21 +936,60 @@ impl Encoder<'_, '_> {
                 let x = self.inv_pred(inner, env)?;
                 Ok(self.ctx.not(x))
             }
-            Pred::Forall { .. } | Pred::Exists { .. } => Err(stop(
-                "bounded quantifiers are not yet in the verified subset",
-            )),
+            Pred::Forall { domain, body } | Pred::Exists { domain, body } => {
+                let exists = matches!(p, Pred::Exists { .. });
+                let lo = self.inv_cexpr(&domain.0, env)?;
+                let (lo, _) = self.scalar(lo, "quantifier bound")?;
+                let hi = self.inv_cexpr(&domain.1, env)?;
+                let (hi, _) = self.scalar(hi, "quantifier bound")?;
+                let name = format!("qi{}", env.len());
+                let qv = self.ctx.atom(name.as_str());
+                env.push(Sym::Scalar(qv, SortKind::Int));
+                let inner = self.inv_pred(body, env);
+                env.pop();
+                let inner = inner?;
+                Ok(quantify(self.ctx, exists, &name, qv, lo, hi, inner))
+            }
         }
     }
 
-    fn inv_atom(&self, a: &Atom, env: &[Sym]) -> Result<SExpr, Stop> {
-        match a {
-            Atom::Var(_) => {
-                let s = self.atom(a, env)?;
-                Ok(self.scalar(s, "invariant variable")?.0)
-            }
-            _ => match self.atom(a, env)? {
-                Sym::Scalar(e, _) => Ok(e),
-                _ => Err(stop("non-scalar literal in contract")),
+    /// Encode a loop-invariant contract expression against the environment.
+    fn inv_cexpr(&mut self, e: &CExpr, env: &mut Vec<Sym>) -> Result<Sym, Stop> {
+        match e {
+            CExpr::Atom(a) => self.atom(a, env),
+            CExpr::Node(n) => match &**n {
+                CNode::Bin(op, l, r) => {
+                    let x = self.inv_cexpr(l, env)?;
+                    let (x, _) = self.scalar(x, "contract operand")?;
+                    let y = self.inv_cexpr(r, env)?;
+                    let (y, _) = self.scalar(y, "contract operand")?;
+                    Ok(Sym::Scalar(smt_arith(self.ctx, *op, x, y), SortKind::Int))
+                }
+                CNode::Neg(inner) => {
+                    let x = self.inv_cexpr(inner, env)?;
+                    let (x, _) = self.scalar(x, "contract operand")?;
+                    let zero = self.ctx.numeral(0);
+                    Ok(Sym::Scalar(self.ctx.sub(zero, x), SortKind::Int))
+                }
+                CNode::Len(inner) => match self.inv_cexpr(inner, env)? {
+                    Sym::Array { len, .. } => Ok(Sym::Scalar(len, SortKind::Int)),
+                    _ => Err(stop("`len` of a non-array value in a contract")),
+                },
+                CNode::Index(base, index) => {
+                    let b = self.inv_cexpr(base, env)?;
+                    let i = self.inv_cexpr(index, env)?;
+                    let (i, _) = self.scalar(i, "contract index")?;
+                    match b {
+                        Sym::Array { arr, elem, .. } => {
+                            Ok(Sym::Scalar(self.ctx.select(arr, i), elem))
+                        }
+                        _ => Err(stop("indexing a non-array value in a contract")),
+                    }
+                }
+                CNode::Proj(base, idx) => {
+                    let b = self.inv_cexpr(base, env)?;
+                    adt_field(&b, *idx).map_err(Stop::Unsupported)
+                }
             },
         }
     }
@@ -777,13 +1037,169 @@ impl Encoder<'_, '_> {
         }
     }
 
-    /// Parameter constants paired with their display names.
+    fn array_sort(&self, elem: SortKind) -> SExpr {
+        let int = self.ctx.int_sort();
+        self.ctx.array_sort(int, self.sort(elem))
+    }
+
+    fn fresh_name(&mut self, prefix: &str) -> String {
+        let id = self.fresh;
+        self.fresh += 1;
+        format!("{prefix}{id}")
+    }
+
+    /// Declare a fresh symbolic value of type `t` named after `name` — a
+    /// parameter or a havocked ADT field. `visiting` carries the nominal hashes
+    /// currently being expanded, so a recursive type is an honest
+    /// `unsupported` instead of an infinite expansion.
+    fn havoc_type(&mut self, t: &Type, name: &str, visiting: &mut Vec<Hash>) -> Result<Sym, Stop> {
+        match t {
+            Type::Unit => Ok(Sym::Unit),
+            Type::Bool => {
+                let c = self.ctx.declare_const(name, self.ctx.bool_sort())?;
+                Ok(Sym::Scalar(c, SortKind::Bool))
+            }
+            Type::Int(_) => {
+                let c = self.ctx.declare_const(name, self.ctx.int_sort())?;
+                Ok(Sym::Scalar(c, SortKind::Int))
+            }
+            Type::Array(elem, n) => {
+                let Some(elem_kind) = smt_sort_kind(elem) else {
+                    return Err(stop(
+                        "array element type is outside the verified subset (ints/bools)",
+                    ));
+                };
+                let sort = self.array_sort(elem_kind);
+                let arr = self.ctx.declare_const(name, sort)?;
+                Ok(Sym::Array {
+                    arr,
+                    len: self.ctx.numeral(*n as i64),
+                    elem: elem_kind,
+                })
+            }
+            Type::Slice(elem) => {
+                let Some(elem_kind) = smt_sort_kind(elem) else {
+                    return Err(stop(
+                        "slice element type is outside the verified subset (ints/bools)",
+                    ));
+                };
+                let sort = self.array_sort(elem_kind);
+                let arr = self.ctx.declare_const(name, sort)?;
+                let len = self
+                    .ctx
+                    .declare_const(format!("{name}_len"), self.ctx.int_sort())?;
+                let zero = self.ctx.numeral(0);
+                let nonneg = self.ctx.gte(len, zero);
+                self.ctx.assert(nonneg)?;
+                Ok(Sym::Array {
+                    arr,
+                    len,
+                    elem: elem_kind,
+                })
+            }
+            Type::Linear(inner) => self.havoc_type(inner, name, visiting),
+            Type::Nominal { def, args } => {
+                if !args.is_empty() {
+                    return Err(stop("generic ADTs are outside the verified subset"));
+                }
+                if visiting.contains(def) {
+                    return Err(stop("recursive types are outside the verified subset"));
+                }
+                visiting.push(*def);
+                let r = self.havoc_nominal(def, name, visiting);
+                visiting.pop();
+                r
+            }
+            _ => Err(stop("type is outside the verified subset")),
+        }
+    }
+
+    /// Havoc a struct/enum value from its declaration: a fresh tag constrained
+    /// to the variant range plus fresh fields for *every* variant.
+    fn havoc_nominal(
+        &mut self,
+        def: &Hash,
+        name: &str,
+        visiting: &mut Vec<Hash>,
+    ) -> Result<Sym, Stop> {
+        if let Some(s) = self.world.struct_decl(def) {
+            let fields = s.fields.clone();
+            let mut fs = Vec::with_capacity(fields.len());
+            for (i, ft) in fields.iter().enumerate() {
+                fs.push(self.havoc_type(ft, &format!("{name}_f{i}"), visiting)?);
+            }
+            return Ok(Sym::Adt {
+                ty: *def,
+                tag: self.ctx.numeral(0),
+                variants: vec![Some(fs)],
+            });
+        }
+        if let Some(e) = self.world.enum_decl(def) {
+            let decl_variants = e.variants.clone();
+            let tag = self
+                .ctx
+                .declare_const(format!("{name}_tag"), self.ctx.int_sort())?;
+            let zero = self.ctx.numeral(0);
+            let n = self.ctx.numeral(decl_variants.len() as i64);
+            let lo = self.ctx.gte(tag, zero);
+            let hi = self.ctx.lt(tag, n);
+            let bounds = self.ctx.and(lo, hi);
+            self.ctx.assert(bounds)?;
+            let mut variants = Vec::with_capacity(decl_variants.len());
+            for (k, v) in decl_variants.iter().enumerate() {
+                let mut fs = Vec::with_capacity(v.fields.len());
+                for (i, ft) in v.fields.iter().enumerate() {
+                    fs.push(self.havoc_type(ft, &format!("{name}_v{k}f{i}"), visiting)?);
+                }
+                variants.push(Some(fs));
+            }
+            return Ok(Sym::Adt {
+                ty: *def,
+                tag,
+                variants,
+            });
+        }
+        Err(stop("nominal type has no known struct/enum declaration"))
+    }
+
+    /// A fresh symbolic value with the same *shape* as `model` — used to havoc
+    /// loop-carried state for consecution and exit.
+    fn havoc_like(&mut self, model: &Sym, name: &str) -> Result<Sym, Stop> {
+        match model {
+            Sym::Unit => Ok(Sym::Unit),
+            Sym::Scalar(_, kind) => {
+                let sort = self.sort(*kind);
+                let c = self.ctx.declare_const(name, sort)?;
+                Ok(Sym::Scalar(c, *kind))
+            }
+            Sym::Array { elem, .. } => {
+                let sort = self.array_sort(*elem);
+                let arr = self.ctx.declare_const(name, sort)?;
+                let len = self
+                    .ctx
+                    .declare_const(format!("{name}_len"), self.ctx.int_sort())?;
+                let zero = self.ctx.numeral(0);
+                let nonneg = self.ctx.gte(len, zero);
+                self.ctx.assert(nonneg)?;
+                Ok(Sym::Array {
+                    arr,
+                    len,
+                    elem: *elem,
+                })
+            }
+            // A carried ADT havocs from its declaration (all variants live).
+            Sym::Adt { ty, .. } => self.havoc_nominal(&ty.clone(), name, &mut vec![*ty]),
+            Sym::Tuple(_) => Err(stop("nested loop state cannot be havocked")),
+        }
+    }
+
+    /// Parameter values flattened into displayable model items.
     fn named_params(&self) -> Vec<(String, SExpr)> {
-        self.params
-            .iter()
-            .enumerate()
-            .map(|(i, &c)| ((self.label)(i as u32), c))
-            .collect()
+        let mut out = Vec::new();
+        for (i, s) in self.params.iter().enumerate() {
+            model_items(&(self.label)(i as u32), s, &mut out);
+        }
+        out
     }
 
     /// Read the current model's values for `items` as `(name, value)` pairs.
@@ -798,26 +1214,52 @@ impl Encoder<'_, '_> {
     }
 }
 
+/// Unbundle a loop body's value into its carried-state vector: the terminal
+/// `Ctor` encodes as a single-variant ADT (or the body is `Unit` for a loop
+/// that carries nothing).
+fn as_state(s: Sym, k: usize) -> Result<Vec<Sym>, Stop> {
+    let fields = match s {
+        Sym::Adt { mut variants, .. } if variants.len() == 1 => variants
+            .pop()
+            .flatten()
+            .ok_or_else(|| stop("loop body did not produce its carried state"))?,
+        Sym::Tuple(fields) => fields,
+        Sym::Unit if k == 0 => Vec::new(),
+        _ => return Err(stop("loop body did not produce its carried state")),
+    };
+    if fields.len() != k {
+        return Err(stop("loop body did not produce its carried state"));
+    }
+    Ok(fields)
+}
+
+// ---- primitive & arithmetic encoding --------------------------------------
+
 fn encode_prim(ctx: &Context, op: PrimOp, a: &[SExpr]) -> Result<(SExpr, SortKind), String> {
     use PrimOp::*;
     let bin = |i: usize, j: usize| (a[i], a[j]);
     Ok(match op {
         Add => {
             let (x, y) = bin(0, 1);
-            (ctx.plus(x, y), SortKind::Int)
+            (smt_arith(ctx, ArithOp::Add, x, y), SortKind::Int)
         }
         Sub => {
             let (x, y) = bin(0, 1);
-            (ctx.sub(x, y), SortKind::Int)
+            (smt_arith(ctx, ArithOp::Sub, x, y), SortKind::Int)
         }
         Mul => {
             let (x, y) = bin(0, 1);
-            (ctx.times(x, y), SortKind::Int)
+            (smt_arith(ctx, ArithOp::Mul, x, y), SortKind::Int)
         }
-        // SMT `div`/`mod` are Euclidean, but marv's `/`/`%` truncate toward zero;
-        // rather than emit an unsound encoding, treat them as out-of-subset.
-        Div | Rem => {
-            return Err("integer division/remainder is not yet in the verified subset".to_string())
+        // Truncate-toward-zero division/remainder, corrected from SMT's
+        // Euclidean `div`/`mod` (see [`smt_tdiv`]).
+        Div => {
+            let (x, y) = bin(0, 1);
+            (smt_arith(ctx, ArithOp::Div, x, y), SortKind::Int)
+        }
+        Rem => {
+            let (x, y) = bin(0, 1);
+            (smt_arith(ctx, ArithOp::Rem, x, y), SortKind::Int)
         }
         Eq => {
             let (x, y) = bin(0, 1);
@@ -858,85 +1300,241 @@ fn encode_prim(ctx: &Context, op: PrimOp, a: &[SExpr]) -> Result<(SExpr, SortKin
             let zero = ctx.numeral(0);
             (ctx.sub(zero, a[0]), SortKind::Int)
         }
-        Len | Index => return Err("len/index is outside the verified subset".to_string()),
+        Len | Index => return Err("len/index of a non-array value".to_string()),
     })
 }
 
-// ---- predicate encoding -------------------------------------------------
+/// Truncate-toward-zero quotient over SMT integers. SMT-LIB `div` is Euclidean
+/// (`0 <= mod < |y|`): it agrees with truncation when the division is exact or
+/// the dividend is non-negative, and otherwise overshoots by exactly one step
+/// *away from zero* — so correct by +1 for a positive divisor, −1 for a
+/// negative one. `y = 0` is unspecified in both encodings (the runtime traps).
+fn smt_tdiv(ctx: &Context, x: SExpr, y: SExpr) -> SExpr {
+    let zero = ctx.numeral(0);
+    let one = ctx.numeral(1);
+    let q = ctx.div(x, y);
+    let m = ctx.modulo(x, y);
+    let x_nonneg = ctx.gte(x, zero);
+    let exact = ctx.eq(m, zero);
+    let agrees = ctx.or(x_nonneg, exact);
+    let plus1 = ctx.plus(q, one);
+    let minus1 = ctx.sub(q, one);
+    let y_pos = ctx.gt(y, zero);
+    let corrected = ctx.ite(y_pos, plus1, minus1);
+    ctx.ite(agrees, q, corrected)
+}
 
-/// Encode a contract predicate to an SMT boolean. `consts` are the parameter
-/// constants (flat index); `result` is the result constant if in scope.
-fn encode_pred(
+/// Encode contract/body integer arithmetic; `/` and `%` use the truncating
+/// encoding shared with [`encode_prim`].
+fn smt_arith(ctx: &Context, op: ArithOp, x: SExpr, y: SExpr) -> SExpr {
+    match op {
+        ArithOp::Add => ctx.plus(x, y),
+        ArithOp::Sub => ctx.sub(x, y),
+        ArithOp::Mul => ctx.times(x, y),
+        ArithOp::Div => smt_tdiv(ctx, x, y),
+        ArithOp::Rem => {
+            let q = smt_tdiv(ctx, x, y);
+            let yq = ctx.times(y, q);
+            ctx.sub(x, yq)
+        }
+    }
+}
+
+/// Build a guarded bounded quantifier: `forall q. lo <= q < hi ⇒ body` or
+/// `exists q. lo <= q < hi ∧ body`.
+fn quantify(
+    ctx: &Context,
+    exists: bool,
+    name: &str,
+    qv: SExpr,
+    lo: SExpr,
+    hi: SExpr,
+    body: SExpr,
+) -> SExpr {
+    let ge = ctx.gte(qv, lo);
+    let lt = ctx.lt(qv, hi);
+    let bounds = ctx.and(ge, lt);
+    let int = ctx.int_sort();
+    if exists {
+        let inner = ctx.and(bounds, body);
+        ctx.exists(vec![(name.to_string(), int)], inner)
+    } else {
+        let inner = ctx.imp(bounds, body);
+        ctx.forall(vec![(name.to_string(), int)], inner)
+    }
+}
+
+/// Encode a comparison over two symbolic operands: `==`/`!=` for any pair of
+/// same-shaped scalars, the orderings for integers.
+fn encode_cmp(ctx: &Context, op: CmpOp, x: &Sym, y: &Sym) -> Result<SExpr, String> {
+    let (Sym::Scalar(a, ka), Sym::Scalar(b, _kb)) = (x, y) else {
+        return Err("contract comparison over a non-scalar value".to_string());
+    };
+    Ok(match op {
+        CmpOp::Eq => ctx.eq(*a, *b),
+        CmpOp::Ne => {
+            let e = ctx.eq(*a, *b);
+            ctx.not(e)
+        }
+        CmpOp::Lt | CmpOp::Le | CmpOp::Gt | CmpOp::Ge => {
+            if matches!(ka, SortKind::Bool) {
+                return Err("ordering comparison over booleans in a contract".to_string());
+            }
+            match op {
+                CmpOp::Lt => ctx.lt(*a, *b),
+                CmpOp::Le => ctx.lte(*a, *b),
+                CmpOp::Gt => ctx.gt(*a, *b),
+                CmpOp::Ge => ctx.gte(*a, *b),
+                _ => unreachable!(),
+            }
+        }
+    })
+}
+
+// ---- flat (requires/ensures) predicate encoding ---------------------------
+
+/// Encode a flat-convention contract predicate to an SMT boolean. `params` are
+/// the parameter values; `result` is the result value if in scope; `binders`
+/// the SMT variables of the enclosing quantifiers, outermost first.
+fn encode_flat_pred(
     ctx: &Context,
     p: &Pred,
-    consts: &[SExpr],
-    result: Option<SExpr>,
+    params: &[Sym],
+    result: Option<&Sym>,
+    binders: &mut Vec<SExpr>,
 ) -> Result<SExpr, String> {
     match p {
         Pred::True => Ok(ctx.true_()),
         Pred::False => Ok(ctx.false_()),
         Pred::Cmp(op, l, r) => {
-            let x = encode_pred_atom(ctx, l, consts, result)?;
-            let y = encode_pred_atom(ctx, r, consts, result)?;
-            Ok(match op {
-                CmpOp::Eq => ctx.eq(x, y),
-                CmpOp::Ne => {
-                    let e = ctx.eq(x, y);
-                    ctx.not(e)
-                }
-                CmpOp::Lt => ctx.lt(x, y),
-                CmpOp::Le => ctx.lte(x, y),
-                CmpOp::Gt => ctx.gt(x, y),
-                CmpOp::Ge => ctx.gte(x, y),
-            })
+            let x = encode_flat_cexpr(ctx, l, params, result, binders)?;
+            let y = encode_flat_cexpr(ctx, r, params, result, binders)?;
+            encode_cmp(ctx, *op, &x, &y)
         }
         Pred::And(l, r) => {
-            let x = encode_pred(ctx, l, consts, result)?;
-            let y = encode_pred(ctx, r, consts, result)?;
+            let x = encode_flat_pred(ctx, l, params, result, binders)?;
+            let y = encode_flat_pred(ctx, r, params, result, binders)?;
             Ok(ctx.and(x, y))
         }
         Pred::Or(l, r) => {
-            let x = encode_pred(ctx, l, consts, result)?;
-            let y = encode_pred(ctx, r, consts, result)?;
+            let x = encode_flat_pred(ctx, l, params, result, binders)?;
+            let y = encode_flat_pred(ctx, r, params, result, binders)?;
             Ok(ctx.or(x, y))
         }
         Pred::Not(inner) => {
-            let x = encode_pred(ctx, inner, consts, result)?;
+            let x = encode_flat_pred(ctx, inner, params, result, binders)?;
             Ok(ctx.not(x))
         }
-        Pred::Forall { .. } | Pred::Exists { .. } => {
-            Err("bounded quantifiers are not yet in the verified subset".to_string())
+        Pred::Forall { domain, body } | Pred::Exists { domain, body } => {
+            let exists = matches!(p, Pred::Exists { .. });
+            let lo = encode_flat_cexpr(ctx, &domain.0, params, result, binders)?;
+            let Sym::Scalar(lo, _) = lo else {
+                return Err("quantifier bound is not an integer".to_string());
+            };
+            let hi = encode_flat_cexpr(ctx, &domain.1, params, result, binders)?;
+            let Sym::Scalar(hi, _) = hi else {
+                return Err("quantifier bound is not an integer".to_string());
+            };
+            let name = format!("q{}", binders.len());
+            let qv = ctx.atom(name.as_str());
+            binders.push(qv);
+            let inner = encode_flat_pred(ctx, body, params, result, binders);
+            binders.pop();
+            Ok(quantify(ctx, exists, &name, qv, lo, hi, inner?))
         }
     }
 }
 
-fn encode_pred_atom(
+fn encode_flat_cexpr(
     ctx: &Context,
-    a: &Atom,
-    consts: &[SExpr],
-    result: Option<SExpr>,
-) -> Result<SExpr, String> {
-    match a {
-        Atom::Var(i) => {
-            let i = *i as usize;
-            if i < consts.len() {
-                Ok(consts[i])
-            } else if i == consts.len() {
-                result.ok_or_else(|| "`result` used where it is not in scope".to_string())
-            } else {
-                Err("contract variable out of range".to_string())
+    e: &CExpr,
+    params: &[Sym],
+    result: Option<&Sym>,
+    binders: &[SExpr],
+) -> Result<Sym, String> {
+    match e {
+        CExpr::Atom(a) => match a {
+            Atom::Var(i) => {
+                let i = *i as usize;
+                if i < params.len() {
+                    Ok(params[i].clone())
+                } else if i == params.len() {
+                    result
+                        .cloned()
+                        .ok_or_else(|| "`result` used where it is not in scope".to_string())
+                } else {
+                    binders
+                        .get(i - params.len() - 1)
+                        .map(|&qv| Sym::Scalar(qv, SortKind::Int))
+                        .ok_or_else(|| "contract variable out of range".to_string())
+                }
             }
-        }
-        Atom::Lit(Literal::Int(n)) => Ok(ctx.numeral(*n)),
-        Atom::Lit(Literal::Bool(b)) => Ok(if *b { ctx.true_() } else { ctx.false_() }),
-        Atom::Lit(_) => Err("non-scalar literal in contract".to_string()),
-        Atom::Global(_) => Err("global reference in contract".to_string()),
+            Atom::Lit(Literal::Int(n)) => Ok(Sym::Scalar(ctx.numeral(*n), SortKind::Int)),
+            Atom::Lit(Literal::Bool(b)) => Ok(Sym::Scalar(
+                if *b { ctx.true_() } else { ctx.false_() },
+                SortKind::Bool,
+            )),
+            Atom::Lit(_) => Err("non-scalar literal in contract".to_string()),
+            Atom::Global(_) => Err("global reference in contract".to_string()),
+        },
+        CExpr::Node(n) => match &**n {
+            CNode::Bin(op, l, r) => {
+                let x = encode_flat_cexpr(ctx, l, params, result, binders)?;
+                let Sym::Scalar(x, _) = x else {
+                    return Err("arithmetic over a non-integer contract value".to_string());
+                };
+                let y = encode_flat_cexpr(ctx, r, params, result, binders)?;
+                let Sym::Scalar(y, _) = y else {
+                    return Err("arithmetic over a non-integer contract value".to_string());
+                };
+                Ok(Sym::Scalar(smt_arith(ctx, *op, x, y), SortKind::Int))
+            }
+            CNode::Neg(inner) => {
+                let x = encode_flat_cexpr(ctx, inner, params, result, binders)?;
+                let Sym::Scalar(x, _) = x else {
+                    return Err("negation of a non-integer contract value".to_string());
+                };
+                let zero = ctx.numeral(0);
+                Ok(Sym::Scalar(ctx.sub(zero, x), SortKind::Int))
+            }
+            CNode::Len(inner) => match encode_flat_cexpr(ctx, inner, params, result, binders)? {
+                Sym::Array { len, .. } => Ok(Sym::Scalar(len, SortKind::Int)),
+                _ => Err("`len` of a non-array value in a contract".to_string()),
+            },
+            CNode::Index(base, index) => {
+                let b = encode_flat_cexpr(ctx, base, params, result, binders)?;
+                let i = encode_flat_cexpr(ctx, index, params, result, binders)?;
+                let Sym::Scalar(i, _) = i else {
+                    return Err("contract index is not an integer".to_string());
+                };
+                match b {
+                    Sym::Array { arr, elem, .. } => Ok(Sym::Scalar(ctx.select(arr, i), elem)),
+                    _ => Err("indexing a non-array value in a contract".to_string()),
+                }
+            }
+            CNode::Proj(base, idx) => {
+                let b = encode_flat_cexpr(ctx, base, params, result, binders)?;
+                adt_field(&b, *idx)
+            }
+        },
+    }
+}
+
+/// Project a struct field out of an unpacked ADT value (single-variant only —
+/// enum fields are reachable only through `match`, never a contract).
+fn adt_field(b: &Sym, idx: u32) -> Result<Sym, String> {
+    match b {
+        Sym::Adt { variants, .. } if variants.len() == 1 => variants[0]
+            .as_ref()
+            .and_then(|fs| fs.get(idx as usize).cloned())
+            .ok_or_else(|| "field projection out of range in a contract".to_string()),
+        _ => Err("field projection on a non-struct value in a contract".to_string()),
     }
 }
 
 // ---- type helpers -------------------------------------------------------
 
-/// Which scalar SMT sort a type maps to (`None` ⇒ outside the subset).
+/// Which scalar SMT sort a type maps to (`None` ⇒ not a scalar).
 fn smt_sort_kind(t: &Type) -> Option<SortKind> {
     match t {
         Type::Int(_) => Some(SortKind::Int),
@@ -949,14 +1547,6 @@ fn smt_sort_kind(t: &Type) -> Option<SortKind> {
 enum SortKind {
     Int,
     Bool,
-}
-
-fn sort_of(ctx: &Context, t: &Type) -> SExpr {
-    match smt_sort_kind(t) {
-        Some(SortKind::Bool) => ctx.bool_sort(),
-        // Default to Int for the scalar subset (callers gate non-scalar types).
-        _ => ctx.int_sort(),
-    }
 }
 
 fn peel_arrow(ty: &Type) -> (Vec<Type>, Type, EffectRow) {
@@ -981,23 +1571,4 @@ fn peel_lams(mut body: &Core) -> &Core {
         body = inner;
     }
     body
-}
-
-fn show_type(t: &Type) -> String {
-    match t {
-        Type::Unit => "()".into(),
-        Type::Bool => "bool".into(),
-        Type::Int(_) => "int".into(),
-        Type::Float(_) => "float".into(),
-        Type::Str => "str".into(),
-        Type::Char => "char".into(),
-        Type::Array(_, _) => "array".into(),
-        Type::Slice(_) => "slice".into(),
-        Type::Tuple(_) => "tuple".into(),
-        Type::Arrow { .. } => "fn".into(),
-        Type::Nominal { .. } => "nominal".into(),
-        Type::Ref { .. } => "ref".into(),
-        Type::Linear(_) => "linear".into(),
-        Type::Var(_) => "tyvar".into(),
-    }
 }

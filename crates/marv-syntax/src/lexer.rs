@@ -52,6 +52,10 @@ pub enum Tok {
     Or,
     Not,
     As,
+    /// `forall` — contract-only bounded quantifier (`spec/02` §B `quant_expr`).
+    Forall,
+    /// `exists` — contract-only bounded quantifier (`spec/02` §B `quant_expr`).
+    Exists,
 
     Ident(String),
     Int(i64),
@@ -73,6 +77,7 @@ pub enum Tok {
     Comma,
     Colon,
     Dot,
+    DotDot,   // .. — quantifier domain range `lo..hi`
     Arrow,    // ->
     FatArrow, // =>
     Eq,       // =
@@ -142,6 +147,8 @@ fn keyword(word: &str) -> Option<Tok> {
         "or" => Tok::Or,
         "not" => Tok::Not,
         "as" => Tok::As,
+        "forall" => Tok::Forall,
+        "exists" => Tok::Exists,
         _ => return None,
     })
 }
@@ -392,6 +399,9 @@ fn lex_punct(chars: &[char], i: usize) -> Result<(Tok, usize), LexError> {
     }
     if two('>', '=') {
         return Ok((Tok::Ge, i + 2));
+    }
+    if two('.', '.') {
+        return Ok((Tok::DotDot, i + 2));
     }
 
     let tok = match chars[i] {

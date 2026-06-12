@@ -244,27 +244,33 @@ error sets and cross-*module* propagation arrive with MARV-6 / MARV-14.
 
 ## 7. Contracts & layered verification **[impl]**
 
-Functions carry `requires`/`ensures`; loops carry `invariant`. `ensures` may mention `result`
-(and `old(e)` — **[design]**). `forall`/`exists` over finite ranges exist in the predicate
-language (surface **[design]**).
+Functions carry `requires`/`ensures`; loops carry `invariant`. Clause operands are contract
+*expressions* (MARV-11): parameters, `result` (in `ensures`), literals, integer arithmetic
+(truncating `/` `%`), `len(e)`, indexing `e[i]`, struct fields `p.x`, and `old(e)` (`ensures`
+only — the pre-state of `e`, which with immutable value-semantics parameters is `e` itself).
+Bounded quantifiers `forall x in lo..hi: p` / `exists x in lo..hi: p` range over half-open
+integer intervals and are contract-only.
 
 ```marv
-pure fn clamp(x: i32, lo: i32, hi: i32) -> i32
-    requires lo <= hi
-    ensures result >= lo and result <= hi
-{ if x < lo { lo } else if x > hi { hi } else { x } }
+pure fn floor_of(a: [4]i64, lo: i64) -> i64
+    requires (forall i in 0..len(a): (a[i] >= lo))
+    ensures (result >= lo)
+{ a[2] }
 ```
 
 Three tiers, and the toolchain is honest about which gave an answer:
 
 - **Tier 0** — types/effects/capabilities/error-sets/linearity. Always statically guaranteed.
 - **Tier 1** — runtime contracts. `marv run` checks every `requires`/`ensures` against actual
-  values, and every loop `invariant` each time the condition is tested (loop entry and every
-  re-entry); violations abort with a structured report showing the offending concrete values.
-- **Tier 2** — SMT proof for the verified subset (pure functions over ints/bools, including
-  `while` loops via their `invariant`s — MARV-22; ADTs, arrays, bounded quantifiers, `old(e)`
-  are roadmap). `marv verify` returns `proved`, `failed` with a **counterexample**, or
-  `unsupported` (→ falls back to Tier 1). See [verification.md](verification.md).
+  values (quantifiers by iterating their range), and every loop `invariant` each time the
+  condition is tested (loop entry and every re-entry); violations abort with a structured
+  report showing the offending concrete values.
+- **Tier 2** — SMT proof for the verified subset (MARV-11): pure functions over ints/bools
+  (with sound truncate-toward-zero `/` `%`), arrays/slices of scalars, non-recursive
+  structs/enums, `while` loops via their `invariant`s (MARV-22), and bounded quantifiers.
+  `marv verify` returns `proved`, `failed` with a **counterexample**, or `unsupported`
+  (→ falls back to Tier 1). See [verification.md](verification.md) and
+  [`examples/quantifiers.mv`](../examples/quantifiers.mv).
 
 ## 8. Modules & content-addressed reuse **[impl]**
 

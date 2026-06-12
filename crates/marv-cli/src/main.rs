@@ -248,7 +248,7 @@ fn cmd_verify(args: &[String]) -> ExitCode {
         }
         verified_any = true;
         let names = loaded.param_names.get(i).cloned().unwrap_or_default();
-        let outcome = verify_def(def, &names);
+        let outcome = verify_def(def, &names, &loaded.world);
         if matches!(outcome, VerifyOutcome::Failed { .. }) {
             any_failed = true;
         }

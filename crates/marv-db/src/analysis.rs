@@ -239,15 +239,21 @@ pub struct VerifyDef {
 
 /// Recover the full Core definitions of a file for verification (`marv/verify`).
 /// Unlike [`analyze_text`], which distils for the read-only queries, this keeps
-/// the whole [`Def`] so contracts can be discharged. Returns a parse/lower/ingest
-/// error message on failure.
-pub fn verify_inputs(kind: SourceKind, text: &str) -> Result<(String, Vec<VerifyDef>), String> {
+/// the whole [`Def`] so contracts can be discharged, and returns the [`World`]
+/// of struct/enum declarations so ADT-typed parameters can be havocked
+/// (MARV-11; empty for Core-ingested files, which carry no declarations).
+/// Returns a parse/lower/ingest error message on failure.
+pub fn verify_inputs(
+    kind: SourceKind,
+    text: &str,
+) -> Result<(String, Vec<VerifyDef>, World), String> {
     match kind {
         SourceKind::Source => {
             let (module, item_spans) =
                 parse_with_spans(text).map_err(|e| format!("parse error: {e}"))?;
             let module_path = module.name.join(".");
             let lowered = lower_module(&module).map_err(|e| format!("lower error: {e}"))?;
+            let world = World::from_module(&lowered);
             let line_index = LineIndex::new(text);
             let spans_by_name: HashMap<&str, &ItemSpan> =
                 item_spans.iter().map(|s| (s.name.as_str(), s)).collect();
@@ -269,7 +275,7 @@ pub fn verify_inputs(kind: SourceKind, text: &str) -> Result<(String, Vec<Verify
                     }
                 })
                 .collect();
-            Ok((module_path, defs))
+            Ok((module_path, defs, world))
         }
         SourceKind::Core => {
             let spec: CoreModuleSpec =
@@ -289,7 +295,7 @@ pub fn verify_inputs(kind: SourceKind, text: &str) -> Result<(String, Vec<Verify
                     }
                 })
                 .collect();
-            Ok((module_path, defs))
+            Ok((module_path, defs, World::new()))
         }
     }
 }
