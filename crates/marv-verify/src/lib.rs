@@ -411,7 +411,9 @@ fn stop(reason: &str) -> Stop {
 
 /// Flatten a symbolic value into displayable `(name, term)` pairs for a
 /// counterexample model: scalars directly, arrays as their length plus the
-/// array term, ADTs as their tag.
+/// array term, a struct as its fields (positionally — names are erased), an
+/// enum as its tag (which variant is live is model-dependent, so per-variant
+/// fields would mislead).
 fn model_items(name: &str, s: &Sym, out: &mut Vec<(String, SExpr)>) {
     match s {
         Sym::Unit => {}
@@ -420,7 +422,15 @@ fn model_items(name: &str, s: &Sym, out: &mut Vec<(String, SExpr)>) {
             out.push((format!("len({name})"), *len));
             out.push((name.to_string(), *arr));
         }
-        Sym::Adt { tag, .. } => out.push((format!("{name}.tag"), *tag)),
+        Sym::Adt { tag, variants, .. } => {
+            if let [Some(fields)] = variants.as_slice() {
+                for (i, f) in fields.iter().enumerate() {
+                    model_items(&format!("{name}.{i}"), f, out);
+                }
+            } else {
+                out.push((format!("{name}.tag"), *tag));
+            }
+        }
         Sym::Tuple(items) => {
             for (i, item) in items.iter().enumerate() {
                 model_items(&format!("{name}.{i}"), item, out);
