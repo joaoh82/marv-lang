@@ -35,10 +35,11 @@ an answer:
 
 ## How a function becomes a proof
 
-For a pure function over integers and booleans, the body is symbolically
-evaluated into an SMT term for `result`: `if`/`else` becomes `ite`, arithmetic
-and comparisons map to their SMT operators, `let` binds, parameters are SMT
-constants. A constant `res` is set equal to that term, the preconditions are
+For a pure function in the verified subset, the body is symbolically evaluated
+into an SMT term for `result`: `if`/`else` becomes `ite`, arithmetic and
+comparisons map to their SMT operators, `let` binds, parameters are SMT
+constants (arrays become SMT arrays paired with a length term; structs/enums an
+integer tag plus per-variant field terms). A constant `res` is set equal to that term, the preconditions are
 asserted, and then — per postcondition `P` — the solver is asked whether
 `requires ∧ res = body ∧ ¬P` is satisfiable:
 
@@ -97,28 +98,73 @@ assumed about its exit state. And a loop `invariant` is an obligation in its own
 right: a function with an invariant but no `requires`/`ensures` is still checked
 (and reported) by `marv verify`.
 
+## The contract language (MARV-11)
+
+`requires`/`ensures`/`invariant` clauses are boolean predicates whose operands
+are contract *expressions*: parameters (and `result` in `ensures`), literals,
+integer arithmetic (`+ - * / %`, truncating like the body's), negation,
+`len(e)`, indexing `e[i]`, struct fields `p.x`, and `old(e)`. On top of those,
+**bounded quantifiers** range over half-open integer intervals:
+
+```marv
+pure fn floor_of(a: [4]i64, lo: i64) -> i64
+    requires (forall i in 0..len(a): (a[i] >= lo))
+    ensures (result >= lo)
+{
+    a[2]
+}
+```
+
+`forall x in lo..hi: p` / `exists x in lo..hi: p` parse anywhere an expression
+does but are contract-only; the binder is in scope in the body, not the domain
+(see [`examples/quantifiers.mv`](../examples/quantifiers.mv)). `old(e)` —
+`ensures` only — is the pre-state of `e`; parameters are immutable values, so
+it is the same value as `e` and erases at lowering (the surface exists for
+spec compliance and future mutable-store semantics). Tier 1 evaluates all of
+this concretely, quantifiers by iterating their (finite) range; Tier 2 encodes
+quantifiers as guarded SMT quantifiers.
+
 ## The verified subset (and honest boundaries)
 
-Tier 2 currently covers: **pure** functions; parameters/result of integer or
-boolean type; bodies of arithmetic (`+ - *`), comparisons, boolean `and`/`or`/
-`not`, `let`, `if`/`else`, and `while` loops (with or without `invariant`s);
-contracts built from those comparisons and `and`/`or`/`not`.
+Tier 2 currently covers **pure** functions over:
+
+- **Ints and bools** — arithmetic (`+ - *` and truncating `/ %`), comparisons,
+  `and`/`or`/`not`, `let`, `if`/`else`, and `while` loops (with or without
+  `invariant`s). SMT `div`/`mod` are Euclidean while marv truncates toward
+  zero, so the encoding corrects the quotient by ±1 on inexact negative cases:
+  `-7 / 2` proves as `-3`, never `-4`, and `ensures result <= x` for `x / 2`
+  is *refuted* (counterexample `x = -1`) rather than falsely proved.
+- **Arrays and slices** of ints/bools — literals, `len`, indexing, element
+  stores, array-valued parameters and loop-carried arrays (a slice parameter's
+  length is an unconstrained non-negative integer).
+- **Structs and enums** — construction, `match` (branches joined per variant),
+  struct field access (in bodies and contracts); parameters of nominal type
+  are havocked from their declaration: an enum is an arbitrary tag in range
+  with arbitrary per-variant fields.
+- **Bounded quantifiers** in contracts and loop invariants, e.g. a fill loop's
+  `invariant (forall k in 0..i: (out[k] == 7))`.
 
 Outside that subset, `verify` returns `unsupported` with a reason and the
 **fallback** to Tier-1 runtime checks — it never guesses. Notable current
-exclusions (each a deliberate `unsupported`, not an unsound `proved`):
+exclusions and caveats (each honest, never an unsound `proved`):
 
-- **Integer `/` and `%`** — marv truncates toward zero while SMT `div`/`mod` are
-  Euclidean; rather than emit an unsound encoding, division is out-of-subset.
-- **Function calls, aggregates/ADTs, bounded quantifiers, `old(e)`, floats** —
-  future subset extensions (the rest of MARV-11).
+- **Function calls, floats, casts, references, recursive/generic ADTs** —
+  out-of-subset (`unsupported`).
+- **Mathematical integers.** SMT terms are unbounded; 64-bit wraparound at
+  runtime is not modeled. (Wrapping semantics is a planned encoding switch.)
+- **Division by zero / out-of-bounds reads** trap at runtime (Tier 1); Tier 2
+  treats them as *unspecified values*, which is sound for partial correctness
+  — a trapping execution never reaches its postcondition. A counterexample
+  whose divisor is 0 (or whose index is out of range) may thus be spurious.
+- **`unknown` is `unsupported`.** Quantifiers plus nonlinear arithmetic can
+  exceed the solver; a per-query soft timeout (10 s) turns divergence into an
+  honest `unsupported` rather than a hang.
 - **No `z3` on `PATH`** — reported as `unsupported` (solver unavailable), same
   fallback.
 
 The fallback is real: a function `verify` calls `unsupported` is still fully
-contract-checked at runtime under `marv run`. For example `half(x) = x / 2` with
-`ensures result <= x` is `unsupported` at Tier 2 (division), but `marv run half
--3` aborts with `postcondition violated: ensures result <= arg0`.
+contract-checked at runtime under `marv run` — including quantified clauses,
+which the debug runner evaluates by iterating their ranges.
 
 ## The protocol
 

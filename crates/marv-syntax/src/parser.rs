@@ -947,7 +947,35 @@ impl Parser {
     // ---- expressions (precedence climbing) -----------------------------
 
     fn parse_expr(&mut self) -> PResult<Expr> {
+        // A bounded quantifier (`spec/02` §B `quant_expr`, MARV-11) sits at the
+        // lowest precedence: its body extends as far right as possible. It is
+        // recognized only at full-expression positions (a contract head, inside
+        // parentheses, …), never as a bare binary operand — the canonical form
+        // parenthesizes it.
+        if matches!(self.peek(), Tok::Forall | Tok::Exists) {
+            return self.parse_quant();
+        }
         self.parse_bin(0)
+    }
+
+    /// Parse `("forall" | "exists") ident "in" expr ".." expr ":" expr`.
+    fn parse_quant(&mut self) -> PResult<Expr> {
+        let exists = self.peek() == &Tok::Exists;
+        self.bump(); // `forall` / `exists`
+        let binder = self.ident()?;
+        self.expect(Tok::In)?;
+        let lo = self.parse_bin(0)?;
+        self.expect(Tok::DotDot)?;
+        let hi = self.parse_bin(0)?;
+        self.expect(Tok::Colon)?;
+        let body = self.parse_expr()?;
+        Ok(Expr::Quant {
+            exists,
+            binder,
+            lo: Box::new(lo),
+            hi: Box::new(hi),
+            body: Box::new(body),
+        })
     }
 
     /// Parse an expression with struct literals suppressed (the head of an `if`

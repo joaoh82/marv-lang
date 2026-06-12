@@ -449,8 +449,8 @@ fn encode_pred(e: &mut Encoder, p: &Pred) {
         Pred::Cmp(op, l, r) => {
             e.u8(2);
             encode_cmpop(e, *op);
-            encode_atom(e, l);
-            encode_atom(e, r);
+            encode_cexpr(e, l);
+            encode_cexpr(e, r);
         }
         Pred::And(l, r) => {
             e.u8(3);
@@ -468,15 +468,61 @@ fn encode_pred(e: &mut Encoder, p: &Pred) {
         }
         Pred::Forall { domain, body } => {
             e.u8(6);
-            encode_atom(e, &domain.0);
-            encode_atom(e, &domain.1);
+            encode_cexpr(e, &domain.0);
+            encode_cexpr(e, &domain.1);
             encode_pred(e, body);
         }
         Pred::Exists { domain, body } => {
             e.u8(7);
-            encode_atom(e, &domain.0);
-            encode_atom(e, &domain.1);
+            encode_cexpr(e, &domain.0);
+            encode_cexpr(e, &domain.1);
             encode_pred(e, body);
         }
     }
+}
+
+/// Encode a contract expression ([`CExpr`], MARV-11). The encoding extends
+/// [`encode_atom`]'s prefix code: an atom operand emits exactly the bytes it
+/// always did (tags 0–2), so every pre-MARV-11 definition keeps its content
+/// hash; compound nodes claim the next tag bytes (3+).
+fn encode_cexpr(e: &mut Encoder, x: &CExpr) {
+    match x {
+        CExpr::Atom(a) => encode_atom(e, a),
+        CExpr::Node(n) => match &**n {
+            CNode::Bin(op, l, r) => {
+                e.u8(3);
+                encode_arithop(e, *op);
+                encode_cexpr(e, l);
+                encode_cexpr(e, r);
+            }
+            CNode::Neg(inner) => {
+                e.u8(4);
+                encode_cexpr(e, inner);
+            }
+            CNode::Len(inner) => {
+                e.u8(5);
+                encode_cexpr(e, inner);
+            }
+            CNode::Index(base, index) => {
+                e.u8(6);
+                encode_cexpr(e, base);
+                encode_cexpr(e, index);
+            }
+            CNode::Proj(base, idx) => {
+                e.u8(7);
+                encode_cexpr(e, base);
+                e.u32(*idx);
+            }
+        },
+    }
+}
+
+fn encode_arithop(e: &mut Encoder, op: ArithOp) {
+    e.u8(match op {
+        ArithOp::Add => 0,
+        ArithOp::Sub => 1,
+        ArithOp::Mul => 2,
+        ArithOp::Div => 3,
+        ArithOp::Rem => 4,
+    })
 }

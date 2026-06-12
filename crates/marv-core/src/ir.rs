@@ -265,6 +265,77 @@ pub enum CmpOp {
     Ge,
 }
 
+/// Arithmetic operator inside a contract expression ([`CExpr`], MARV-11).
+/// `Div`/`Rem` follow the language's truncate-toward-zero semantics, exactly as
+/// [`PrimOp::Div`]/[`PrimOp::Rem`] do in bodies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ArithOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Rem,
+}
+
+/// A contract *expression* — the operand language of [`Pred`] comparisons and
+/// quantifier domains (MARV-11). Strictly richer than a bare [`Atom`]: integer
+/// arithmetic, negation, `len(e)`, and element indexing `e[i]`, composed freely.
+///
+/// The wire form is **transparent for atoms** (`#[serde(untagged)]`): a plain
+/// atom still serializes as `{"Var": 0}` / `{"Lit": …}` exactly as it did when
+/// `Pred::Cmp` compared `Atom`s, so pre-MARV-11 Core JSON parses unchanged.
+/// Compound forms serialize as the externally-tagged [`CNode`]
+/// (`{"Bin": …}`, `{"Len": …}`, …), whose keys are disjoint from `Atom`'s.
+/// The content-hash encoding is likewise backward-stable (see [`crate::hash`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum CExpr {
+    /// A variable, literal, or global — see the index conventions on [`Pred`].
+    Atom(Atom),
+    /// A compound contract expression.
+    Node(Box<CNode>),
+}
+
+/// The compound forms of a [`CExpr`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CNode {
+    /// Binary integer arithmetic `l op r`.
+    Bin(ArithOp, CExpr, CExpr),
+    /// Arithmetic negation `-e`.
+    Neg(CExpr),
+    /// Collection length `len(e)`.
+    Len(CExpr),
+    /// Element read `base[index]`.
+    Index(CExpr, CExpr),
+    /// Struct field projection `base.field`, by declaration index (names are
+    /// erased, like [`Core::Proj`]).
+    Proj(CExpr, u32),
+}
+
+impl CExpr {
+    /// A variable reference (flat contract index or de Bruijn index, per the
+    /// enclosing predicate's convention).
+    pub fn var(i: u32) -> CExpr {
+        CExpr::Atom(Atom::Var(i))
+    }
+
+    /// An integer literal.
+    pub fn int(n: i64) -> CExpr {
+        CExpr::Atom(Atom::Lit(Literal::Int(n)))
+    }
+
+    /// Wrap a compound node.
+    pub fn node(n: CNode) -> CExpr {
+        CExpr::Node(Box::new(n))
+    }
+}
+
+impl From<Atom> for CExpr {
+    fn from(a: Atom) -> CExpr {
+        CExpr::Atom(a)
+    }
+}
+
 /// Identifies a capability method at a [`Core::Perform`] site (`spec/02` §C).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OpId(pub u32);
@@ -396,23 +467,36 @@ pub struct Branch {
 }
 
 /// First-order predicate language used by contracts (Tier-2 proof obligations,
-/// `spec/02` §C `Pred`). Defined in full for forward compatibility; M1 does not
-/// yet parse `requires`/`ensures`, so lowered defs carry empty contracts.
+/// `spec/02` §C `Pred`). Comparisons range over the [`CExpr`] contract
+/// expression language; `forall`/`exists` quantify one integer variable over a
+/// half-open range `[lo, hi)` (MARV-11).
+///
+/// ## Variable index conventions
+///
+/// Two conventions share this type, distinguished by where the `Pred` lives:
+///
+/// - **Flat** (`Def::requires` / `Def::ensures`): `Var(k)` is the k-th
+///   parameter, `Var(n)` (n = arity) is `result`, and `Var(n + 1 + j)` is the
+///   binder of the j-th *enclosing* quantifier counted from the outermost.
+/// - **de Bruijn** (`Core::Loop::invariant`): `Var(k)` is an index into the
+///   loop-header environment, counted from the innermost slot; each quantifier
+///   binds index `0` within its body (shifting the enclosing scope up by one),
+///   exactly like a Core binder.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Pred {
     True,
     False,
-    Cmp(CmpOp, Atom, Atom),
+    Cmp(CmpOp, CExpr, CExpr),
     And(Box<Pred>, Box<Pred>),
     Or(Box<Pred>, Box<Pred>),
     Not(Box<Pred>),
-    /// bounded range `[lo, hi)`.
+    /// bounded range `[lo, hi)`; the domain is evaluated *outside* the binder.
     Forall {
-        domain: (Atom, Atom),
+        domain: (CExpr, CExpr),
         body: Box<Pred>,
     },
     Exists {
-        domain: (Atom, Atom),
+        domain: (CExpr, CExpr),
         body: Box<Pred>,
     },
 }

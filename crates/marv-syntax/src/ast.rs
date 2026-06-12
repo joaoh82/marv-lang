@@ -478,6 +478,22 @@ pub enum Expr {
     /// operator and is right-associative, so a stacked form like `not not p`
     /// or `- -x` nests outermost-first.
     Unary(UnOp, Box<Expr>),
+    /// `forall x in lo..hi: body` / `exists x in lo..hi: body` — a bounded
+    /// quantifier over the half-open integer range `[lo, hi)` (`spec/02` §B
+    /// `quant_expr`, MARV-11). Contract-only: it parses anywhere an expression
+    /// does, but lowering accepts it only inside `requires`/`ensures`/
+    /// `invariant` clauses. The body extends as far right as possible; the
+    /// canonical form is always parenthesized, `(forall x in lo..hi: body)`,
+    /// like a binary node.
+    Quant {
+        /// `true` for `exists`, `false` for `forall`.
+        exists: bool,
+        /// The bound variable, in scope in `body` only (not the domain).
+        binder: String,
+        lo: Box<Expr>,
+        hi: Box<Expr>,
+        body: Box<Expr>,
+    },
 }
 
 /// The prefix unary operators (`spec/02` §B `unary`). `&`/`&mut` here are the

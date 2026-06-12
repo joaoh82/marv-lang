@@ -543,6 +543,25 @@ fn format_expr(expr: &Expr) -> String {
             };
             format!("{}{}{}", op.as_str(), sep, format_expr(operand))
         }
+        // A bounded quantifier is fully parenthesized, like a binary node, so
+        // its maximal-right body cannot capture a following operator and the
+        // canonical form re-parses to the same `Quant` (`spec/02` §B
+        // `quant_expr`, MARV-11).
+        Expr::Quant {
+            exists,
+            binder,
+            lo,
+            hi,
+            body,
+        } => {
+            let kw = if *exists { "exists" } else { "forall" };
+            format!(
+                "({kw} {binder} in {}..{}: {})",
+                format_expr(lo),
+                format_expr(hi),
+                format_expr(body)
+            )
+        }
     }
 }
 

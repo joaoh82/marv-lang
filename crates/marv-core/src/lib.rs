@@ -45,4 +45,4 @@ pub use lower::{
     lower_module, lower_modules, DefEntry, ImplInfo, Instantiation, InterfaceInfo, InterfaceMethod,
     LowerError, LoweredModule, TypeArg, VariantInfo,
 };
-pub use pred::render_pred;
+pub use pred::{render_pred, render_pred_with, PredVars};

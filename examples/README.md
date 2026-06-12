@@ -17,6 +17,7 @@ fixture source for the test suite. As of M4 the integer/boolean subset is
 | [`arithmetic.mv`](arithmetic.mv) | **Runnable (M4):** a nullary `main` that calls two other functions — curried cross-function calls lowered to direct native calls. |
 | [`color.mv`](color.mv) | **Runnable:** an `enum` + an exhaustive `match`. `main` constructs `Color.Green` and `rank` matches it; `marv run --entry main examples/color.mv` yields `2`. Drop an arm and `marv check` fires E0130 (non-exhaustive). |
 | [`mutation.mv`](mutation.mv) | **Runnable:** construction + mutation (MARV-4) — a `struct` literal `Point { x: …, y: … }`, a `var` accumulator reassigned with `total = …`, and an in-place field update `q.x = …`. `marv run --entry main examples/mutation.mv` yields `45`; mutating the copy `q` leaves the original untouched (mutable value semantics, `spec/01` §4). |
+| [`quantifiers.mv`](quantifiers.mv) | **Provable (MARV-11):** the expanded verified subset — a bounded `forall` over an array parameter (`requires (forall i in 0..len(a): (a[i] >= lo))`), an `exists` conclusion discharged from a sortedness premise over a slice, truncate-toward-zero `/`/`%` proved via the quotient/remainder identity *in the contract itself*, and `old(n)` in `ensures`. `marv verify examples/quantifiers.mv` proves all four; `marv run --entry bump examples/quantifiers.mv -- 41` yields `42`, and a violated quantified `requires` aborts at runtime (Tier 1). |
 | [`loops.mv`](loops.mv) | **Runnable (MARV-2) + provable (MARV-22):** `while` loops carrying `var`s across iterations, with `invariant`s checked at runtime (Tier 1) *and* discharged by SMT (Tier 2) — `marv verify examples/loops.mv` proves `sum_to` and `pow`. `marv run --entry sum_to examples/loops.mv 5` yields `15`; it runs identically on the interpreter, Cranelift JIT, and WASM (differential corpus). |
 | [`casts.mv`](casts.mv) | **Runnable (MARV-7):** `char` literals (`'\n'`), `as` casts (`(n as u8)`, widening + narrowing), the fixed-array type `[N]T`, and `len(str)`. Integer casts truncate/wrap to width identically on the interpreter, Cranelift, and WASM (`tests/run/casts.mv`); a constant that overflows its narrowing target (`256 as u8`) fails `marv check` with `E0104`. |
 | [`arrays.mv`](arrays.mv) | **Runnable (MARV-30):** array literals `[e0, …]`, indexed read `a[i]`, `len(a)`, the index store `a[i] = e` (a functional element update under mutable value semantics), and a `len`-bounded `while`/`for`. `marv run examples/arrays.mv` yields `42`; it runs identically on the interpreter, Cranelift JIT, and WASM (differential corpus [`tests/run/arrays.mv`](../tests/run/arrays.mv)). |
@@ -28,7 +29,8 @@ Every example now parses, formats, and checks through the **real** front end —
 `examples_are_canonical` test reprints each from the AST (the formatter's whitespace
 fallback is no longer needed for any of them). `hello`, `read_file`, and `report` joined
 when capabilities & `perform` from source landed (MARV-6); `clamp.mv` joined in M6 with
-`requires`/`ensures`; `color.mv` when `enum`/`match` landed; `generics.mv` when
+`requires`/`ensures` (`quantifiers.mv` followed under MARV-11 with bounded quantifiers,
+contract arithmetic, and `old(e)`); `color.mv` when `enum`/`match` landed; `generics.mv` when
 `interface`/`impl` + generic bounds landed (MARV-5); `arrays.mv` when array codegen landed
 (MARV-30); `slices.mv` when runtime-length slices landed (MARV-33 + MARV-20);
 `optionals.mv` when single-file lowering of imported enums landed (MARV-18).

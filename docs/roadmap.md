@@ -29,7 +29,7 @@ where each one sits and what must land first. Each task references back here.
 | ~~**MARV-33** runtime-length slices `[]T` (construct, `len`/index, element store)~~ ✅ done | 2 · Backends | ~~MARV-30~~ ✅ | 20 | medium |
 | ~~**MARV-34** Tier-1 debug bounds check on runtime array/slice indexing~~ ✅ done | 2 · Backends | ~~MARV-33~~ ✅ | — | medium |
 | **MARV-10** AOT native + LLVM + WASM component/WIT | 2 · Backends | MARV-9 | — | low |
-| **MARV-11** verified-subset expansion + loop invariants + `old`/quantifiers — loop-invariant slice ✅ done (**MARV-22**: Hoare-style initiation/consecution/use VCs in `marv-verify`; `examples/loops.mv` proves; remaining: ADTs, arrays, bounded quantifiers, `old(e)`) | 3 · Verification | ~~MARV-2~~ ✅, ~~MARV-1~~ ✅ | 22 | medium |
+| ~~**MARV-11** verified-subset expansion + loop invariants + `old`/quantifiers~~ ✅ done — loop-invariant slice landed as **MARV-22** (Hoare-style initiation/consecution/use VCs); the rest extends the contract language to expressions (arithmetic, `len`, indexing, `p.x`), adds surface + Tier-1/Tier-2 `forall`/`exists` over `lo..hi` and `old(e)` in `ensures`, encodes truncate-toward-zero `/` `%` soundly over SMT's Euclidean ops, and encodes arrays/slices (SMT arrays + length) and non-recursive structs/enums (unpacked tag + fields, havocked from the `World`); `examples/quantifiers.mv` proves end to end. Honest residue: calls, floats, casts, recursive/generic ADTs are `unsupported`; integers are mathematical (no wrap modeling) | 3 · Verification | ~~MARV-2~~ ✅, ~~MARV-1~~ ✅ | 22 | medium |
 | ~~**MARV-12** formatter doc-comments + real source spans~~ ✅ done | 5 · Infra/polish | — *(independent)* | — | medium |
 | **MARV-13** port more compiler passes to marv (self-hosting) | 4 · Self-hosting | Phase-1 surface *(incremental now)* | — | low |
 | **MARV-14** persistent on-disk store + cross-module resolution | 4 · Store | — *(std linking wants Phase 1)* | — | low |
@@ -228,8 +228,8 @@ they unblock the rest. Then:
 
 - **Surface breadth:** ~~MARV-7~~ ✅, ~~MARV-5 generics~~ ✅, ~~MARV-6 capabilities-from-source~~ ✅
   (which closed the last big gap between the design and what real `.mv` can express).
-- **Compounds on the surface:** MARV-9 aggregate codegen (after 1 + 4) → MARV-10; and
-  MARV-11 verification expansion (after 2).
+- **Compounds on the surface:** ~~MARV-9 aggregate codegen~~ ✅ → MARV-10; and
+  ~~MARV-11 verification expansion~~ ✅.
 - **Longer horizon:** MARV-13 more self-hosting, MARV-14 persistent store.
 
 **Parallel track (no surface dependency — pick up anytime):** ~~MARV-8 (reachability-pruned

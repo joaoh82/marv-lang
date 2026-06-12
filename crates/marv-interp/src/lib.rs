@@ -156,8 +156,9 @@ fn check_contracts(
     for p in preds {
         match eval_pred(p, params, result) {
             Some(true) => {}
-            // A predicate the runtime can't evaluate is skipped, not failed —
-            // it is left to Tier-2 / a future runtime extension.
+            // A predicate the runtime can't evaluate (a global reference, an
+            // out-of-range contract index, division by zero inside the clause)
+            // is skipped, not failed — it is left to Tier-2.
             None => {}
             Some(false) => {
                 let label = |i: u32| -> String {
@@ -168,7 +169,13 @@ fn check_contracts(
                         "result".to_string()
                     }
                 };
-                let rendered = marv_core::render_pred(p, &label);
+                let rendered = marv_core::render_pred_with(
+                    p,
+                    &label,
+                    marv_core::PredVars::Flat {
+                        arity: params.len() as u32,
+                    },
+                );
                 return Err(match which {
                     Contract::Pre => RunError::PreconditionFailed(rendered),
                     Contract::Post => RunError::PostconditionFailed(rendered),
@@ -179,22 +186,144 @@ fn check_contracts(
     Ok(())
 }
 
-/// Evaluate a contract predicate to a boolean, or `None` if it uses a feature
-/// the runtime does not evaluate yet (bounded quantifiers).
+/// Evaluate a contract predicate to a boolean, or `None` if a sub-expression
+/// cannot be evaluated (skipped, never failed). Bounded quantifiers (MARV-11)
+/// evaluate by iterating their finite `[lo, hi)` range.
 fn eval_pred(p: &Pred, params: &[Value], result: Option<&Value>) -> Option<bool> {
+    eval_pred_q(p, params, result, &mut Vec::new())
+}
+
+fn eval_pred_q(
+    p: &Pred,
+    params: &[Value],
+    result: Option<&Value>,
+    binders: &mut Vec<i64>,
+) -> Option<bool> {
     match p {
         Pred::True => Some(true),
         Pred::False => Some(false),
         Pred::Cmp(op, a, b) => {
-            let x = pred_atom(a, params, result)?;
-            let y = pred_atom(b, params, result)?;
+            let x = eval_cexpr_flat(a, params, result, binders)?;
+            let y = eval_cexpr_flat(b, params, result, binders)?;
             let ord = compare(&x, &y).ok()?;
             Some(cmp_matches(*op, ord))
         }
-        Pred::And(l, r) => Some(eval_pred(l, params, result)? && eval_pred(r, params, result)?),
-        Pred::Or(l, r) => Some(eval_pred(l, params, result)? || eval_pred(r, params, result)?),
-        Pred::Not(inner) => Some(!eval_pred(inner, params, result)?),
-        Pred::Forall { .. } | Pred::Exists { .. } => None,
+        Pred::And(l, r) => Some(
+            eval_pred_q(l, params, result, binders)? && eval_pred_q(r, params, result, binders)?,
+        ),
+        Pred::Or(l, r) => Some(
+            eval_pred_q(l, params, result, binders)? || eval_pred_q(r, params, result, binders)?,
+        ),
+        Pred::Not(inner) => Some(!eval_pred_q(inner, params, result, binders)?),
+        Pred::Forall { domain, body } | Pred::Exists { domain, body } => {
+            let exists = matches!(p, Pred::Exists { .. });
+            let lo = as_int(eval_cexpr_flat(&domain.0, params, result, binders)?)?;
+            let hi = as_int(eval_cexpr_flat(&domain.1, params, result, binders)?)?;
+            let mut unknown = false;
+            for v in lo..hi {
+                binders.push(v);
+                let r = eval_pred_q(body, params, result, binders);
+                binders.pop();
+                match (exists, r) {
+                    // A definite witness decides the quantifier outright.
+                    (true, Some(true)) => return Some(true),
+                    (false, Some(false)) => return Some(false),
+                    (_, None) => unknown = true,
+                    _ => {}
+                }
+            }
+            if unknown {
+                None
+            } else {
+                Some(!exists)
+            }
+        }
+    }
+}
+
+/// Evaluate a flat-convention contract expression ([`CExpr`], MARV-11) to a
+/// runtime value; `None` when it cannot be evaluated.
+fn eval_cexpr_flat(
+    e: &CExpr,
+    params: &[Value],
+    result: Option<&Value>,
+    binders: &[i64],
+) -> Option<Value> {
+    match e {
+        CExpr::Atom(a) => match a {
+            Atom::Var(i) => {
+                let i = *i as usize;
+                if i < params.len() {
+                    Some(params[i].clone())
+                } else if i == params.len() {
+                    result.cloned()
+                } else {
+                    // A quantifier binder: j-th enclosing quantifier, outermost
+                    // first (`Var(n + 1 + j)`).
+                    binders.get(i - params.len() - 1).map(|v| Value::Int(*v))
+                }
+            }
+            Atom::Lit(l) => Some(lit_value(l)),
+            Atom::Global(_) => None,
+        },
+        CExpr::Node(n) => eval_cnode(n, &mut |x| eval_cexpr_flat(x, params, result, binders)),
+    }
+}
+
+/// Evaluate a compound contract expression given an evaluator for its
+/// children. Arithmetic mirrors the body's runtime semantics (64-bit
+/// wrapping, truncate-toward-zero `/` and `%`); division by zero and
+/// out-of-bounds indexing yield `None` (the clause is skipped, never failed).
+fn eval_cnode(n: &CNode, eval: &mut dyn FnMut(&CExpr) -> Option<Value>) -> Option<Value> {
+    match n {
+        CNode::Bin(op, l, r) => {
+            let x = as_int(eval(l)?)?;
+            let y = as_int(eval(r)?)?;
+            let v = match op {
+                ArithOp::Add => x.wrapping_add(y),
+                ArithOp::Sub => x.wrapping_sub(y),
+                ArithOp::Mul => x.wrapping_mul(y),
+                ArithOp::Div => {
+                    if y == 0 {
+                        return None;
+                    }
+                    x.wrapping_div(y)
+                }
+                ArithOp::Rem => {
+                    if y == 0 {
+                        return None;
+                    }
+                    x.wrapping_rem(y)
+                }
+            };
+            Some(Value::Int(v))
+        }
+        CNode::Neg(inner) => Some(Value::Int(as_int(eval(inner)?)?.wrapping_neg())),
+        CNode::Len(inner) => match eval(inner)? {
+            Value::Agg { fields, .. } => Some(Value::Int(fields.len() as i64)),
+            Value::Str(s) => Some(Value::Int(s.len() as i64)),
+            _ => None,
+        },
+        CNode::Index(base, index) => {
+            let i = as_int(eval(index)?)?;
+            match eval(base)? {
+                Value::Agg { fields, .. } => {
+                    usize::try_from(i).ok().and_then(|u| fields.get(u).cloned())
+                }
+                _ => None,
+            }
+        }
+        CNode::Proj(base, idx) => match eval(base)? {
+            Value::Agg { fields, .. } => fields.get(*idx as usize).cloned(),
+            _ => None,
+        },
+    }
+}
+
+fn as_int(v: Value) -> Option<i64> {
+    match v {
+        Value::Int(n) => Some(n),
+        _ => None,
     }
 }
 
@@ -209,24 +338,6 @@ fn cmp_matches(op: CmpOp, ord: Option<std::cmp::Ordering>) -> bool {
         CmpOp::Le => matches!(ord, Some(Less | Equal)),
         CmpOp::Gt => ord == Some(Greater),
         CmpOp::Ge => matches!(ord, Some(Greater | Equal)),
-    }
-}
-
-/// Resolve a contract atom to a runtime value.
-fn pred_atom(a: &Atom, params: &[Value], result: Option<&Value>) -> Option<Value> {
-    match a {
-        Atom::Var(i) => {
-            let i = *i as usize;
-            if i < params.len() {
-                Some(params[i].clone())
-            } else if i == params.len() {
-                result.cloned()
-            } else {
-                None
-            }
-        }
-        Atom::Lit(l) => Some(lit_value(l)),
-        Atom::Global(_) => None,
     }
 }
 
@@ -622,40 +733,72 @@ impl Program {
         }
     }
 
-    /// Evaluate a loop invariant against the live environment, resolving its atoms
-    /// as de Bruijn indices into `env` (unlike contract `Pred`s, whose atoms use
-    /// the flat parameter convention). Returns `None` for a clause the runtime
-    /// does not evaluate (bounded quantifiers) — treated as "not violated".
+    /// Evaluate a loop invariant against the live environment, resolving its
+    /// variables as de Bruijn indices into `env` (unlike contract `Pred`s, whose
+    /// atoms use the flat parameter convention). Bounded quantifiers (MARV-11)
+    /// bind index 0 within their body, so they iterate by pushing the binder's
+    /// value as the innermost slot. `None` means the clause cannot be evaluated
+    /// — treated as "not violated".
     fn eval_loop_invariant(&self, p: &Pred, env: &[Value]) -> Option<bool> {
+        self.eval_loop_inv_q(p, &mut env.to_vec())
+    }
+
+    fn eval_loop_inv_q(&self, p: &Pred, env: &mut Vec<Value>) -> Option<bool> {
         match p {
             Pred::True => Some(true),
             Pred::False => Some(false),
             Pred::Cmp(op, a, b) => {
-                let x = self.eval_atom(a, env).ok()?;
-                let y = self.eval_atom(b, env).ok()?;
+                let x = self.eval_loop_cexpr(a, env)?;
+                let y = self.eval_loop_cexpr(b, env)?;
                 let ord = compare(&x, &y).ok()?;
                 Some(cmp_matches(*op, ord))
             }
-            Pred::And(l, r) => {
-                Some(self.eval_loop_invariant(l, env)? && self.eval_loop_invariant(r, env)?)
+            Pred::And(l, r) => Some(self.eval_loop_inv_q(l, env)? && self.eval_loop_inv_q(r, env)?),
+            Pred::Or(l, r) => Some(self.eval_loop_inv_q(l, env)? || self.eval_loop_inv_q(r, env)?),
+            Pred::Not(inner) => Some(!self.eval_loop_inv_q(inner, env)?),
+            Pred::Forall { domain, body } | Pred::Exists { domain, body } => {
+                let exists = matches!(p, Pred::Exists { .. });
+                let lo = as_int(self.eval_loop_cexpr(&domain.0, env)?)?;
+                let hi = as_int(self.eval_loop_cexpr(&domain.1, env)?)?;
+                let mut unknown = false;
+                for v in lo..hi {
+                    env.push(Value::Int(v));
+                    let r = self.eval_loop_inv_q(body, env);
+                    env.pop();
+                    match (exists, r) {
+                        (true, Some(true)) => return Some(true),
+                        (false, Some(false)) => return Some(false),
+                        (_, None) => unknown = true,
+                        _ => {}
+                    }
+                }
+                if unknown {
+                    None
+                } else {
+                    Some(!exists)
+                }
             }
-            Pred::Or(l, r) => {
-                Some(self.eval_loop_invariant(l, env)? || self.eval_loop_invariant(r, env)?)
-            }
-            Pred::Not(inner) => Some(!self.eval_loop_invariant(inner, env)?),
-            Pred::Forall { .. } | Pred::Exists { .. } => None,
         }
     }
 
-    /// Render a violated loop invariant with its atoms' concrete runtime values
-    /// substituted (e.g. `5 <= 3`), for a structured Tier-1 failure report.
+    /// Evaluate a loop-invariant contract expression against the environment.
+    fn eval_loop_cexpr(&self, e: &CExpr, env: &Vec<Value>) -> Option<Value> {
+        match e {
+            CExpr::Atom(a) => self.eval_atom(a, env).ok(),
+            CExpr::Node(n) => eval_cnode(n, &mut |x| self.eval_loop_cexpr(x, env)),
+        }
+    }
+
+    /// Render a violated loop invariant with its variables' concrete runtime
+    /// values substituted (e.g. `5 <= 3`), for a structured Tier-1 failure
+    /// report. Quantifier binders render positionally (`i`, `i1`, …).
     fn render_loop_invariant(&self, p: &Pred, env: &[Value]) -> String {
         let label = |idx: u32| -> String {
             self.eval_atom(&Atom::Var(idx), env)
                 .map(|v| v.render())
                 .unwrap_or_else(|_| format!("v{idx}"))
         };
-        marv_core::render_pred(p, &label)
+        marv_core::render_pred_with(p, &label, marv_core::PredVars::DeBruijn)
     }
 
     fn eval_match(

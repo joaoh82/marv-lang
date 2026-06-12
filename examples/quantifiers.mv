@@ -1,0 +1,37 @@
+mod quantifiers
+
+/// Every element of `a` is at least `lo` (a bounded `forall` over the array),
+/// so the element the body picks is too — `marv verify` proves it (Tier 2).
+pure fn floor_of(a: [4]i64, lo: i64) -> i64
+    requires (forall i in 0..len(a): (a[i] >= lo))
+    ensures (result >= lo)
+{
+    a[2]
+}
+
+/// In a sorted slice the first element is a witness for any element's lower
+/// bound — an `exists` conclusion discharged from a `forall` premise.
+pure fn smallest(a: []i64) -> i64
+    requires (len(a) >= 1)
+    requires (forall i in 0..(len(a) - 1): (a[i] <= a[(i + 1)]))
+    ensures (exists i in 0..len(a): (a[i] == result))
+{
+    a[0]
+}
+
+/// Truncating division (`-7 / 2 == -3`, toward zero): the quotient/remainder
+/// identity proves with `/` and `%` appearing in the contract itself.
+pure fn tdiv(x: i64, y: i64) -> i64
+    requires (y != 0)
+    ensures (x == ((y * result) + (x % y)))
+{
+    (x / y)
+}
+
+/// `old(n)` is the parameter's value at entry — with immutable value-semantics
+/// parameters, exactly `n`.
+pure fn bump(n: i64) -> i64
+    ensures (result == (old(n) + 1))
+{
+    (n + 1)
+}

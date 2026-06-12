@@ -773,6 +773,7 @@ dependencies = [
  "easy-smt",
  "marv-core",
  "marv-syntax",
+ "marv-types",
 ]
 
 [[package]]

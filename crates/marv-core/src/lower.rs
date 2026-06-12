@@ -55,16 +55,25 @@ pub enum LowerError {
     /// A projection of a field the resolved struct does not declare.
     UnknownField { ty: String, field: String },
     /// A contract clause that is not a boolean predicate the `Pred` language can
-    /// express (it must be a comparison, `and`/`or`, or a boolean literal).
+    /// express (it must be a comparison, `and`/`or`/`not`, a quantifier, or a
+    /// boolean literal).
     ContractNotPredicate,
-    /// A contract comparison whose operand is not atomic. `Pred::Cmp` compares
-    /// atoms (a variable, `result`, or a literal), so `result >= lo + 1` and the
-    /// like cannot be expressed yet.
-    ContractOperandNotAtomic,
-    /// A contract referenced a name that is neither a parameter nor `result`.
+    /// A contract comparison operand outside the contract expression language
+    /// (`CExpr`, MARV-11): variables, literals, integer arithmetic, `-e`,
+    /// `len(e)`, indexing `e[i]`, and `old(e)`.
+    ContractOperandUnsupported,
+    /// A contract referenced a name that is neither a parameter, `result`, nor
+    /// an enclosing quantifier binder.
     UnknownContractVar { name: String },
     /// `result` was used in a `requires` clause (it only exists post-return).
     ResultInRequires,
+    /// `old(e)` was used outside an `ensures` clause. Pre-state only differs
+    /// from the visible state after the body runs, so `old` is meaningful only
+    /// in postconditions.
+    OldOutsideEnsures,
+    /// A `forall`/`exists` quantifier appeared in ordinary expression position.
+    /// Quantifiers are contract-only (`spec/02` §B `quant_expr`).
+    QuantifierOutsideContract,
     /// A `match` whose arms name no enum constructor, so M1 cannot determine the
     /// scrutinee's variant set (an all-`_` match, or a match over a non-enum).
     MatchWithoutConstructor,
@@ -127,23 +136,36 @@ impl std::fmt::Display for LowerError {
             }
             LowerError::ContractNotPredicate => write!(
                 f,
-                "a contract clause must be a boolean predicate (a comparison, `and`/`or`, or a \
-                 boolean literal)"
+                "a contract clause must be a boolean predicate (a comparison, `and`/`or`/`not`, \
+                 a `forall`/`exists` quantifier, or a boolean literal)"
             ),
-            LowerError::ContractOperandNotAtomic => write!(
+            LowerError::ContractOperandUnsupported => write!(
                 f,
-                "a contract comparison operand must be atomic (a parameter, `result`, or a literal)"
+                "a contract comparison operand must be built from parameters, `result`, \
+                 quantifier binders, literals, integer arithmetic, `-e`, `len(e)`, indexing \
+                 `e[i]`, and `old(e)`"
             ),
             LowerError::UnknownContractVar { name } => {
                 write!(
                     f,
-                    "contract refers to `{name}`, which is not a parameter or `result`"
+                    "contract refers to `{name}`, which is not a parameter, `result`, or a \
+                     quantifier binder in scope"
                 )
             }
             LowerError::ResultInRequires => {
                 write!(
                     f,
                     "`result` may only appear in an `ensures` clause, not `requires`"
+                )
+            }
+            LowerError::OldOutsideEnsures => {
+                write!(f, "`old(e)` may only appear in an `ensures` clause")
+            }
+            LowerError::QuantifierOutsideContract => {
+                write!(
+                    f,
+                    "`forall`/`exists` may only appear in contract clauses (`requires`, \
+                     `ensures`, `invariant`)"
                 )
             }
             LowerError::MatchWithoutConstructor => write!(
@@ -1272,15 +1294,35 @@ impl Lowerer {
         // count) is `result`. This is the same convention the Tier-1 runtime
         // checker and the Tier-2 SMT verifier consume.
         let names: Vec<&str> = f.params.iter().map(|p| p.name.as_str()).collect();
+        // A synthetic binding scope typing each parameter (and, for `ensures`,
+        // `result`) so field projections in contracts resolve to declaration
+        // indices via the ordinary best-effort surface typing. The atoms are
+        // placeholders — contract variables lower by *position*, never through
+        // these bindings.
+        let contract_binding = |name: &str, ty: &SType| Binding {
+            name: name.to_string(),
+            atom: Atom::Var(0),
+            ty: Some(ty.clone()),
+            mutable: false,
+            carried: false,
+        };
+        let mut cenv: Vec<Binding> = f
+            .params
+            .iter()
+            .map(|p| contract_binding(&p.name, &p.ty))
+            .collect();
         let requires = f
             .requires
             .iter()
-            .map(|e| self.lower_pred(e, &names, false))
+            .map(|e| self.lower_pred(e, &names, false, &mut Vec::new(), &cenv))
             .collect::<Result<Vec<_>, _>>()?;
+        if let Some(ret) = &f.ret {
+            cenv.push(contract_binding("result", ret));
+        }
         let ensures = f
             .ensures
             .iter()
-            .map(|e| self.lower_pred(e, &names, true))
+            .map(|e| self.lower_pred(e, &names, true, &mut Vec::new(), &cenv))
             .collect::<Result<Vec<_>, _>>()?;
 
         Ok(Def {
@@ -1297,28 +1339,32 @@ impl Lowerer {
     /// Lower a surface boolean expression into a contract [`Pred`]. `params` are
     /// the parameter names (their position is the flat contract index);
     /// `allow_result` permits `result` (index `params.len()`), as in `ensures`.
+    /// `binders` is the stack of enclosing quantifier binder names, outermost
+    /// first — binder j resolves to flat index `params.len() + 1 + j` (MARV-11).
     fn lower_pred(
         &self,
         e: &Expr,
         params: &[&str],
         allow_result: bool,
+        binders: &mut Vec<String>,
+        cenv: &[Binding],
     ) -> Result<Pred, LowerError> {
         match e {
             Expr::Bool(true) => Ok(Pred::True),
             Expr::Bool(false) => Ok(Pred::False),
             Expr::Binary(l, op, r) => match op {
                 BinOp::And => Ok(Pred::And(
-                    Box::new(self.lower_pred(l, params, allow_result)?),
-                    Box::new(self.lower_pred(r, params, allow_result)?),
+                    Box::new(self.lower_pred(l, params, allow_result, binders, cenv)?),
+                    Box::new(self.lower_pred(r, params, allow_result, binders, cenv)?),
                 )),
                 BinOp::Or => Ok(Pred::Or(
-                    Box::new(self.lower_pred(l, params, allow_result)?),
-                    Box::new(self.lower_pred(r, params, allow_result)?),
+                    Box::new(self.lower_pred(l, params, allow_result, binders, cenv)?),
+                    Box::new(self.lower_pred(r, params, allow_result, binders, cenv)?),
                 )),
                 BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
                     let cmp = cmp_op(*op).ok_or(LowerError::ContractNotPredicate)?;
-                    let la = self.lower_pred_atom(l, params, allow_result)?;
-                    let ra = self.lower_pred_atom(r, params, allow_result)?;
+                    let la = self.lower_cexpr(l, params, allow_result, binders, cenv)?;
+                    let ra = self.lower_cexpr(r, params, allow_result, binders, cenv)?;
                     Ok(Pred::Cmp(cmp, la, ra))
                 }
                 // Arithmetic operators are not boolean predicates.
@@ -1329,35 +1375,125 @@ impl Lowerer {
                 inner,
                 params,
                 allow_result,
+                binders,
+                cenv,
             )?))),
+            // `forall i in lo..hi: p` / `exists …` (`spec/02` §B `quant_expr`).
+            // The domain is evaluated outside the binder's scope.
+            Expr::Quant {
+                exists,
+                binder,
+                lo,
+                hi,
+                body,
+            } => {
+                let lo = self.lower_cexpr(lo, params, allow_result, binders, cenv)?;
+                let hi = self.lower_cexpr(hi, params, allow_result, binders, cenv)?;
+                binders.push(binder.clone());
+                let body = self.lower_pred(body, params, allow_result, binders, cenv);
+                binders.pop();
+                let body = Box::new(body?);
+                Ok(if *exists {
+                    Pred::Exists {
+                        domain: (lo, hi),
+                        body,
+                    }
+                } else {
+                    Pred::Forall {
+                        domain: (lo, hi),
+                        body,
+                    }
+                })
+            }
             _ => Err(LowerError::ContractNotPredicate),
         }
     }
 
-    /// Lower a contract comparison operand to an [`Atom`] (a parameter, `result`,
-    /// or a literal). Compound operands are rejected — `Pred::Cmp` is atomic.
-    fn lower_pred_atom(
+    /// Lower a contract comparison operand to a [`CExpr`] (MARV-11): parameters,
+    /// `result`, quantifier binders, literals, integer arithmetic, negation,
+    /// `len(e)`, indexing, and `old(e)`.
+    fn lower_cexpr(
         &self,
         e: &Expr,
         params: &[&str],
         allow_result: bool,
-    ) -> Result<Atom, LowerError> {
+        binders: &[String],
+        cenv: &[Binding],
+    ) -> Result<CExpr, LowerError> {
         match e {
-            Expr::Int(n) => Ok(Atom::Lit(Literal::Int(*n))),
-            Expr::Bool(b) => Ok(Atom::Lit(Literal::Bool(*b))),
-            Expr::Var(name) if name == "result" => {
-                if allow_result {
-                    Ok(Atom::Var(params.len() as u32))
-                } else {
-                    Err(LowerError::ResultInRequires)
+            Expr::Int(n) => Ok(CExpr::int(*n)),
+            Expr::Bool(b) => Ok(CExpr::Atom(Atom::Lit(Literal::Bool(*b)))),
+            Expr::Var(name) => {
+                // The innermost quantifier binder shadows outer binders, which
+                // shadow `result` and the parameters.
+                if let Some(j) = binders.iter().rposition(|b| b == name) {
+                    return Ok(CExpr::var(params.len() as u32 + 1 + j as u32));
                 }
+                if name == "result" {
+                    return if allow_result {
+                        Ok(CExpr::var(params.len() as u32))
+                    } else {
+                        Err(LowerError::ResultInRequires)
+                    };
+                }
+                params
+                    .iter()
+                    .position(|p| p == name)
+                    .map(|i| CExpr::var(i as u32))
+                    .ok_or_else(|| LowerError::UnknownContractVar { name: name.clone() })
             }
-            Expr::Var(name) => params
-                .iter()
-                .position(|p| p == name)
-                .map(|i| Atom::Var(i as u32))
-                .ok_or_else(|| LowerError::UnknownContractVar { name: name.clone() }),
-            _ => Err(LowerError::ContractOperandNotAtomic),
+            Expr::Unary(UnOp::Neg, inner) => Ok(CExpr::node(CNode::Neg(self.lower_cexpr(
+                inner,
+                params,
+                allow_result,
+                binders,
+                cenv,
+            )?))),
+            Expr::Binary(l, op, r) => {
+                let a = arith_op(*op).ok_or(LowerError::ContractOperandUnsupported)?;
+                Ok(CExpr::node(CNode::Bin(
+                    a,
+                    self.lower_cexpr(l, params, allow_result, binders, cenv)?,
+                    self.lower_cexpr(r, params, allow_result, binders, cenv)?,
+                )))
+            }
+            Expr::Index(base, index) => Ok(CExpr::node(CNode::Index(
+                self.lower_cexpr(base, params, allow_result, binders, cenv)?,
+                self.lower_cexpr(index, params, allow_result, binders, cenv)?,
+            ))),
+            // `base.field` — a struct field projection, resolved to its
+            // declaration index against the synthetic contract scope (a
+            // quantifier binder shadowing the root name cannot carry fields).
+            Expr::Field(base, fname) => {
+                if let Expr::Var(root) = field_root(base) {
+                    if binders.iter().any(|b| b == root) {
+                        return Err(LowerError::ContractOperandUnsupported);
+                    }
+                }
+                let idx = self.resolve_proj(base, fname, cenv)?;
+                Ok(CExpr::node(CNode::Proj(
+                    self.lower_cexpr(base, params, allow_result, binders, cenv)?,
+                    idx,
+                )))
+            }
+            Expr::Call(callee, args) => match &**callee {
+                Expr::Var(f) if f == "len" && args.len() == 1 => Ok(CExpr::node(CNode::Len(
+                    self.lower_cexpr(&args[0], params, allow_result, binders, cenv)?,
+                ))),
+                // `old(e)` — the pre-state of `e` (`spec/01` §7). Parameters are
+                // immutable values (mutable value semantics never aliases them),
+                // so the pre-state of any contract expression *is* the
+                // expression; `old` erases at lowering and exists in `ensures`
+                // for spec compliance and future mutable-store semantics.
+                Expr::Var(f) if f == "old" && args.len() == 1 => {
+                    if !allow_result {
+                        return Err(LowerError::OldOutsideEnsures);
+                    }
+                    self.lower_cexpr(&args[0], params, allow_result, binders, cenv)
+                }
+                _ => Err(LowerError::ContractOperandUnsupported),
+            },
+            _ => Err(LowerError::ContractOperandUnsupported),
         }
     }
 
@@ -1629,6 +1765,9 @@ impl Lowerer {
             Expr::Bool(v) => Ok(Atom::Lit(Literal::Bool(*v))),
             Expr::Str(s) => Ok(Atom::Lit(Literal::Str(s.clone()))),
             Expr::Char(c) => Ok(Atom::Lit(Literal::Char(*c))),
+            // Quantifiers live in the contract language only (`spec/02` §B
+            // `quant_expr`); in a body they have no runtime meaning.
+            Expr::Quant { .. } => Err(LowerError::QuantifierOutsideContract),
             // `e?` (`spec/02` §D): with errors modeled as an effect that
             // propagates by unwinding (a `Raise` aborts the computation), the
             // success value of a non-raising `e` *is* its value, so `?` lowers to
@@ -1793,6 +1932,8 @@ impl Lowerer {
             | Expr::Str(_)
             | Expr::Char(_)
             | Expr::Var(_) => Ok(Core::Atom(self.emit_atom(e, env, b)?)),
+            // Quantifiers live in the contract language only (`spec/02` §B).
+            Expr::Quant { .. } => Err(LowerError::QuantifierOutsideContract),
             // `e?` at a tail position: lower the operand (see `emit_atom`).
             Expr::Try(inner) => self.emit_tail(inner, env, b),
             // `e as T` at a tail position: emit the `Cast` unbound.
@@ -2303,7 +2444,7 @@ impl Lowerer {
         let cond_core = fold_lets(cb.lets, cond_tail);
 
         // Invariants → a conjoined `Pred` over the header environment (level atoms).
-        let invariant = self.lower_loop_invariants(invariants, &loop_env)?;
+        let invariant = self.lower_loop_invariants(invariants, &loop_env, header_depth + k)?;
 
         // Body: lower its statements (mutating a body-local environment), then
         // thread the carried vars through its tail into the next-state tuple. A
@@ -2573,15 +2714,19 @@ impl Lowerer {
     }
 
     /// Lower a loop's `invariant` clauses to a single conjoined [`Pred`] over the
-    /// loop-header environment (or `None` when there are none).
+    /// loop-header environment (or `None` when there are none). `base_level` is
+    /// the de Bruijn level just past the carried slots (`header_depth + k`) —
+    /// quantifier binders are assigned the levels above it, which the finalize
+    /// pass ([`pred_to_index`]) turns into proper de Bruijn binder indices.
     fn lower_loop_invariants(
         &self,
         invariants: &[Expr],
         loop_env: &[Binding],
+        base_level: u32,
     ) -> Result<Option<Pred>, LowerError> {
         let mut acc: Option<Pred> = None;
         for e in invariants {
-            let p = self.lower_loop_pred(e, loop_env)?;
+            let p = self.lower_loop_pred(e, loop_env, base_level, &mut Vec::new())?;
             acc = Some(match acc {
                 None => p,
                 Some(prev) => Pred::And(Box::new(prev), Box::new(p)),
@@ -2592,45 +2737,126 @@ impl Lowerer {
 
     /// Lower a loop invariant expression to a [`Pred`]. Unlike a `requires`/
     /// `ensures` contract (which uses a flat parameter convention,
-    /// [`Self::lower_pred`]), an invariant's atoms are resolved against the loop
-    /// environment as de Bruijn *levels*, so a comparison can mention both
-    /// parameters and the loop-carried variables.
-    fn lower_loop_pred(&self, e: &Expr, env: &[Binding]) -> Result<Pred, LowerError> {
+    /// [`Self::lower_pred`]), an invariant's variables are resolved against the
+    /// loop environment as de Bruijn *levels*, so a comparison can mention both
+    /// parameters and the loop-carried variables. Quantifier binders take the
+    /// levels above `base_level`, outermost first.
+    fn lower_loop_pred(
+        &self,
+        e: &Expr,
+        env: &[Binding],
+        base_level: u32,
+        binders: &mut Vec<String>,
+    ) -> Result<Pred, LowerError> {
         match e {
             Expr::Bool(true) => Ok(Pred::True),
             Expr::Bool(false) => Ok(Pred::False),
             Expr::Binary(l, op, r) => match op {
                 BinOp::And => Ok(Pred::And(
-                    Box::new(self.lower_loop_pred(l, env)?),
-                    Box::new(self.lower_loop_pred(r, env)?),
+                    Box::new(self.lower_loop_pred(l, env, base_level, binders)?),
+                    Box::new(self.lower_loop_pred(r, env, base_level, binders)?),
                 )),
                 BinOp::Or => Ok(Pred::Or(
-                    Box::new(self.lower_loop_pred(l, env)?),
-                    Box::new(self.lower_loop_pred(r, env)?),
+                    Box::new(self.lower_loop_pred(l, env, base_level, binders)?),
+                    Box::new(self.lower_loop_pred(r, env, base_level, binders)?),
                 )),
                 BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
                     let cmp = cmp_op(*op).ok_or(LowerError::ContractNotPredicate)?;
-                    let la = self.lower_loop_pred_atom(l, env)?;
-                    let ra = self.lower_loop_pred_atom(r, env)?;
+                    let la = self.lower_loop_cexpr(l, env, base_level, binders)?;
+                    let ra = self.lower_loop_cexpr(r, env, base_level, binders)?;
                     Ok(Pred::Cmp(cmp, la, ra))
                 }
                 _ => Err(LowerError::ContractNotPredicate),
             },
+            Expr::Unary(UnOp::Not, inner) => Ok(Pred::Not(Box::new(
+                self.lower_loop_pred(inner, env, base_level, binders)?,
+            ))),
+            Expr::Quant {
+                exists,
+                binder,
+                lo,
+                hi,
+                body,
+            } => {
+                let lo = self.lower_loop_cexpr(lo, env, base_level, binders)?;
+                let hi = self.lower_loop_cexpr(hi, env, base_level, binders)?;
+                binders.push(binder.clone());
+                let body = self.lower_loop_pred(body, env, base_level, binders);
+                binders.pop();
+                let body = Box::new(body?);
+                Ok(if *exists {
+                    Pred::Exists {
+                        domain: (lo, hi),
+                        body,
+                    }
+                } else {
+                    Pred::Forall {
+                        domain: (lo, hi),
+                        body,
+                    }
+                })
+            }
             _ => Err(LowerError::ContractNotPredicate),
         }
     }
 
-    /// Lower a loop-invariant comparison operand to an [`Atom`] resolved against
-    /// the loop environment. Only atomic operands (a variable, the loop-carried
-    /// vars, or a literal) are expressible — `Pred::Cmp` compares atoms.
-    fn lower_loop_pred_atom(&self, e: &Expr, env: &[Binding]) -> Result<Atom, LowerError> {
+    /// Lower a loop-invariant comparison operand to a [`CExpr`] resolved against
+    /// the loop environment (MARV-11).
+    fn lower_loop_cexpr(
+        &self,
+        e: &Expr,
+        env: &[Binding],
+        base_level: u32,
+        binders: &[String],
+    ) -> Result<CExpr, LowerError> {
         match e {
-            Expr::Int(n) => Ok(Atom::Lit(Literal::Int(*n))),
-            Expr::Bool(b) => Ok(Atom::Lit(Literal::Bool(*b))),
-            Expr::Var(name) => self
-                .resolve_local(name, env)
-                .ok_or_else(|| LowerError::UnknownContractVar { name: name.clone() }),
-            _ => Err(LowerError::ContractOperandNotAtomic),
+            Expr::Int(n) => Ok(CExpr::int(*n)),
+            Expr::Bool(b) => Ok(CExpr::Atom(Atom::Lit(Literal::Bool(*b)))),
+            Expr::Var(name) => {
+                if let Some(j) = binders.iter().rposition(|b| b == name) {
+                    return Ok(CExpr::var(base_level + j as u32));
+                }
+                self.resolve_local(name, env)
+                    .map(CExpr::Atom)
+                    .ok_or_else(|| LowerError::UnknownContractVar { name: name.clone() })
+            }
+            Expr::Unary(UnOp::Neg, inner) => Ok(CExpr::node(CNode::Neg(
+                self.lower_loop_cexpr(inner, env, base_level, binders)?,
+            ))),
+            Expr::Binary(l, op, r) => {
+                let a = arith_op(*op).ok_or(LowerError::ContractOperandUnsupported)?;
+                Ok(CExpr::node(CNode::Bin(
+                    a,
+                    self.lower_loop_cexpr(l, env, base_level, binders)?,
+                    self.lower_loop_cexpr(r, env, base_level, binders)?,
+                )))
+            }
+            Expr::Index(base, index) => Ok(CExpr::node(CNode::Index(
+                self.lower_loop_cexpr(base, env, base_level, binders)?,
+                self.lower_loop_cexpr(index, env, base_level, binders)?,
+            ))),
+            Expr::Field(base, fname) => {
+                if let Expr::Var(root) = field_root(base) {
+                    if binders.iter().any(|b| b == root) {
+                        return Err(LowerError::ContractOperandUnsupported);
+                    }
+                }
+                let idx = self.resolve_proj(base, fname, env)?;
+                Ok(CExpr::node(CNode::Proj(
+                    self.lower_loop_cexpr(base, env, base_level, binders)?,
+                    idx,
+                )))
+            }
+            Expr::Call(callee, args) => match &**callee {
+                Expr::Var(f) if f == "len" && args.len() == 1 => Ok(CExpr::node(CNode::Len(
+                    self.lower_loop_cexpr(&args[0], env, base_level, binders)?,
+                ))),
+                // `old(e)` only makes sense against a post-state; invariants
+                // observe the current iteration's state, so it is rejected here.
+                Expr::Var(f) if f == "old" && args.len() == 1 => Err(LowerError::OldOutsideEnsures),
+                _ => Err(LowerError::ContractOperandUnsupported),
+            },
+            _ => Err(LowerError::ContractOperandUnsupported),
         }
     }
 
@@ -3293,6 +3519,28 @@ fn cmp_op(op: BinOp) -> Option<CmpOp> {
     })
 }
 
+/// The root expression of a field chain (`a.b.c` → `a`), for the contract
+/// lowering's binder-shadowing guard.
+fn field_root(e: &Expr) -> &Expr {
+    match e {
+        Expr::Field(base, _) => field_root(base),
+        other => other,
+    }
+}
+
+/// Map a surface arithmetic operator to a contract [`ArithOp`], or `None` for a
+/// non-arithmetic operator (MARV-11).
+fn arith_op(op: BinOp) -> Option<ArithOp> {
+    Some(match op {
+        BinOp::Add => ArithOp::Add,
+        BinOp::Sub => ArithOp::Sub,
+        BinOp::Mul => ArithOp::Mul,
+        BinOp::Div => ArithOp::Div,
+        BinOp::Rem => ArithOp::Rem,
+        _ => return None,
+    })
+}
+
 /// Map a surface binary operator to its total Core primitive.
 fn prim_op(op: BinOp) -> PrimOp {
     match op {
@@ -3440,34 +3688,68 @@ fn to_indices(c: &Core, depth: u32) -> Core {
 /// language. Loop invariants are built with level atoms (resolved from the
 /// lowering environment); other predicates already use a flat convention and pass
 /// through unchanged because their atoms are not `Var` levels into this scope.
+///
+/// Quantifier binders were assigned the levels just above `depth` (outermost
+/// first, MARV-11), so inside `q` enclosing quantifiers a variable converts at
+/// effective depth `depth + q` — which lands binder j on de Bruijn index
+/// `q - 1 - j` (innermost = 0), exactly the convention the Tier-1 interpreter
+/// and Tier-2 verifier evaluate by extending the header environment.
 fn pred_to_index(p: &Pred, depth: u32) -> Pred {
+    pred_to_index_q(p, depth, 0)
+}
+
+fn pred_to_index_q(p: &Pred, depth: u32, q: u32) -> Pred {
     match p {
         Pred::True => Pred::True,
         Pred::False => Pred::False,
-        Pred::Cmp(op, l, r) => Pred::Cmp(*op, atom_to_index(l, depth), atom_to_index(r, depth)),
+        Pred::Cmp(op, l, r) => Pred::Cmp(
+            *op,
+            cexpr_to_index(l, depth, q),
+            cexpr_to_index(r, depth, q),
+        ),
         Pred::And(l, r) => Pred::And(
-            Box::new(pred_to_index(l, depth)),
-            Box::new(pred_to_index(r, depth)),
+            Box::new(pred_to_index_q(l, depth, q)),
+            Box::new(pred_to_index_q(r, depth, q)),
         ),
         Pred::Or(l, r) => Pred::Or(
-            Box::new(pred_to_index(l, depth)),
-            Box::new(pred_to_index(r, depth)),
+            Box::new(pred_to_index_q(l, depth, q)),
+            Box::new(pred_to_index_q(r, depth, q)),
         ),
-        Pred::Not(inner) => Pred::Not(Box::new(pred_to_index(inner, depth))),
+        Pred::Not(inner) => Pred::Not(Box::new(pred_to_index_q(inner, depth, q))),
         Pred::Forall { domain, body } => Pred::Forall {
             domain: (
-                atom_to_index(&domain.0, depth),
-                atom_to_index(&domain.1, depth),
+                cexpr_to_index(&domain.0, depth, q),
+                cexpr_to_index(&domain.1, depth, q),
             ),
-            body: Box::new(pred_to_index(body, depth)),
+            body: Box::new(pred_to_index_q(body, depth, q + 1)),
         },
         Pred::Exists { domain, body } => Pred::Exists {
             domain: (
-                atom_to_index(&domain.0, depth),
-                atom_to_index(&domain.1, depth),
+                cexpr_to_index(&domain.0, depth, q),
+                cexpr_to_index(&domain.1, depth, q),
             ),
-            body: Box::new(pred_to_index(body, depth)),
+            body: Box::new(pred_to_index_q(body, depth, q + 1)),
         },
+    }
+}
+
+fn cexpr_to_index(e: &CExpr, depth: u32, q: u32) -> CExpr {
+    match e {
+        CExpr::Atom(a) => CExpr::Atom(atom_to_index(a, depth + q)),
+        CExpr::Node(n) => CExpr::node(match &**n {
+            CNode::Bin(op, l, r) => CNode::Bin(
+                *op,
+                cexpr_to_index(l, depth, q),
+                cexpr_to_index(r, depth, q),
+            ),
+            CNode::Neg(inner) => CNode::Neg(cexpr_to_index(inner, depth, q)),
+            CNode::Len(inner) => CNode::Len(cexpr_to_index(inner, depth, q)),
+            CNode::Index(base, index) => CNode::Index(
+                cexpr_to_index(base, depth, q),
+                cexpr_to_index(index, depth, q),
+            ),
+            CNode::Proj(base, idx) => CNode::Proj(cexpr_to_index(base, depth, q), *idx),
+        }),
     }
 }
 
