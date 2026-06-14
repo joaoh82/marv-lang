@@ -268,6 +268,140 @@ fn proves_division_identity() {
     );
 }
 
+// ---- fixed-width wraparound (MARV-38) -------------------------------------
+//
+// Tier-2 arithmetic computes the runtime's 64-bit *wrapping* values, not
+// mathematical integers. A contract that holds only for unbounded integers
+// must now be refuted with the overflowing counterexample, while a contract
+// that holds for every i64 (because it wraps identically, or stays in range)
+// must still prove.
+
+// `result > x` for `x + 1` is true over the mathematical integers but FALSE in
+// i64: at `x = i64::MAX` the add wraps to `i64::MIN`. A faithful encoding must
+// produce that counterexample — a `proved` here would be the old soundness bug.
+const INC_WRAPS: &str = "\
+mod wrap
+
+pure fn inc(x: i64) -> i64
+    ensures result > x
+{
+    x + 1
+}
+";
+
+#[test]
+fn increment_overflow_is_refuted_at_max() {
+    let (def, names, world) = lower_one(INC_WRAPS);
+    let outcome = verify_def(&def, &names, &world);
+    if skip_if_no_solver(&outcome) {
+        return;
+    }
+    match outcome {
+        VerifyOutcome::Failed { counterexample, .. } => {
+            let val = |k: &str| -> i64 {
+                counterexample
+                    .iter()
+                    .find(|(n, _)| n == k)
+                    .and_then(|(_, v)| v.parse::<i64>().ok())
+                    .unwrap_or_else(|| panic!("missing/non-int {k} in {counterexample:?}"))
+            };
+            // The only x where `x + 1` overflows is i64::MAX, wrapping to MIN.
+            assert_eq!(
+                val("x"),
+                i64::MAX,
+                "the overflow witness is x = i64::MAX: {counterexample:?}"
+            );
+            assert_eq!(
+                val("result"),
+                i64::MIN,
+                "x + 1 wraps to i64::MIN: {counterexample:?}"
+            );
+        }
+        other => panic!("`result > x` for x + 1 must be refuted (x = i64::MAX), got {other:?}"),
+    }
+}
+
+// The same body proves once the precondition rules out the overflowing input:
+// `x < i64::MAX` ⇒ `x + 1` does not wrap ⇒ `result > x`. Guards against an
+// over-eager wrap that would refute even non-overflowing arithmetic.
+const INC_BOUNDED: &str = "\
+mod wrap
+
+pure fn inc(x: i64) -> i64
+    requires x < 9223372036854775807
+    ensures result > x
+{
+    x + 1
+}
+";
+
+#[test]
+fn bounded_increment_still_proves() {
+    let (def, names, world) = lower_one(INC_BOUNDED);
+    let outcome = verify_def(&def, &names, &world);
+    if skip_if_no_solver(&outcome) {
+        return;
+    }
+    assert_eq!(
+        outcome,
+        VerifyOutcome::Proved,
+        "x + 1 with x < i64::MAX cannot overflow, so result > x holds: {outcome:?}"
+    );
+}
+
+// Multiplication wraps too: `result >= x` for `x * 2` with `x >= 0` fails once
+// `2 * x` exceeds i64::MAX (e.g. x = 2^62, where `x * 2 = i64::MIN`).
+const DOUBLE_WRAPS: &str = "\
+mod wrap
+
+pure fn double(x: i64) -> i64
+    requires x >= 0
+    ensures result >= x
+{
+    x * 2
+}
+";
+
+#[test]
+fn multiplication_overflow_is_refuted() {
+    let (def, names, world) = lower_one(DOUBLE_WRAPS);
+    let outcome = verify_def(&def, &names, &world);
+    if skip_if_no_solver(&outcome) {
+        return;
+    }
+    assert!(
+        matches!(outcome, VerifyOutcome::Failed { .. }),
+        "`result >= x` for x * 2 must be refuted by overflow, got {outcome:?}"
+    );
+}
+
+// `result == old(n) + 1` for body `n + 1` proves *because* both sides wrap
+// identically — an equality between the same wrapping expression holds for
+// every i64, including i64::MAX. (Modeling wrap must not break this.)
+const WRAP_EQ: &str = "\
+mod wrap
+
+pure fn bump(n: i64) -> i64
+    ensures result == old(n) + 1
+{
+    n + 1
+}
+";
+
+#[test]
+fn equal_wrapping_expressions_still_prove() {
+    let (def, names, world) = lower_one(WRAP_EQ);
+    let outcome = verify_def(&def, &names, &world);
+    if skip_if_no_solver(&outcome) {
+        return;
+    }
+    assert_eq!(
+        outcome,
+        VerifyOutcome::Proved,
+        "result == old(n) + 1 for n + 1 wraps identically on both sides: {outcome:?}"
+    );
+}
+
 // ---- loop invariants (MARV-22) ------------------------------------------
 //
 // Hoare-style discharge of `while` invariants: initiation (holds on entry),
@@ -275,10 +409,14 @@ fn proves_division_identity() {
 // known after the loop). Counterexamples label carried slots positionally
 // (`s0`, `s1`, …; primed for post-iteration values) — Core erases names.
 
-/// The MARV-22 acceptance gate: `sum_to`'s loop proves once the invariant is
-/// strong enough to carry `result >= 0` past the loop (mirrors
-/// `examples/loops.mv`).
-const SUM_TO: &str = "\
+// `sum_to` accumulates `sum + i` under the invariant `sum >= 0` — true over the
+// mathematical integers, but the running sum overflows i64 for large `n`. Under
+// fixed-width wrapping (MARV-38) consecution now refutes it: a carried `sum`
+// near i64::MAX plus a positive `i` wraps to a *negative* `sum'`, so `sum >= 0`
+// is not preserved. A `proved` here would resurrect the soundness gap MARV-38
+// closes — `examples/loops.mv` keeps this as a documented caught overflow, and
+// `count_down_sum` there is the bounded form that proves.
+const SUM_TO_OVERFLOWS: &str = "\
 mod loops
 
 pure fn sum_to(n: i64) -> i64
@@ -299,17 +437,34 @@ pure fn sum_to(n: i64) -> i64
 ";
 
 #[test]
-fn proves_sum_to_loop() {
-    let (def, names, world) = lower_one(SUM_TO);
+fn sum_to_overflow_is_refuted() {
+    let (def, names, world) = lower_one(SUM_TO_OVERFLOWS);
     let outcome = verify_def(&def, &names, &world);
     if skip_if_no_solver(&outcome) {
         return;
     }
-    assert_eq!(
-        outcome,
-        VerifyOutcome::Proved,
-        "sum_to with a strong enough invariant should be proved, got {outcome:?}"
-    );
+    match outcome {
+        VerifyOutcome::Failed {
+            message,
+            counterexample,
+            ..
+        } => {
+            assert!(
+                message.contains("not preserved"),
+                "the running sum overflows, breaking consecution: {message}"
+            );
+            // A post-iteration carried slot (`s{j}'`) wraps to a negative value
+            // — the overflow that refutes `sum >= 0`.
+            let post_wraps_negative = counterexample.iter().any(|(name, v)| {
+                name.ends_with('\'') && v.parse::<i64>().map(|x| x < 0).unwrap_or(false)
+            });
+            assert!(
+                post_wraps_negative,
+                "a carried slot wraps negative on overflow: {counterexample:?}"
+            );
+        }
+        other => panic!("sum_to's unbounded `sum + i` must be refuted by overflow, got {other:?}"),
+    }
 }
 
 // `requires n >= 0` admits n = 0, and the initial sum is 0 — the invariant
@@ -482,19 +637,24 @@ fn invariant_only_function_is_discharged() {
 }
 
 // A loop body whose tail is an `if`/`else` (MARV-21 branch join): each branch
-// yields the next-state tuple; consecution merges them componentwise.
+// yields the next-state tuple; consecution merges them componentwise. The
+// `acc <= 10 * (n - i)` bound (and `n <= 1e8`) keeps the accumulator inside
+// i64 so the `acc + 10` step cannot wrap — without it, faithful wrapping
+// (MARV-38) refutes `acc >= 0`.
 const BRANCH_JOIN: &str = "\
 mod loops
 
 pure fn weighted(n: i64) -> i64
-    requires (n >= 0)
+    requires (n >= 0 and n <= 100000000)
     ensures (result >= 0)
 {
     var i: i64 = n
     var acc: i64 = 0
     while (i > 0)
         invariant (i >= 0)
+        invariant (i <= n)
         invariant (acc >= 0)
+        invariant (acc <= (10 * (n - i)))
     {
         i = (i - 1)
         if (i > 2) {
@@ -522,28 +682,32 @@ fn proves_branch_join_loop() {
 }
 
 // Nested loops: the inner loop's obligations discharge under the outer
-// iteration's assumptions, and its exit state feeds the outer consecution.
+// iteration's assumptions, and its exit state feeds the outer consecution. The
+// outer accumulator is bounded by the non-overflowing `total <= n - i` (a real
+// bound — `total + i <= n` would be *vacuous* under wrapping, since the sum can
+// itself wrap), so `total + 1` never overflows and the loop proves (MARV-38).
 const NESTED: &str = "\
 mod loops
 
 pure fn grid(n: i64) -> i64
-    requires (n >= 0)
+    requires (n >= 0 and n <= 1000000)
     ensures (result >= 0)
 {
     var total: i64 = 0
     var i: i64 = n
     while (i > 0)
         invariant (i >= 0)
+        invariant (i <= n)
         invariant (total >= 0)
+        invariant (total <= (n - i))
     {
         var j: i64 = i
         while (j > 0)
             invariant (j >= 0)
-            invariant (total >= 0)
         {
-            total = (total + j)
             j = (j - 1)
         }
+        total = (total + 1)
         i = (i - 1)
     }
     total
@@ -735,14 +899,16 @@ fn proves_old_in_ensures() {
 }
 
 // A struct parameter havocs from its declaration; field projections feed the
-// contract through scalar arithmetic.
+// contract through scalar arithmetic. The upper bounds keep `p.x + p.y` inside
+// i64 — without them, faithful wrapping (MARV-38) refutes `result >= 0` at
+// `p.x = p.y = i64::MAX`, where the sum wraps to -2.
 const STRUCT_PARAM: &str = "\
 mod adts
 
 struct Point { x: i64, y: i64 }
 
 pure fn norm1(p: Point) -> i64
-    requires (p.x >= 0 and p.y >= 0)
+    requires (p.x >= 0 and p.y >= 0 and p.x <= 1000000000 and p.y <= 1000000000)
     ensures (result >= 0)
 {
     p.x + p.y

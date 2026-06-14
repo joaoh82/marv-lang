@@ -30,10 +30,26 @@
 //!
 //! Beyond ints and bools, the encoding covers:
 //!
+//! - **Fixed-width 64-bit wrapping arithmetic (MARV-38).** Integer terms are
+//!   SMT `Int`s, but every `+ - * / %` and unary `-` is wrapped back into
+//!   `[i64::MIN, i64::MAX]` by [`wrap64`] (two's-complement reduction modulo
+//!   2⁶⁴), and every havocked integer (parameter, ADT field, slice length,
+//!   loop-carried slot) is constrained to that range. So Tier 2 computes the
+//!   *same* wrapped values the runtime does (`wrapping_add`/`wrapping_mul`/… in
+//!   `marv-interp`, 64-bit registers in codegen): `ensures result > x` for
+//!   `x + 1` is now **refuted** with the counterexample `x = i64::MAX` (the add
+//!   wraps to `i64::MIN`), where mathematical-integer encodings falsely proved
+//!   it. Keeping `Int` (rather than switching the sort to `(_ BitVec 64)`) is
+//!   deliberate: nonlinear bitvector reasoning is intractable here — the
+//!   division identity `x == y*(x/y) + (x%y)` times out past 60 s as a 64-bit
+//!   bitvector but discharges in a fraction of a second as wrapped `Int`s,
+//!   and quantifiers stay over the friendly integer domain.
 //! - **Truncating `/` and `%`.** SMT-LIB `div`/`mod` are Euclidean (the
 //!   remainder is always non-negative) while marv truncates toward zero; the
 //!   encoding corrects the Euclidean quotient by ±1 on the inexact negative
-//!   cases, so `-7 / 2` proves as `-3`, not `-4`. Division by zero traps at
+//!   cases (see [`smt_tdiv`]), so `-7 / 2` proves as `-3`, not `-4`. The
+//!   wrapping pass also captures the one overflowing division — `i64::MIN / -1`
+//!   wraps to `i64::MIN`, matching `wrapping_div`. Division by zero traps at
 //!   runtime (Tier 1); Tier 2 treats it as an unspecified integer, which is
 //!   sound for partial correctness — a trapping execution never reaches the
 //!   postcondition (a counterexample whose divisor is 0 may thus be spurious).
@@ -53,10 +69,12 @@
 //!   values, so the pre-state of a contract expression is the expression).
 //!
 //! Everything else stays an explicit `unsupported`, never a silent wrong
-//! `proved`. Two honest caveats: integer terms are *mathematical* integers, so
-//! 64-bit wraparound at runtime is not modeled; and quantifiers plus nonlinear
-//! arithmetic can drive the solver to `unknown`, which reports as
-//! `unsupported` (a per-query soft timeout keeps `verify` from hanging).
+//! `proved`. One honest caveat remains: quantifiers plus nonlinear arithmetic
+//! can drive the solver to `unknown`, which reports as `unsupported` (a
+//! per-query soft timeout keeps `verify` from hanging). Note that modeling
+//! wrapping makes Tier 2 *correctly stricter* — a contract that silently
+//! relied on unbounded integers (e.g. a loop accumulator claimed `>= 0` whose
+//! sum can overflow) now yields a counterexample instead of an unsound proof.
 //!
 //! ## Loops (MARV-22)
 //!
@@ -350,6 +368,11 @@ fn discharge(
 /// (array models print as their store-chain).
 fn render_value(ctx: &Context, v: SExpr) -> String {
     if let Some(n) = ctx.get_i64(v) {
+        return n.to_string();
+    }
+    // `i64::MIN` comes back as `(- 9223372036854775808)`: its magnitude 2⁶³
+    // overflows `i64` before negation, so `get_i64` fails. Widen to `i128`.
+    if let Some(n) = ctx.get_i128(v) {
         return n.to_string();
     }
     match ctx.get_atom(v) {
@@ -979,7 +1002,8 @@ impl Encoder<'_, '_> {
                     let x = self.inv_cexpr(inner, env)?;
                     let (x, _) = self.scalar(x, "contract operand")?;
                     let zero = self.ctx.numeral(0);
-                    Ok(Sym::Scalar(self.ctx.sub(zero, x), SortKind::Int))
+                    let neg = self.ctx.sub(zero, x);
+                    Ok(Sym::Scalar(wrap64(self.ctx, neg), SortKind::Int))
                 }
                 CNode::Len(inner) => match self.inv_cexpr(inner, env)? {
                     Sym::Array { len, .. } => Ok(Sym::Scalar(len, SortKind::Int)),
@@ -1052,6 +1076,35 @@ impl Encoder<'_, '_> {
         self.ctx.array_sort(int, self.sort(elem))
     }
 
+    /// Constrain a havocked integer term to the runtime's value range
+    /// `[i64::MIN, i64::MAX]`, so models pick only values the program could
+    /// actually compute. Arithmetic results are already kept in range by
+    /// [`wrap64`]; this pins down the *free* integers (parameters, ADT fields,
+    /// loop-carried slots) the solver is otherwise free to send to infinity.
+    fn assert_int_range(&mut self, v: SExpr) -> Result<(), Stop> {
+        let lo = self.ctx.numeral(i64::MIN);
+        let hi = self.ctx.numeral(i64::MAX);
+        let ge = self.ctx.gte(v, lo);
+        let le = self.ctx.lte(v, hi);
+        let both = self.ctx.and(ge, le);
+        self.ctx.assert(both)?;
+        Ok(())
+    }
+
+    /// Constrain a havocked length term to `[0, i64::MAX]` — a non-negative
+    /// count no larger than the runtime can address. The upper bound matters:
+    /// it lets the prover see that an in-bounds index `i < len` cannot overflow
+    /// when stepped (`i + 1`).
+    fn assert_len_range(&mut self, len: SExpr) -> Result<(), Stop> {
+        let lo = self.ctx.numeral(0);
+        let hi = self.ctx.numeral(i64::MAX);
+        let ge = self.ctx.gte(len, lo);
+        let le = self.ctx.lte(len, hi);
+        let both = self.ctx.and(ge, le);
+        self.ctx.assert(both)?;
+        Ok(())
+    }
+
     fn fresh_name(&mut self, prefix: &str) -> String {
         let id = self.fresh;
         self.fresh += 1;
@@ -1071,6 +1124,7 @@ impl Encoder<'_, '_> {
             }
             Type::Int(_) => {
                 let c = self.ctx.declare_const(name, self.ctx.int_sort())?;
+                self.assert_int_range(c)?;
                 Ok(Sym::Scalar(c, SortKind::Int))
             }
             Type::Array(elem, n) => {
@@ -1098,9 +1152,7 @@ impl Encoder<'_, '_> {
                 let len = self
                     .ctx
                     .declare_const(format!("{name}_len"), self.ctx.int_sort())?;
-                let zero = self.ctx.numeral(0);
-                let nonneg = self.ctx.gte(len, zero);
-                self.ctx.assert(nonneg)?;
+                self.assert_len_range(len)?;
                 Ok(Sym::Array {
                     arr,
                     len,
@@ -1180,6 +1232,9 @@ impl Encoder<'_, '_> {
             Sym::Scalar(_, kind) => {
                 let sort = self.sort(*kind);
                 let c = self.ctx.declare_const(name, sort)?;
+                if matches!(kind, SortKind::Int) {
+                    self.assert_int_range(c)?;
+                }
                 Ok(Sym::Scalar(c, *kind))
             }
             Sym::Array { elem, .. } => {
@@ -1188,9 +1243,7 @@ impl Encoder<'_, '_> {
                 let len = self
                     .ctx
                     .declare_const(format!("{name}_len"), self.ctx.int_sort())?;
-                let zero = self.ctx.numeral(0);
-                let nonneg = self.ctx.gte(len, zero);
-                self.ctx.assert(nonneg)?;
+                self.assert_len_range(len)?;
                 Ok(Sym::Array {
                     arr,
                     len,
@@ -1305,13 +1358,30 @@ fn encode_prim(ctx: &Context, op: PrimOp, a: &[SExpr]) -> Result<(SExpr, SortKin
             (ctx.or(x, y), SortKind::Bool)
         }
         Not => (ctx.not(a[0]), SortKind::Bool),
-        // `-x` as `0 - x` (exact for SMT integer subtraction).
+        // `-x` as `0 - x`, wrapped — only `-i64::MIN` overflows.
         Neg => {
             let zero = ctx.numeral(0);
-            (ctx.sub(zero, a[0]), SortKind::Int)
+            (wrap64(ctx, ctx.sub(zero, a[0])), SortKind::Int)
         }
         Len | Index => return Err("len/index of a non-array value".to_string()),
     })
+}
+
+/// Reduce an unbounded integer term into the two's-complement range
+/// `[i64::MIN, i64::MAX]` — the fixed-width wrap marv's runtime performs
+/// (`wrapping_add`/`wrapping_mul`/…). `wrap64(v) = ((v + 2⁶³) mod 2⁶⁴) − 2⁶³`,
+/// using SMT-LIB's Euclidean `mod` (non-negative for a positive modulus), so
+/// the result lands in `[−2⁶³, 2⁶³)` and equals `v` whenever `v` was already
+/// in range. Wrapping each arithmetic result (rather than switching the sort to
+/// `(_ BitVec 64)`) keeps division/quantifier reasoning tractable; see the
+/// module docs.
+fn wrap64(ctx: &Context, v: SExpr) -> SExpr {
+    // 2⁶³ and 2⁶⁴ overflow i64, so build them from wider literals.
+    let half = ctx.numeral(9_223_372_036_854_775_808_u64);
+    let modulus = ctx.numeral(18_446_744_073_709_551_616_i128);
+    let shifted = ctx.plus(v, half);
+    let reduced = ctx.modulo(shifted, modulus);
+    ctx.sub(reduced, half)
 }
 
 /// Truncate-toward-zero quotient over SMT integers. SMT-LIB `div` is Euclidean
@@ -1335,9 +1405,11 @@ fn smt_tdiv(ctx: &Context, x: SExpr, y: SExpr) -> SExpr {
 }
 
 /// Encode contract/body integer arithmetic; `/` and `%` use the truncating
-/// encoding shared with [`encode_prim`].
+/// encoding shared with [`encode_prim`]. Every result is reduced through
+/// [`wrap64`], so the term denotes the runtime's 64-bit wrapping value
+/// (operands are already in range, so this is identity except on overflow).
 fn smt_arith(ctx: &Context, op: ArithOp, x: SExpr, y: SExpr) -> SExpr {
-    match op {
+    let raw = match op {
         ArithOp::Add => ctx.plus(x, y),
         ArithOp::Sub => ctx.sub(x, y),
         ArithOp::Mul => ctx.times(x, y),
@@ -1347,7 +1419,8 @@ fn smt_arith(ctx: &Context, op: ArithOp, x: SExpr, y: SExpr) -> SExpr {
             let yq = ctx.times(y, q);
             ctx.sub(x, yq)
         }
-    }
+    };
+    wrap64(ctx, raw)
 }
 
 /// Build a guarded bounded quantifier: `forall q. lo <= q < hi ⇒ body` or
@@ -1505,7 +1578,7 @@ fn encode_flat_cexpr(
                     return Err("negation of a non-integer contract value".to_string());
                 };
                 let zero = ctx.numeral(0);
-                Ok(Sym::Scalar(ctx.sub(zero, x), SortKind::Int))
+                Ok(Sym::Scalar(wrap64(ctx, ctx.sub(zero, x)), SortKind::Int))
             }
             CNode::Len(inner) => match encode_flat_cexpr(ctx, inner, params, result, binders)? {
                 Sym::Array { len, .. } => Ok(Sym::Scalar(len, SortKind::Int)),
