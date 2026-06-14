@@ -1,5 +1,12 @@
 mod loops
 
+/// A naive triangular-number loop. Its `invariant (sum >= 0)` and
+/// `ensures (result >= 0)` hold over the mathematical integers, but `sum + i`
+/// overflows i64 for large `n`. Under fixed-width wrapping (MARV-38) `marv
+/// verify` now *refutes* it — a carried `sum` near i64::MAX plus a positive `i`
+/// wraps negative, so the invariant is not preserved. Kept here as a worked
+/// example of the soundness gap Tier 2 closes; `count_down_sum` below is the
+/// bounded form that proves.
 pure fn sum_to(n: i64) -> i64
     requires (n >= 0)
     ensures (result >= 0)
@@ -14,6 +21,29 @@ pure fn sum_to(n: i64) -> i64
         i = (i - 1)
     }
     sum
+}
+
+/// MARV-22 + MARV-38: the same shape made overflow-safe. Bounding `n` and
+/// carrying `total <= n - i` — a *non-overflowing* bound, where `total + i <= n`
+/// would be vacuous since that sum can itself wrap — keeps `total + 1` inside
+/// i64, so the invariant carries `result >= 0` past the loop and Tier 2 proves
+/// it.
+pure fn count_down_sum(n: i64) -> i64
+    requires ((n >= 0) and (n <= 1000000000))
+    ensures (result >= 0)
+{
+    var total: i64 = 0
+    var i: i64 = n
+    while (i > 0)
+        invariant (i >= 0)
+        invariant (i <= n)
+        invariant (total >= 0)
+        invariant (total <= (n - i))
+    {
+        total = (total + 1)
+        i = (i - 1)
+    }
+    total
 }
 
 pure fn pow(base: i64, exp: i64) -> i64

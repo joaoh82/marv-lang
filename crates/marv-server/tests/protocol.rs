@@ -491,20 +491,22 @@ pure fn factorial(n: i64) -> i64 {
 const LOOP_PAIR: &str = "\
 mod loops
 
-pure fn sum_to(n: i64) -> i64
-    requires n >= 0
+pure fn count_down_sum(n: i64) -> i64
+    requires n >= 0 and n <= 1000000000
     ensures result >= 0
 {
-    var sum: i64 = 0
+    var total: i64 = 0
     var i: i64 = n
     while (i > 0)
         invariant (i >= 0)
-        invariant (sum >= 0)
+        invariant (i <= n)
+        invariant (total >= 0)
+        invariant (total <= (n - i))
     {
-        sum = (sum + i)
+        total = (total + 1)
         i = (i - 1)
     }
-    sum
+    total
 }
 
 pure fn badloop(n: i64) -> i64
@@ -533,7 +535,7 @@ fn verify_discharges_loop_invariants_over_the_protocol() {
     let ok = call(
         &mut server,
         "marv/verify",
-        json!({ "snapshotId": snap, "def": "loops.sum_to" }),
+        json!({ "snapshotId": snap, "def": "loops.count_down_sum" }),
     );
     if ok.get("status").and_then(Value::as_str) == Some("unsupported")
         && ok
@@ -544,7 +546,10 @@ fn verify_discharges_loop_invariants_over_the_protocol() {
         eprintln!("skipping: no z3 solver available");
         return;
     }
-    assert_eq!(ok["status"], "proved", "sum_to's loop should prove: {ok:#}");
+    assert_eq!(
+        ok["status"], "proved",
+        "the bounded loop's invariant should prove: {ok:#}"
+    );
 
     let bad = call(
         &mut server,

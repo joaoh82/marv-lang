@@ -84,12 +84,15 @@ caveats:
 
 - **The invariant is all the prover keeps.** An invariant that holds but is too
   weak to imply an `ensures` yields a counterexample for that postcondition —
-  e.g. `sum_to` with only `invariant (i >= 0)` cannot prove
-  `ensures (result >= 0)`; adding `invariant (sum >= 0)` makes it prove (see
+  e.g. `count_down_sum` with only `invariant (i >= 0)` cannot prove
+  `ensures (result >= 0)`; carrying `total >= 0` (and the bound `total <= n - i`
+  that keeps it from overflowing) makes it prove (see
   [`examples/loops.mv`](../examples/loops.mv)). Such a counterexample is
   relative to the invariant abstraction: it picks an exit state the invariant
   *allows*, which a real execution may never reach. Strengthening the invariant
-  is the fix either way.
+  is the fix either way. (Its sibling `sum_to` shows the other failure mode:
+  `invariant (sum >= 0)` for `sum + i` is *not* preserved, because the running
+  sum can overflow i64 — see the wrapping note below.)
 - **Proofs are partial correctness.** Tier 2 does not prove termination; a loop
   that never exits satisfies its `ensures` vacuously.
 
@@ -130,10 +133,14 @@ Tier 2 currently covers **pure** functions over:
 
 - **Ints and bools** — arithmetic (`+ - *` and truncating `/ %`), comparisons,
   `and`/`or`/`not`, `let`, `if`/`else`, and `while` loops (with or without
-  `invariant`s). SMT `div`/`mod` are Euclidean while marv truncates toward
-  zero, so the encoding corrects the quotient by ±1 on inexact negative cases:
-  `-7 / 2` proves as `-3`, never `-4`, and `ensures result <= x` for `x / 2`
-  is *refuted* (counterexample `x = -1`) rather than falsely proved.
+  `invariant`s). Arithmetic is **fixed-width 64-bit wrapping** (MARV-38): every
+  `+ - * / %` and unary `-` is reduced modulo 2⁶⁴ into `[i64::MIN, i64::MAX]`,
+  exactly as the runtime's `wrapping_*` ops compute, so `ensures result > x` for
+  `x + 1` is *refuted* with the counterexample `x = i64::MAX` (the add wraps to
+  `i64::MIN`). SMT `div`/`mod` are Euclidean while marv truncates toward zero,
+  so the encoding corrects the quotient by ±1 on inexact negative cases: `-7 / 2`
+  proves as `-3`, never `-4`, and `ensures result <= x` for `x / 2` is *refuted*
+  (counterexample `x = -1`) rather than falsely proved.
 - **Arrays and slices** of ints/bools — literals, `len`, indexing, element
   stores, array-valued parameters and loop-carried arrays (a slice parameter's
   length is an unconstrained non-negative integer).
@@ -150,8 +157,18 @@ exclusions and caveats (each honest, never an unsound `proved`):
 
 - **Function calls, floats, casts, references, recursive/generic ADTs** —
   out-of-subset (`unsupported`).
-- **Mathematical integers.** SMT terms are unbounded; 64-bit wraparound at
-  runtime is not modeled. (Wrapping semantics is a planned encoding switch.)
+- **Fixed-width wrapping is modeled (MARV-38).** Integer terms are SMT `Int`s
+  reduced through a two's-complement `wrap64` after each operation (rather than
+  switching the sort to `(_ BitVec 64)`, which makes nonlinear `div`/`mul`
+  reasoning intractable — the division identity above times out as a 64-bit
+  bitvector but discharges in a fraction of a second as wrapped `Int`s).
+  Consequently Tier 2 is now *correctly stricter*: a contract that silently
+  relied on unbounded integers no longer proves. For example `examples/loops.mv`'s
+  `sum_to` claims `result >= 0` for an accumulating `sum + i` that can overflow,
+  and is refuted; its `count_down_sum` sibling adds a bound (`total <= n - i`,
+  a *non-overflowing* one — `total + i <= n` would be vacuous since that sum can
+  itself wrap) and proves. Counterexamples are concrete i64 values
+  (`x = i64::MAX`, `result = i64::MIN`).
 - **Division by zero / out-of-bounds reads** trap at runtime (Tier 1); Tier 2
   treats them as *unspecified values*, which is sound for partial correctness
   — a trapping execution never reaches its postcondition. A counterexample
