@@ -131,6 +131,11 @@ fn corpus_cases() -> Vec<(&'static str, &'static str, Vec<i64>, i64)> {
         // projection (the `carried`-flag lineage under nesting).
         ("loops.mv", "nested_weighted", vec![4], 9),
         ("loops.mv", "nested_weighted", vec![3], 5),
+        // MARV-41: each iteration forces an aggregate box by calling a function
+        // that returns a struct, then consumes it before the backedge. With the
+        // old fixed bump pointer, the large case exhausted linear memory.
+        ("alloc_reclaim.mv", "churn", vec![10], 100),
+        ("alloc_reclaim.mv", "churn", vec![200_000], 40_000_000_000),
         // `as` casts (MARV-7): width truncation/wrapping must agree with the
         // interpreter's `eval_cast` bit-for-bit.
         ("casts.mv", "truncate_u8", vec![300], 44),

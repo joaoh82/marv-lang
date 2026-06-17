@@ -22,8 +22,8 @@ a real compiler service.
 
 What that means concretely:
 
-- **No hidden control flow or allocation.** Every effect is visible at the call site; heap
-  allocation happens only through an explicit `Alloc` capability.
+- **No hidden control flow or growable allocation.** Every effect is visible at the call site;
+  user-visible growable heap allocation happens only through an explicit `Alloc` capability.
 - **No ambient authority.** There is no global I/O, clock, randomness, or network. Power
   enters a function only through **capability** parameters, recorded in its effect row — so
   a signature *bounds* everything a function can do. This is also the WASM sandbox model.

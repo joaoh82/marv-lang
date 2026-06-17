@@ -153,8 +153,9 @@ shared `marv_types::layout` oracle (`is_boxed`/`variant_fields`/`type_of`) the b
 one fact the type-erased Core does not carry at the node. The three-way differential corpus
 (`tests/run/structs.mv`, `color.mv`, `shapes.mv`) asserts interp == Cranelift == wasm on programs
 that construct, project, cross boundaries with, and `match` (binding fields, `binds > 0`) aggregates
-and enums. Neither backend reclaims yet (no GC — Cranelift leaks, WASM bump-allocates; `spec/01`
-§4); AOT/LLVM emission is a MARV-10 follow-up.
+and enums. MARV-41 adds arena reclamation for compiler-managed boxes whose lifetime is bounded by a
+scalar-carried loop iteration; broader ownership-aware reclamation remains future work. AOT/LLVM
+emission is a MARV-10 follow-up.
 · **MARV-30** array literals + `len`/index codegen (+ index store), closing the collection side
 MARV-9 left open. An array literal `[e0, …]` lowers to a new structural `Core::Array { elem, items }`
 node (the spec's `Core` has no nominal hash for a `[N]T`, so arrays carry their element type

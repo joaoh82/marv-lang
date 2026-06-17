@@ -71,6 +71,13 @@ supplies the implementations the process/page chooses to grant.
 | `Rand` | Randomness | `next_u64() -> u64` |
 | `Alloc` | Allocator | `alloc(bytes: usize) -> ![]u8` |
 
+`Alloc` is the auditable entry point for user-visible growable allocation: a list
+or string builder must receive `Alloc`, and the checker rejects an allocation
+`perform` outside the function's capability row. Compiler-managed boxes for
+fixed-shape structs/enums/arrays are still an implementation detail and do not
+add an `Alloc` parameter to user signatures; the runtimes allocate those boxes
+from the same reclaiming heap infrastructure.
+
 ### Why this matters
 
 A human auditor verifies "this transform cannot exfiltrate data" by reading one line of a

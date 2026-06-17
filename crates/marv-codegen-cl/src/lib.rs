@@ -33,9 +33,9 @@
 //! compile-time [`Slot::Tuple`] (register-resident, which is what loop state and
 //! purely-local products want) and is only spilled to the heap when it must cross
 //! a function boundary, be returned, or be matched as a runtime value. Allocation
-//! goes through the host `marv_rt_alloc` symbol and **leaks** — marv has no GC
-//! yet (`spec/01` §4 leaves reclamation to a later milestone), which is fine for
-//! the short-lived programs the JIT runs.
+//! goes through a host arena. Scalar-carried loops mark the arena before entry
+//! and rewind it on every backedge/exit, so compiler-managed boxes created inside
+//! those loops are reclaimed instead of leaking.
 //!
 //! ## Currying without heap closures
 //!
@@ -46,6 +46,7 @@
 //! saturated. Because the front end never emits a partially-applied function as
 //! a *value*, no runtime closure is needed.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 
 use cranelift::codegen::ir::{BlockArg, JumpTableData, Type as ClType};
@@ -71,16 +72,38 @@ const WORD: ClType = types::I64;
 /// Bytes per aggregate slot — every field (and the tag) is one machine word.
 const SLOT: i32 = 8;
 
+thread_local! {
+    /// Host-owned aggregate boxes allocated by JIT code. Pointers handed to
+    /// compiled code address the boxed slice contents; truncating back to a saved
+    /// mark drops every newer box and reclaims its memory.
+    static RT_HEAP: RefCell<Vec<Box<[i64]>>> = const { RefCell::new(Vec::new()) };
+}
+
 /// The host allocator the compiled code calls to box an aggregate: it returns a
-/// pointer to `n_words` zeroed `i64` slots. marv has no GC yet (`spec/01` §4), so
-/// this **leaks** — acceptable for the short-lived programs the JIT runs, and the
-/// interpreter oracle leaks the same logical garbage (it never frees a `Value`).
+/// pointer to `n_words` zeroed `i64` slots in the runtime arena.
 extern "C" fn marv_rt_alloc(n_words: i64) -> i64 {
     let n = n_words.max(0) as usize;
-    let mut buf = vec![0i64; n];
-    let ptr = buf.as_mut_ptr() as i64;
-    std::mem::forget(buf);
-    ptr
+    RT_HEAP.with(|heap| {
+        let mut heap = heap.borrow_mut();
+        let mut buf = vec![0i64; n].into_boxed_slice();
+        let ptr = buf.as_mut_ptr() as i64;
+        heap.push(buf);
+        ptr
+    })
+}
+
+/// Save the current arena mark.
+extern "C" fn marv_rt_heap_mark() -> i64 {
+    RT_HEAP.with(|heap| heap.borrow().len() as i64)
+}
+
+/// Reclaim every aggregate allocated after `mark`.
+extern "C" fn marv_rt_heap_reset(mark: i64) {
+    RT_HEAP.with(|heap| {
+        let mut heap = heap.borrow_mut();
+        let mark = usize::try_from(mark).unwrap_or(0).min(heap.len());
+        heap.truncate(mark);
+    });
 }
 
 /// The host abort hook a failed Tier-1 bounds check calls in debug builds
@@ -249,6 +272,15 @@ fn compile_inner(
     alloc_sig.returns.push(AbiParam::new(WORD));
     let alloc_id = module.declare_function("marv_rt_alloc", Linkage::Import, &alloc_sig)?;
 
+    // Arena mark/reset hooks for reclaiming compiler-managed aggregate boxes.
+    let mut mark_sig = module.make_signature();
+    mark_sig.returns.push(AbiParam::new(WORD));
+    let heap_mark_id = module.declare_function("marv_rt_heap_mark", Linkage::Import, &mark_sig)?;
+    let mut reset_sig = module.make_signature();
+    reset_sig.params.push(AbiParam::new(WORD));
+    let heap_reset_id =
+        module.declare_function("marv_rt_heap_reset", Linkage::Import, &reset_sig)?;
+
     // The host abort hook a failed Tier-1 bounds check calls (debug builds).
     let mut bounds_sig = module.make_signature();
     bounds_sig.params.push(AbiParam::new(WORD));
@@ -315,6 +347,8 @@ fn compile_inner(
             &metas,
             world,
             alloc_id,
+            heap_mark_id,
+            heap_reset_id,
             bounds_fail_id,
             opts,
             &mut ctx,
@@ -384,9 +418,10 @@ impl JitProgram {
             });
         }
         let ptr: *const u8 = self.module.get_finalized_function(meta.id);
+        let heap_mark = marv_rt_heap_mark();
         // SAFETY: see the doc comment — signature matches by construction.
-        unsafe {
-            Ok(match args {
+        let result = unsafe {
+            match args {
                 [] => std::mem::transmute::<*const u8, extern "C" fn() -> i64>(ptr)(),
                 [a] => std::mem::transmute::<*const u8, extern "C" fn(i64) -> i64>(ptr)(*a),
                 [a, b] => {
@@ -404,8 +439,10 @@ impl JitProgram {
                         "entry points with more than four arguments".into(),
                     ))
                 }
-            })
-        }
+            }
+        };
+        marv_rt_heap_reset(heap_mark);
+        Ok(result)
     }
 }
 
@@ -428,6 +465,8 @@ fn make_module() -> Result<JITModule, CodegenError> {
         .map_err(|e| CodegenError::Backend(e.to_string()))?;
     let mut builder = JITBuilder::with_isa(isa, default_libcall_names());
     builder.symbol("marv_rt_alloc", marv_rt_alloc as *const u8);
+    builder.symbol("marv_rt_heap_mark", marv_rt_heap_mark as *const u8);
+    builder.symbol("marv_rt_heap_reset", marv_rt_heap_reset as *const u8);
     builder.symbol("marv_rt_bounds_fail", marv_rt_bounds_fail as *const u8);
     Ok(JITModule::new(builder))
 }
@@ -439,6 +478,8 @@ fn compile_fn(
     metas: &HashMap<Hash, FnMeta>,
     world: &World,
     alloc_id: FuncId,
+    heap_mark_id: FuncId,
+    heap_reset_id: FuncId,
     bounds_fail_id: FuncId,
     opts: &Options,
     ctx: &mut cranelift::codegen::Context,
@@ -493,6 +534,10 @@ fn compile_fn(
                 world,
                 alloc_id,
                 alloc_ref: None,
+                heap_mark_id,
+                heap_mark_ref: None,
+                heap_reset_id,
+                heap_reset_ref: None,
                 bounds_fail_id,
                 bounds_fail_ref: None,
                 bounds_checks: opts.bounds_checks,
@@ -543,6 +588,10 @@ struct Trans<'a, 'b> {
     /// The allocator's func-ref in the current function, declared lazily on the
     /// first boxing site.
     alloc_ref: Option<cranelift::codegen::ir::FuncRef>,
+    heap_mark_id: FuncId,
+    heap_mark_ref: Option<cranelift::codegen::ir::FuncRef>,
+    heap_reset_id: FuncId,
+    heap_reset_ref: Option<cranelift::codegen::ir::FuncRef>,
     bounds_fail_id: FuncId,
     /// The bounds-abort hook's func-ref, declared lazily on the first check site.
     bounds_fail_ref: Option<cranelift::codegen::ir::FuncRef>,
@@ -685,6 +734,10 @@ impl Trans<'_, '_> {
             init.push(self.as_word(s)?.into());
             carried_tys.push(layout::atom_type(self.world, a, &self.tys));
         }
+        let can_reset_heap = carried_tys
+            .iter()
+            .all(|t| t.as_ref().is_some_and(|t| !layout::is_boxed(self.world, t)));
+        let heap_mark = can_reset_heap.then(|| self.heap_mark());
 
         let header = self.builder.create_block();
         let body_block = self.builder.create_block();
@@ -723,12 +776,18 @@ impl Trans<'_, '_> {
             self.env.pop();
             self.tys.pop();
         }
+        if let Some(mark) = heap_mark {
+            self.heap_reset(mark);
+        }
         self.builder.ins().jump(header, &next_args);
         self.builder.seal_block(header);
 
         // Exit: the loop's result is the final carried state.
         self.builder.switch_to_block(exit);
         self.builder.seal_block(exit);
+        if let Some(mark) = heap_mark {
+            self.heap_reset(mark);
+        }
         let finals: Vec<Slot> = self
             .builder
             .block_params(exit)
@@ -1308,6 +1367,35 @@ impl Trans<'_, '_> {
         };
         let call = self.builder.ins().call(aref, &[n_words]);
         self.builder.inst_results(call)[0]
+    }
+
+    fn heap_mark(&mut self) -> Value {
+        let mref = match self.heap_mark_ref {
+            Some(r) => r,
+            None => {
+                let r = self
+                    .module
+                    .declare_func_in_func(self.heap_mark_id, self.builder.func);
+                self.heap_mark_ref = Some(r);
+                r
+            }
+        };
+        let call = self.builder.ins().call(mref, &[]);
+        self.builder.inst_results(call)[0]
+    }
+
+    fn heap_reset(&mut self, mark: Value) {
+        let rref = match self.heap_reset_ref {
+            Some(r) => r,
+            None => {
+                let r = self
+                    .module
+                    .declare_func_in_func(self.heap_reset_id, self.builder.func);
+                self.heap_reset_ref = Some(r);
+                r
+            }
+        };
+        self.builder.ins().call(rref, &[mark]);
     }
 
     /// Emit the Tier-1 debug bounds check around a runtime element access

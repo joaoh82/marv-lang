@@ -1,0 +1,26 @@
+mod alloc_reclaim
+
+struct Pair { x: i64, y: i64 }
+
+pure fn make_pair(x: i64) -> Pair {
+    Pair { x: x, y: (x + 1) }
+}
+
+pure fn pair_sum(p: Pair) -> i64 {
+    (p.x + p.y)
+}
+
+pure fn churn(n: i64) -> i64
+    requires (n >= 0)
+{
+    var i: i64 = 0
+    var acc: i64 = 0
+    while (i < n)
+        invariant (i >= 0)
+    {
+        let p = make_pair(i)
+        acc = (acc + pair_sum(p))
+        i = (i + 1)
+    }
+    acc
+}

@@ -20,7 +20,7 @@ only the enums declared in that file. Doc comments were dropped to keep them
 canonical (the formatter does not yet preserve `///` — see the roadmap), so each
 declaration's intent is summarized in the table above.
 
-`capabilities.mv` still uses `interface`, which has no surface form yet, so it
-remains a **reference declaration** consumed as the front end grows. The
-content-addressed store (`marv-store`) and the capability-as-host-import model
-(`marv-codegen-wasm`) are already in place to link and sandbox the prelude.
+`capabilities.mv` is also live parsed source: a non-generic `interface` is a
+capability declaration, and method calls on capability values lower to
+`perform`/narrowing. `Alloc` is declared there alongside `Io`/`Fs`/`Net` as the
+auditable entry point for user-visible growable allocation.

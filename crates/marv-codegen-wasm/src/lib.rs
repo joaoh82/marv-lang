@@ -66,10 +66,13 @@ const BUMP: u32 = 0;
 /// unused so a zero pointer never names a live aggregate.
 const HEAP_START: i64 = 1024;
 
-/// Linear-memory size, in 64 KiB pages. The bump allocator never reclaims (marv
-/// has no GC yet, `spec/01` §4), so this caps total live aggregates per run;
-/// generous for the short programs this backend runs.
-const MEM_PAGES: u64 = 64;
+/// WebAssembly page size, in bytes.
+const PAGE_SIZE: i64 = 64 * 1024;
+
+/// Initial linear-memory size, in 64 KiB pages. Allocation sites grow memory on
+/// demand and scalar-carried loops rewind the heap pointer to reclaim boxes whose
+/// lifetime is bounded by one iteration.
+const MEM_PAGES: u64 = 1;
 
 /// An 8-byte aligned access at `offset` into the single linear memory.
 fn memarg(offset: u64) -> MemArg {
@@ -743,6 +746,17 @@ impl Trans<'_> {
             .iter()
             .map(|a| layout::atom_type(self.world, a, &self.tys))
             .collect();
+        let can_reset_heap = carried_tys
+            .iter()
+            .all(|t| t.as_ref().is_some_and(|t| !layout::is_boxed(self.world, t)));
+        let heap_mark = if can_reset_heap {
+            let l = self.alloc_local();
+            self.emit(Instruction::GlobalGet(BUMP));
+            self.emit(Instruction::LocalSet(l));
+            Some(l)
+        } else {
+            None
+        };
         for (l, t) in carried.iter().zip(carried_tys) {
             self.env.push(Slot::Local(*l));
             self.tys.push(t);
@@ -760,9 +774,17 @@ impl Trans<'_> {
         // k-tuple into them (MARV-21), so the carried state stays in locals and is
         // never boxed (the alloc-free-loops property, MARV-9).
         self.eval_loop_body(body, &carried)?;
+        if let Some(mark) = heap_mark {
+            self.emit(Instruction::LocalGet(mark));
+            self.emit(Instruction::GlobalSet(BUMP));
+        }
         self.emit(Instruction::Br(0));
         self.emit(Instruction::End); // loop
         self.emit(Instruction::End); // block
+        if let Some(mark) = heap_mark {
+            self.emit(Instruction::LocalGet(mark));
+            self.emit(Instruction::GlobalSet(BUMP));
+        }
 
         for _ in 0..k {
             self.env.pop();
@@ -1068,17 +1090,62 @@ impl Trans<'_> {
 
     /// Bump-allocate a block of `total_words` words (a runtime count) and return
     /// the local holding its base address (MARV-33: a slice store's size is known
-    /// only at run time). The bump pointer never rewinds — marv has no GC yet.
+    /// only at run time). Memory grows before the bump pointer is committed.
     fn bump_alloc_dyn(&mut self, total_words: u32) -> u32 {
         let base = self.alloc_local();
+        let end = self.alloc_local();
         self.emit(Instruction::GlobalGet(BUMP));
         self.emit(Instruction::LocalTee(base));
         self.emit(Instruction::LocalGet(total_words));
         self.emit(Instruction::I64Const(SLOT as i64));
         self.emit(Instruction::I64Mul);
         self.emit(Instruction::I64Add);
+        self.emit(Instruction::LocalSet(end));
+        self.ensure_heap_fits(end);
+        self.emit(Instruction::LocalGet(end));
         self.emit(Instruction::GlobalSet(BUMP));
         base
+    }
+
+    /// Ensure the linear memory contains byte offset `end`. If not, grow by the
+    /// minimum number of pages and trap on grow failure.
+    fn ensure_heap_fits(&mut self, end: u32) {
+        let current_pages = self.alloc_local();
+        let current_bytes = self.alloc_local();
+        let needed_pages = self.alloc_local();
+
+        self.emit(Instruction::MemorySize(MEM));
+        self.emit(Instruction::I64ExtendI32U);
+        self.emit(Instruction::LocalSet(current_pages));
+        self.emit(Instruction::LocalGet(current_pages));
+        self.emit(Instruction::I64Const(PAGE_SIZE));
+        self.emit(Instruction::I64Mul);
+        self.emit(Instruction::LocalSet(current_bytes));
+
+        self.emit(Instruction::LocalGet(end));
+        self.emit(Instruction::LocalGet(current_bytes));
+        self.emit(Instruction::I64GtU);
+        self.emit(Instruction::If(BlockType::Empty));
+
+        self.emit(Instruction::LocalGet(end));
+        self.emit(Instruction::I64Const(PAGE_SIZE - 1));
+        self.emit(Instruction::I64Add);
+        self.emit(Instruction::I64Const(PAGE_SIZE));
+        self.emit(Instruction::I64DivU);
+        self.emit(Instruction::LocalSet(needed_pages));
+
+        self.emit(Instruction::LocalGet(needed_pages));
+        self.emit(Instruction::LocalGet(current_pages));
+        self.emit(Instruction::I64Sub);
+        self.emit(Instruction::I32WrapI64);
+        self.emit(Instruction::MemoryGrow(MEM));
+        self.emit(Instruction::I32Const(-1));
+        self.emit(Instruction::I32Eq);
+        self.emit(Instruction::If(BlockType::Empty));
+        self.emit(Instruction::Unreachable);
+        self.emit(Instruction::End);
+
+        self.emit(Instruction::End);
     }
 
     /// Emit the Tier-1 debug bounds check around a runtime element access
@@ -1619,15 +1686,19 @@ impl Trans<'_> {
     }
 
     /// Bump-allocate `n_fields + 1` words (tag + payload) and return the local
-    /// holding the base address. The bump pointer never rewinds — marv has no GC
-    /// yet (`spec/01` §4); the allocation is bounded by [`MEM_PAGES`].
+    /// holding the base address. Memory grows before the bump pointer is
+    /// committed, and scalar-carried loops reset it at safe scope boundaries.
     fn bump_alloc(&mut self, n_fields: usize) -> u32 {
         let total = (n_fields as i64 + 1) * SLOT as i64;
         let base = self.alloc_local();
+        let end = self.alloc_local();
         self.emit(Instruction::GlobalGet(BUMP));
         self.emit(Instruction::LocalTee(base));
         self.emit(Instruction::I64Const(total));
         self.emit(Instruction::I64Add);
+        self.emit(Instruction::LocalSet(end));
+        self.ensure_heap_fits(end);
+        self.emit(Instruction::LocalGet(end));
         self.emit(Instruction::GlobalSet(BUMP));
         base
     }
