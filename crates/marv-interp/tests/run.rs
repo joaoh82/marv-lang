@@ -220,6 +220,51 @@ fn touch_program() -> Program {
     Program::new("sandbox", vec![("touch".to_string(), def)], world)
 }
 
+/// An `alloc(a: Alloc)` entry whose body performs Alloc op 0. The interpreter
+/// models host capability effects rather than real byte buffers today, so this
+/// pins the grant/audit plumbing for MARV-41's allocator capability.
+fn alloc_program() -> Program {
+    let alloc = symbol_hash("Alloc");
+    let alloc_ty = Type::Nominal {
+        def: alloc,
+        args: Vec::new(),
+    };
+    let row = EffectRow {
+        caps: vec![alloc],
+        errors: Vec::new(),
+    };
+    let def = Def {
+        kind: DefKind::Fn,
+        ty: Type::Arrow {
+            param: Box::new(alloc_ty.clone()),
+            ret: Box::new(Type::Unit),
+            effects: row.clone(),
+        },
+        requires: Vec::new(),
+        ensures: Vec::new(),
+        body: Some(Core::Lam {
+            param: alloc_ty,
+            effects: row,
+            body: Box::new(Core::Perform {
+                cap: Atom::Var(0),
+                op: OpId(0),
+                args: vec![Atom::Lit(Literal::Int(64))],
+            }),
+        }),
+    };
+    let world = WorldBuilder::new()
+        .cap(
+            "Alloc",
+            vec![OpSig {
+                params: vec![Type::Int(IntTy::Usize)],
+                ret: Type::Slice(Box::new(Type::Int(IntTy::U8))),
+                errors: Vec::new(),
+            }],
+        )
+        .build();
+    Program::new("sandbox", vec![("alloc".to_string(), def)], world)
+}
+
 #[test]
 fn granted_capability_is_injected_and_its_effect_recorded() {
     let prog = touch_program();
@@ -232,6 +277,19 @@ fn granted_capability_is_injected_and_its_effect_recorded() {
     assert_eq!(eff.cap, "Fs");
     assert_eq!(eff.op, 0);
     assert_eq!(eff.args, vec![Value::Str("/etc/passwd".to_string())]);
+}
+
+#[test]
+fn alloc_capability_is_grantable_and_audited() {
+    let prog = alloc_program();
+    let out = prog
+        .run("alloc", &["Alloc".to_string()], &[])
+        .expect("run with Alloc granted");
+    assert_eq!(out.value, Value::Unit);
+    assert_eq!(out.effects.len(), 1, "the allocation perform is recorded");
+    assert_eq!(out.effects[0].cap, "Alloc");
+    assert_eq!(out.effects[0].op, 0);
+    assert_eq!(out.effects[0].args, vec![Value::Int(64)]);
 }
 
 #[test]

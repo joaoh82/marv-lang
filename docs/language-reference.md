@@ -121,8 +121,9 @@ its call and all aliasing reasoning is local. A reference is taken with the pref
 expression operator (`f(&x)`); this is **[impl]** through the front end and checker (the
 reference-of expression lowers to a `Core::Ref` the checker types as `&T`). The checker enforces
 the second-class rule (escaping-reference diagnostics). **`linear`** types must be consumed exactly once (forgetting to `close` a
-`File` is a compile error). Allocation is explicit via an `Alloc` capability — a function
-with no `Alloc` parameter provably performs no heap allocation.
+`File` is a compile error). User-visible growable allocation is explicit via an
+`Alloc` capability — a function with no `Alloc` parameter cannot build growable heap
+structures. Compiler-managed boxes for fixed-shape values remain an implementation detail.
 
 ### 4.1 Loops **[impl]**
 
@@ -193,7 +194,7 @@ in the body, written in signatures as the capability parameters). `pure` asserts
 
 ```marv
 fn read_config(fs: Fs, path: str) -> !Config { … }   // can do FS I/O, nothing else
-pure fn clamp(x: i32, lo: i32, hi: i32) -> i32 { … }  // no capabilities, no I/O, no allocation
+pure fn clamp(x: i32, lo: i32, hi: i32) -> i32 { … }  // no capabilities or growable allocation
 ```
 
 A **capability is a non-generic `interface`** (`std/capabilities.mv`). A method call on a value

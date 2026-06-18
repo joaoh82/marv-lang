@@ -145,7 +145,8 @@ enters through **capability** parameters (`Io`, `Fs`, `Net`, `Clock`, `Rand`, `A
 effect row records them. When you write or run code:
 
 - Pass a function only the capabilities it needs. A function with no `Net` parameter provably
-  cannot reach the network; with no `Alloc`, it provably does not allocate.
+  cannot reach the network; with no `Alloc`, it cannot perform user-visible growable allocation
+  (compiler-managed fixed-shape boxing is a runtime representation detail).
 - `marv run --grant …` injects exactly the listed capabilities — nothing else exists at
   runtime. On WebAssembly, capabilities are host imports the embedder chooses to supply.
 - You cannot construct a capability; you receive one and may narrow it (`io.fs()`).

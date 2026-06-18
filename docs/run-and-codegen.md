@@ -108,12 +108,13 @@ three backends** — the interpreter's tagged `Value::Agg`, Cranelift's heap
 block, and the WASM linear-memory block — so "interp == Cranelift == wasm" stays
 a checkable statement.
 
-- **Cranelift** boxes via a host `marv_rt_alloc` symbol; `Proj` is a load, and an
-  enum `Match` loads the tag from word 0 and dispatches through a `br_table`,
-  binding each arm's fields by loading them from the payload.
-- **WASM** boxes into a linear memory (one memory + a mutable bump-pointer global,
-  both module-internal so a *pure* module's import manifest is unchanged); the
-  enum `Match` is the same tag-load + dispatch over the payload.
+- **Cranelift** boxes via a host `marv_rt_alloc` symbol backed by a runtime arena;
+  `Proj` is a load, and an enum `Match` loads the tag from word 0 and dispatches
+  through a `br_table`, binding each arm's fields by loading them from the
+  payload.
+- **WASM** boxes into a growable linear-memory arena (one memory + a mutable heap
+  pointer global, both module-internal so a *pure* module's import manifest is
+  unchanged); the enum `Match` is the same tag-load + dispatch over the payload.
 - Boxing is **lazy**: a `Ctor` is a compile-time register/local bundle and is
   only spilled to the heap when it must cross a function boundary, be returned, or
   be matched as a runtime value — so loops (whose carried state never escapes)
@@ -121,9 +122,12 @@ a checkable statement.
   desugaring) from a boxed `enum` one by the scrutinee's *type*
   (`marv_types::layout`), the one fact the type-erased Core does not carry.
 
-Neither backend reclaims (marv has no GC yet, `spec/01` §4): Cranelift leaks and
-WASM bump-allocates without freeing. This is fine for the short-lived programs
-the toolchain runs today; a real allocator/`Alloc` capability is later work.
+Both compiled backends now reclaim compiler-managed boxes whose lifetime is
+bounded by a scalar-carried loop iteration: they mark the heap before the loop
+and reset it on each backedge/exit, so a loop that repeatedly builds and consumes
+a struct runs in bounded memory. This is an arena strategy, not a general
+ownership/RC system: boxes that escape through aggregate-carried loop state or
+long-lived values remain live until the surrounding run ends.
 
 An **array** (MARV-30) reuses this boxed shape with one twist: the header word
 holds the element **count** instead of a tag, so the block is `[len, e0, …]`.
@@ -291,8 +295,7 @@ cd web && python3 -m http.server 8087   # then open http://localhost:8087/
   native-cranelift`, `marv build --target wasm-component`; the three-way
   differential gate (interpreter ↔ Cranelift ↔ wasm) and a browser sandbox demo.
 - **Next:** ahead-of-time object/executable emission and an LLVM backend for
-  release builds (MARV-10); a real allocator/garbage reclamation (both backends
-  currently leak — `spec/01` §4); string/aggregate-typed capability operands and full
-  component-model / WIT packaging. The interpreter remains the oracle each backend
-  is differentially
-  tested against.
+  release builds (MARV-10); broader ownership-aware reclamation for heap values
+  that escape arena reset scopes; string/aggregate-typed capability operands and
+  full component-model / WIT packaging. The interpreter remains the oracle each
+  backend is differentially tested against.

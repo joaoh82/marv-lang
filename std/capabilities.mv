@@ -58,8 +58,10 @@ interface Rand {
     fn next_u64(rand: &Rand) -> u64
 }
 
-/// An allocator. A function with no `Alloc` parameter provably performs no heap
-/// allocation (`spec/01` §4.2).
+/// An allocator for user-visible growable structures. A function with no
+/// `Alloc` parameter cannot perform growable heap allocation (`spec/01` §4.2).
+/// Fixed-shape aggregate boxing is compiler-managed and remains outside the
+/// source capability surface.
 interface Alloc {
     fn alloc(a: &Alloc, bytes: usize) -> ![]u8
 }

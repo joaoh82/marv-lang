@@ -121,6 +121,33 @@ fn e0110_missing_capability_in_effect_row() {
 }
 
 #[test]
+fn e0110_alloc_perform_requires_alloc_in_effect_row() {
+    let world = WorldBuilder::new()
+        .cap(
+            "Alloc",
+            vec![marv_types::OpSig {
+                params: vec![Type::Int(IntTy::Usize)],
+                ret: Type::Slice(Box::new(Type::Int(IntTy::U8))),
+                errors: vec![],
+            }],
+        )
+        .build();
+    let body = Core::Perform {
+        cap: var_at(1, 0),
+        op: OpId(0),
+        args: vec![Atom::Lit(Literal::Int(64))],
+    };
+    let def = fn_def(
+        &[nominal("Alloc")],
+        Type::Slice(Box::new(Type::Int(IntTy::U8))),
+        row(&[], &[]),
+        body,
+    );
+    let d = one(check_def(&world, &def, Some("f")), Code::MissingCapability);
+    has_fix_titled(&d, "add capability parameter `alloc: Alloc`");
+}
+
+#[test]
 fn e0111_unauthorized_perform_no_capability() {
     // The "capability" is an integer literal — not a capability value in scope.
     let body = Core::Perform {
