@@ -393,6 +393,35 @@ pub enum Core {
         index: Atom,
         value: Atom,
     },
+    /// Construct a growable `std.collections.List[T]` with an initial capacity.
+    /// The public surface requires an explicit `Alloc` capability argument; the
+    /// `alloc` atom is carried so type/effect checking can see that authority,
+    /// while the runtimes use their existing aggregate allocator for the actual
+    /// `[len, cap, e0, …]` block.
+    ListNew {
+        elem: Type,
+        alloc: Atom,
+        capacity: Atom,
+    },
+    /// Append `value` to a list, returning a fresh list value. When `len == cap`
+    /// the capacity grows geometrically. This is value semantics: the source
+    /// list is not mutated.
+    ListPush {
+        alloc: Atom,
+        list: Atom,
+        value: Atom,
+    },
+    /// Drop the last element from a non-empty list, returning a fresh list value.
+    ListPop {
+        list: Atom,
+    },
+    /// Functional element store for a list: return a fresh list equal to `list`
+    /// except position `index` contains `value`.
+    ListSet {
+        list: Atom,
+        index: Atom,
+        value: Atom,
+    },
     /// project field `idx` from an aggregate atom.
     Proj {
         base: Atom,

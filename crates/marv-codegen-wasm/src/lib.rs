@@ -706,6 +706,10 @@ impl Trans<'_> {
             }
 
             Core::IndexSet { base, index, value } => self.eval_index_set(base, index, value),
+            Core::ListNew { capacity, .. } => self.eval_list_new(capacity),
+            Core::ListPush { list, value, .. } => self.eval_list_push(list, value),
+            Core::ListPop { list } => self.eval_list_pop(list),
+            Core::ListSet { list, index, value } => self.eval_list_set(list, index, value),
 
             Core::Proj { base, idx } => self.eval_proj(base, *idx),
 
@@ -1068,6 +1072,190 @@ impl Trans<'_> {
         Ok(Out::Stack)
     }
 
+    fn eval_list_new(&mut self, capacity: &Atom) -> Result<Out, WasmError> {
+        let cap = self.atom_to_word_local(capacity)?;
+        let total = self.alloc_local();
+        self.emit(Instruction::LocalGet(cap));
+        self.emit(Instruction::I64Const(2));
+        self.emit(Instruction::I64Add);
+        self.emit(Instruction::LocalSet(total));
+        let ptr = self.bump_alloc_dyn(total);
+        self.store_word(ptr, 0, |t| {
+            t.emit(Instruction::I64Const(0));
+            Ok(())
+        })?;
+        self.store_word(ptr, SLOT, |t| {
+            t.emit(Instruction::LocalGet(cap));
+            Ok(())
+        })?;
+        self.emit(Instruction::LocalGet(ptr));
+        Ok(Out::Stack)
+    }
+
+    fn eval_list_push(&mut self, list: &Atom, value: &Atom) -> Result<Out, WasmError> {
+        let ptr = self.atom_to_word_local(list)?;
+        let val = self.atom_to_word_local(value)?;
+        let len = self.load_word_local(ptr, 0);
+        let cap = self.load_word_local(ptr, SLOT);
+        let result = self.alloc_local();
+
+        self.emit(Instruction::LocalGet(len));
+        self.emit(Instruction::LocalGet(cap));
+        self.emit(Instruction::I64LtU);
+        self.emit(Instruction::If(BlockType::Empty));
+
+        self.store_word(ptr, 0, |t| {
+            t.emit(Instruction::LocalGet(len));
+            t.emit(Instruction::I64Const(1));
+            t.emit(Instruction::I64Add);
+            Ok(())
+        })?;
+        self.emit(Instruction::LocalGet(ptr));
+        self.emit(Instruction::LocalGet(len));
+        self.emit(Instruction::I64Const(2));
+        self.emit(Instruction::I64Add);
+        self.emit(Instruction::I64Const(SLOT as i64));
+        self.emit(Instruction::I64Mul);
+        self.emit(Instruction::I64Add);
+        self.emit(Instruction::I32WrapI64);
+        self.emit(Instruction::LocalGet(val));
+        self.emit(Instruction::I64Store(memarg(0)));
+        self.emit(Instruction::LocalGet(ptr));
+        self.emit(Instruction::LocalSet(result));
+
+        self.emit(Instruction::Else);
+
+        let new_cap = self.alloc_local();
+
+        self.emit(Instruction::LocalGet(cap));
+        self.emit(Instruction::I64Const(2));
+        self.emit(Instruction::I64Mul);
+        self.emit(Instruction::LocalTee(new_cap));
+        self.emit(Instruction::I64Const(4));
+        self.emit(Instruction::I64LtU);
+        self.emit(Instruction::If(BlockType::Result(ValType::I64)));
+        self.emit(Instruction::I64Const(4));
+        self.emit(Instruction::Else);
+        self.emit(Instruction::LocalGet(new_cap));
+        self.emit(Instruction::End);
+        self.emit(Instruction::LocalSet(new_cap));
+
+        let total = self.alloc_local();
+        self.emit(Instruction::LocalGet(new_cap));
+        self.emit(Instruction::I64Const(2));
+        self.emit(Instruction::I64Add);
+        self.emit(Instruction::LocalSet(total));
+        let newptr = self.bump_alloc_dyn(total);
+
+        let copy_total = self.alloc_local();
+        self.emit(Instruction::LocalGet(len));
+        self.emit(Instruction::I64Const(2));
+        self.emit(Instruction::I64Add);
+        self.emit(Instruction::LocalSet(copy_total));
+        self.copy_words(ptr, newptr, copy_total);
+
+        self.store_word(newptr, 0, |t| {
+            t.emit(Instruction::LocalGet(len));
+            t.emit(Instruction::I64Const(1));
+            t.emit(Instruction::I64Add);
+            Ok(())
+        })?;
+        self.store_word(newptr, SLOT, |t| {
+            t.emit(Instruction::LocalGet(new_cap));
+            Ok(())
+        })?;
+        self.emit(Instruction::LocalGet(newptr));
+        self.emit(Instruction::LocalGet(len));
+        self.emit(Instruction::I64Const(2));
+        self.emit(Instruction::I64Add);
+        self.emit(Instruction::I64Const(SLOT as i64));
+        self.emit(Instruction::I64Mul);
+        self.emit(Instruction::I64Add);
+        self.emit(Instruction::I32WrapI64);
+        self.emit(Instruction::LocalGet(val));
+        self.emit(Instruction::I64Store(memarg(0)));
+
+        self.emit(Instruction::LocalGet(newptr));
+        self.emit(Instruction::LocalSet(result));
+        self.emit(Instruction::End);
+
+        self.emit(Instruction::LocalGet(result));
+        Ok(Out::Stack)
+    }
+
+    fn eval_list_pop(&mut self, list: &Atom) -> Result<Out, WasmError> {
+        let ptr = self.atom_to_word_local(list)?;
+        let zero = self.alloc_local();
+        self.emit(Instruction::I64Const(0));
+        self.emit(Instruction::LocalSet(zero));
+        self.emit_bounds_check(ptr, zero);
+        let len = self.load_word_local(ptr, 0);
+        self.store_word(ptr, 0, |t| {
+            t.emit(Instruction::LocalGet(len));
+            t.emit(Instruction::I64Const(1));
+            t.emit(Instruction::I64Sub);
+            Ok(())
+        })?;
+        self.emit(Instruction::LocalGet(ptr));
+        Ok(Out::Stack)
+    }
+
+    fn eval_list_set(&mut self, list: &Atom, index: &Atom, value: &Atom) -> Result<Out, WasmError> {
+        let ptr = self.atom_to_word_local(list)?;
+        let idx = self.atom_to_word_local(index)?;
+        let val = self.atom_to_word_local(value)?;
+        self.emit_bounds_check(ptr, idx);
+        self.emit(Instruction::LocalGet(ptr));
+        self.emit(Instruction::LocalGet(idx));
+        self.emit(Instruction::I64Const(2));
+        self.emit(Instruction::I64Add);
+        self.emit(Instruction::I64Const(SLOT as i64));
+        self.emit(Instruction::I64Mul);
+        self.emit(Instruction::I64Add);
+        self.emit(Instruction::I32WrapI64);
+        self.emit(Instruction::LocalGet(val));
+        self.emit(Instruction::I64Store(memarg(0)));
+        self.emit(Instruction::LocalGet(ptr));
+        Ok(Out::Stack)
+    }
+
+    fn copy_words(&mut self, src: u32, dst: u32, total: u32) {
+        let k = self.alloc_local();
+        self.emit(Instruction::I64Const(0));
+        self.emit(Instruction::LocalSet(k));
+        self.emit(Instruction::Block(BlockType::Empty));
+        self.emit(Instruction::Loop(BlockType::Empty));
+        self.emit(Instruction::LocalGet(k));
+        self.emit(Instruction::LocalGet(total));
+        self.emit(Instruction::I64LtU);
+        self.emit(Instruction::I32Eqz);
+        self.emit(Instruction::BrIf(1));
+        self.emit(Instruction::LocalGet(dst));
+        self.push_word_offset(k);
+        self.emit(Instruction::I32WrapI64);
+        self.emit(Instruction::LocalGet(src));
+        self.push_word_offset(k);
+        self.emit(Instruction::I32WrapI64);
+        self.emit(Instruction::I64Load(memarg(0)));
+        self.emit(Instruction::I64Store(memarg(0)));
+        self.emit(Instruction::LocalGet(k));
+        self.emit(Instruction::I64Const(1));
+        self.emit(Instruction::I64Add);
+        self.emit(Instruction::LocalSet(k));
+        self.emit(Instruction::Br(0));
+        self.emit(Instruction::End);
+        self.emit(Instruction::End);
+    }
+
+    fn load_word_local(&mut self, base: u32, offset: u64) -> u32 {
+        let out = self.alloc_local();
+        self.emit(Instruction::LocalGet(base));
+        self.emit(Instruction::I32WrapI64);
+        self.emit(Instruction::I64Load(memarg(offset)));
+        self.emit(Instruction::LocalSet(out));
+        out
+    }
+
     /// Evaluate an atom and stash its word (boxing an aggregate to its pointer)
     /// into a fresh local, returning the local index. Used by [`Self::eval_index_set`]
     /// so each operand can be re-read across the copy loop.
@@ -1086,6 +1274,12 @@ impl Trans<'_> {
         self.emit(Instruction::I64Const(SLOT as i64));
         self.emit(Instruction::I64Mul);
         self.emit(Instruction::I64Add);
+    }
+
+    fn atom_is_list(&self, a: &Atom) -> bool {
+        layout::atom_type(self.world, a, &self.tys)
+            .as_ref()
+            .is_some_and(is_list_type)
     }
 
     /// Bump-allocate a block of `total_words` words (a runtime count) and return
@@ -1395,6 +1589,11 @@ impl Trans<'_> {
                 self.emit(Instruction::I64Load(memarg(0)));
             }
             Index => {
+                let header_words = if args.first().is_some_and(|a| self.atom_is_list(a)) {
+                    2
+                } else {
+                    1
+                };
                 // Tier-1 bounds check (debug builds, MARV-34): stash the operands
                 // ([ptr, i] on the stack) into locals, trap unless `0 <= i < len`,
                 // then restore the stack for the address math below.
@@ -1411,8 +1610,8 @@ impl Trans<'_> {
                 self.emit(Instruction::I64Const(SLOT as i64));
                 self.emit(Instruction::I64Mul); // i * SLOT
                 self.emit(Instruction::I64Add); // ptr + i * SLOT
-                self.emit(Instruction::I64Const(SLOT as i64));
-                self.emit(Instruction::I64Add); // + SLOT  (skip the header word)
+                self.emit(Instruction::I64Const((header_words * SLOT) as i64));
+                self.emit(Instruction::I64Add); // skip header word(s)
                 self.emit(Instruction::I32WrapI64);
                 self.emit(Instruction::I64Load(memarg(0)));
             }
@@ -1789,4 +1988,12 @@ fn show_type(t: &Type) -> String {
         Type::Linear(_) => "linear".into(),
         Type::Var(_) => "tyvar".into(),
     }
+}
+
+fn is_list_type(t: &Type) -> bool {
+    matches!(
+        t,
+        Type::Nominal { def, args }
+            if *def == symbol_hash("std.collections.List") && args.len() == 1
+    )
 }

@@ -12,7 +12,7 @@
 use std::path::PathBuf;
 
 use marv_core::ir::Def;
-use marv_core::lower_module;
+use marv_core::{lower_module, lower_modules};
 use marv_db::CoreModuleSpec;
 use marv_interp::{Program, RunError, Value};
 use marv_types::{check_def, Code, Severity, World};
@@ -29,10 +29,36 @@ fn load_source(name: &str) -> (String, Vec<(String, Def)>, World) {
     let path = corpus(name);
     let src = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path:?}: {e}"));
     let module = marv_syntax::parse(&src).unwrap_or_else(|e| panic!("parse {name}: {e}"));
-    let lowered = lower_module(&module).unwrap_or_else(|e| panic!("lower {name}: {e}"));
-    let world = World::from_module(&lowered);
     let module_path = module.name.join(".");
-    let defs = lowered.defs.into_iter().map(|e| (e.name, e.def)).collect();
+    let lowered = if module
+        .imports
+        .iter()
+        .any(|i| i.path.first().map(|s| s == "std").unwrap_or(false))
+    {
+        let std_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../std");
+        let mut modules = Vec::new();
+        for entry in std::fs::read_dir(&std_dir).expect("read std/") {
+            let path = entry.expect("std entry").path();
+            if path.extension().and_then(|s| s.to_str()) == Some("mv") {
+                let src = std::fs::read_to_string(&path).expect("read std module");
+                modules.push(marv_syntax::parse(&src).expect("parse std module"));
+            }
+        }
+        modules.push(module);
+        lower_modules(&modules).unwrap_or_else(|e| panic!("lower {name} with std: {e}"))
+    } else {
+        vec![lower_module(&module).unwrap_or_else(|e| panic!("lower {name}: {e}"))]
+    };
+    let world = World::from_modules(&lowered);
+    let defs = lowered
+        .iter()
+        .find(|m| m.module.join(".") == module_path)
+        .expect("lowered main module")
+        .defs
+        .clone()
+        .into_iter()
+        .map(|e| (e.name, e.def))
+        .collect();
     (module_path, defs, world)
 }
 
@@ -43,11 +69,17 @@ fn interp_i64(
     world: World,
     entry: &str,
     args: &[i64],
+    file: &str,
 ) -> i64 {
     let arg_strs: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+    let grant: Vec<String> = if file == "list.mv" {
+        vec!["Alloc".to_string()]
+    } else {
+        Vec::new()
+    };
     let program = Program::new(module_path, defs, world);
     let outcome = program
-        .run(entry, &[], &arg_strs)
+        .run(entry, &grant, &arg_strs)
         .unwrap_or_else(|e| panic!("interp {entry}: {e}"));
     match outcome.value {
         Value::Int(n) => n,
@@ -245,6 +277,9 @@ fn corpus_cases() -> Vec<(&'static str, &'static str, Vec<i64>, i64)> {
         // two sequential `for`s share one depth-keyed index name; the second
         // shadows the first without clobbering it.
         ("slices.mv", "rescan_for", vec![], 66),
+        // Growable lists: explicit Alloc construction/growth, get/set/pop, and
+        // `for x in xs` over the list's len/index surface.
+        ("list.mv", "exercise", vec![6], 53),
     ]
 }
 
@@ -252,7 +287,14 @@ fn corpus_cases() -> Vec<(&'static str, &'static str, Vec<i64>, i64)> {
 fn interpreter_and_cranelift_agree() {
     for (file, entry, args, expected) in corpus_cases() {
         let (module_path, defs, world) = load_source(file);
-        let interp = interp_i64(&module_path, defs.clone(), world.clone(), entry, &args);
+        let interp = interp_i64(
+            &module_path,
+            defs.clone(),
+            world.clone(),
+            entry,
+            &args,
+            file,
+        );
         let native = cranelift_i64(&module_path, &defs, &world, entry, &args);
 
         assert_eq!(
@@ -411,7 +453,14 @@ fn reachability_pruned_compile_skips_unsupported_sibling() {
     let jit = marv_codegen_cl::compile_reachable(&module_path, &defs, &world, &opts, "double")
         .unwrap_or_else(|e| panic!("pruned cranelift compile: {e}"));
     let got = jit.run_i64("double", &[21]).expect("run pruned entry");
-    let want = interp_i64(&module_path, defs, world, "double", &[21]);
+    let want = interp_i64(
+        &module_path,
+        defs,
+        world,
+        "double",
+        &[21],
+        "pruned_sibling.mv",
+    );
     assert_eq!(got, 42);
     assert_eq!(got, want, "pruned build agrees with the oracle");
 }

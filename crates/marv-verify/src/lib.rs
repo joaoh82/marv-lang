@@ -589,6 +589,11 @@ impl Encoder<'_, '_> {
                 })
             }
 
+            Core::ListNew { .. }
+            | Core::ListPush { .. }
+            | Core::ListPop { .. }
+            | Core::ListSet { .. } => Err(stop("growable lists are outside the verified subset")),
+
             Core::Loop {
                 state,
                 invariant,

@@ -8,6 +8,7 @@ links against once a build references them by content hash (`spec/01` §8).
 | [`option.mv`](option.mv) | `Option[T]` — the only way to express absence (`?T` sugar). |
 | [`result.mv`](result.mv) | `Result[T, E]` — success/typed-failure (`!T` sugar, `?` propagation). |
 | [`capabilities.mv`](capabilities.mv) | The capability types `Io`/`Fs`/`Net`/`Clock`/`Rand`/`Alloc` (plus `Stream`/`Conn`) as declared interfaces — power enters only through these (`spec/01` §5). |
+| [`collections.mv`](collections.mv) | `List[T]` — growable lists allocated through explicit `Alloc`; core ops run on interpreter, Cranelift, and WASM. |
 
 ## Status
 
@@ -24,3 +25,9 @@ declaration's intent is summarized in the table above.
 capability declaration, and method calls on capability values lower to
 `perform`/narrowing. `Alloc` is declared there alongside `Io`/`Fs`/`Net` as the
 auditable entry point for user-visible growable allocation.
+
+`collections.mv` is live parsed source too. The public `List[T]` operations are normal std
+functions at the surface, while the compiler lowers their call sites to list Core ops with a
+runtime `[len, cap, e0, …]` layout. `push`, `pop`, and `set` return the updated list value,
+so surface code normally rebinds the `var` that holds the list. Backends update the backing
+block directly when no growth is needed.

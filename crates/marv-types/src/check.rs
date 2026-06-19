@@ -446,6 +446,22 @@ impl<'a> Checker<'a> {
 
             Core::IndexSet { base, index, value } => self.synth_index_set(base, index, value, env),
 
+            Core::ListNew {
+                elem,
+                alloc,
+                capacity,
+            } => self.synth_list_new(elem, alloc, capacity, env),
+
+            Core::ListPush { alloc, list, value } => self.synth_list_push(alloc, list, value, env),
+
+            Core::ListPop { list } => Out {
+                ty: self.atom_ty(list, env),
+                eff: EffectRow::empty(),
+                uses: atom_uses(list, env),
+            },
+
+            Core::ListSet { list, index, value } => self.synth_list_set(list, index, value, env),
+
             Core::Proj { base, idx } => {
                 let bt = self.atom_ty(base, env);
                 let ty = self.proj_ty(&bt, *idx);
@@ -732,6 +748,135 @@ impl<'a> Checker<'a> {
         }
     }
 
+    fn synth_list_new(
+        &mut self,
+        elem: &Type,
+        alloc: &Atom,
+        capacity: &Atom,
+        env: &mut Vec<Binder>,
+    ) -> Out {
+        let (eff, mut uses) = self.alloc_effect(alloc, env);
+        if !numeric(&self.atom_ty(capacity, env)) {
+            self.emit(Diagnostic::error(
+                Code::BadPrimOperand,
+                "list capacity must be an integer".to_string(),
+            ));
+        }
+        uses = seq(&uses, &atom_uses(capacity, env));
+        Out {
+            ty: Ty::Known(list_type(elem.clone())),
+            eff,
+            uses,
+        }
+    }
+
+    fn synth_list_push(
+        &mut self,
+        alloc: &Atom,
+        list: &Atom,
+        value: &Atom,
+        env: &mut Vec<Binder>,
+    ) -> Out {
+        let lt = self.atom_ty(list, env);
+        let vt = self.atom_ty(value, env);
+        let elem = match &lt {
+            Ty::Known(t) => list_elem_type(t).cloned(),
+            Ty::Unknown => None,
+            _ => None,
+        };
+        if elem.is_none() && !matches!(lt, Ty::Unknown) {
+            self.emit(Diagnostic::error(
+                Code::BadPrimOperand,
+                "list push requires a `List[T]` value".to_string(),
+            ));
+        }
+        if let Some(elem) = &elem {
+            if !compatible(&Ty::Known(elem.clone()), &vt) {
+                self.emit(Diagnostic::error(
+                    Code::TypeMismatch,
+                    format!(
+                        "pushed value has type `{}` but the list element type is `{}`",
+                        show_ty(&vt),
+                        show_type(elem)
+                    ),
+                ));
+            }
+        }
+        let (eff, cap_uses) = self.alloc_effect(alloc, env);
+        let uses = seq(
+            &seq(&cap_uses, &atom_uses(list, env)),
+            &atom_uses(value, env),
+        );
+        Out { ty: lt, eff, uses }
+    }
+
+    fn synth_list_set(
+        &mut self,
+        list: &Atom,
+        index: &Atom,
+        value: &Atom,
+        env: &mut Vec<Binder>,
+    ) -> Out {
+        let lt = self.atom_ty(list, env);
+        let vt = self.atom_ty(value, env);
+        let elem = match &lt {
+            Ty::Known(t) => list_elem_type(t).cloned(),
+            Ty::Unknown => None,
+            _ => None,
+        };
+        if elem.is_none() && !matches!(lt, Ty::Unknown) {
+            self.emit(Diagnostic::error(
+                Code::BadPrimOperand,
+                "list set requires a `List[T]` value".to_string(),
+            ));
+        }
+        if !numeric(&self.atom_ty(index, env)) {
+            self.emit(Diagnostic::error(
+                Code::BadPrimOperand,
+                "list set requires an integer index".to_string(),
+            ));
+        }
+        if let Some(elem) = &elem {
+            if !compatible(&Ty::Known(elem.clone()), &vt) {
+                self.emit(Diagnostic::error(
+                    Code::TypeMismatch,
+                    format!(
+                        "stored value has type `{}` but the list element type is `{}`",
+                        show_ty(&vt),
+                        show_type(elem)
+                    ),
+                ));
+            }
+        }
+        let uses = seq(
+            &seq(&atom_uses(list, env), &atom_uses(index, env)),
+            &atom_uses(value, env),
+        );
+        Out {
+            ty: lt,
+            eff: EffectRow::empty(),
+            uses,
+        }
+    }
+
+    fn alloc_effect(&mut self, alloc: &Atom, env: &mut Vec<Binder>) -> (EffectRow, Uses) {
+        let at = self.atom_ty(alloc, env);
+        let mut eff = EffectRow::empty();
+        match &at {
+            Ty::Known(Type::Nominal { def, .. })
+                if self.world.is_cap(def) && self.world.cap_name(def) == "Alloc" =>
+            {
+                eff.caps.push(*def);
+            }
+            Ty::Unknown => {}
+            _ => self.emit(Diagnostic::error(
+                Code::BadPrimOperand,
+                "list allocation requires an `Alloc` capability".to_string(),
+            )),
+        }
+        (eff, atom_uses(alloc, env))
+    }
+
     fn synth_match(&mut self, scrutinee: &Atom, branches: &[Branch], env: &mut Vec<Binder>) -> Out {
         let st = self.atom_ty(scrutinee, env);
         let s_uses = atom_uses(scrutinee, env);
@@ -935,8 +1080,9 @@ impl<'a> Checker<'a> {
                     // A `str` is a UTF-8 slice (`spec/01` §3.1), so `len` accepts
                     // it (its byte length) just as the interpreter does.
                     Ty::Known(t)
-                        if matches!(peel(t), Type::Slice(_) | Type::Array(_, _) | Type::Str) => {}
-                    _ => bad(self, "requires a slice, array, or `str` operand"),
+                        if matches!(peel(t), Type::Slice(_) | Type::Array(_, _) | Type::Str)
+                            || list_elem_type(t).is_some() => {}
+                    _ => bad(self, "requires a slice, array, list, or `str` operand"),
                 }
                 Ty::Known(Type::Int(IntTy::Usize))
             }
@@ -945,14 +1091,23 @@ impl<'a> Checker<'a> {
                 let elem = match arg(args, 0) {
                     Ty::Known(t) => match peel(t) {
                         Type::Slice(e) | Type::Array(e, _) => Ty::Known((**e).clone()),
+                        _ if list_elem_type(t).is_some() => {
+                            Ty::Known(list_elem_type(t).unwrap().clone())
+                        }
                         _ => {
-                            bad(self, "requires a slice or array as its first operand");
+                            bad(
+                                self,
+                                "requires a slice, array, or list as its first operand",
+                            );
                             Ty::Unknown
                         }
                     },
                     Ty::Unknown => Ty::Unknown,
                     _ => {
-                        bad(self, "requires a slice or array as its first operand");
+                        bad(
+                            self,
+                            "requires a slice, array, or list as its first operand",
+                        );
                         Ty::Unknown
                     }
                 };
@@ -1279,9 +1434,14 @@ fn lit_ty(l: &Literal) -> Ty {
 
 fn value_prov(value: &Core) -> Prov {
     match value {
-        Core::Ctor { .. } | Core::Array { .. } | Core::IndexSet { .. } | Core::Prim { .. } => {
-            Prov::Computed
-        }
+        Core::Ctor { .. }
+        | Core::Array { .. }
+        | Core::IndexSet { .. }
+        | Core::ListNew { .. }
+        | Core::ListPush { .. }
+        | Core::ListPop { .. }
+        | Core::ListSet { .. }
+        | Core::Prim { .. } => Prov::Computed,
         _ => Prov::Other,
     }
 }
@@ -1489,6 +1649,24 @@ fn coerces_to(target: &Type, source: &Type) -> bool {
             mt == ms && coerces_to(t, s)
         }
         _ => false,
+    }
+}
+
+fn list_type(elem: Type) -> Type {
+    Type::Nominal {
+        def: symbol_hash("std.collections.List"),
+        args: vec![elem],
+    }
+}
+
+fn list_elem_type(t: &Type) -> Option<&Type> {
+    match peel(t) {
+        Type::Nominal { def, args }
+            if *def == symbol_hash("std.collections.List") && args.len() == 1 =>
+        {
+            args.first()
+        }
+        _ => None,
     }
 }
 

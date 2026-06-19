@@ -287,6 +287,28 @@ fn subst_core(c: &Core, subst: &dyn Fn(Hash) -> Option<Hash>) -> Core {
             index: subst_atom(index, subst),
             value: subst_atom(value, subst),
         },
+        Core::ListNew {
+            elem,
+            alloc,
+            capacity,
+        } => Core::ListNew {
+            elem: subst_type(elem, subst),
+            alloc: subst_atom(alloc, subst),
+            capacity: subst_atom(capacity, subst),
+        },
+        Core::ListPush { alloc, list, value } => Core::ListPush {
+            alloc: subst_atom(alloc, subst),
+            list: subst_atom(list, subst),
+            value: subst_atom(value, subst),
+        },
+        Core::ListPop { list } => Core::ListPop {
+            list: subst_atom(list, subst),
+        },
+        Core::ListSet { list, index, value } => Core::ListSet {
+            list: subst_atom(list, subst),
+            index: subst_atom(index, subst),
+            value: subst_atom(value, subst),
+        },
         Core::Match {
             scrutinee,
             branches,

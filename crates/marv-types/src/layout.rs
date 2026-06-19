@@ -39,7 +39,7 @@ pub fn is_boxed(world: &World, ty: &Type) -> bool {
     match ty {
         Type::Tuple(_) | Type::Array(_, _) => true,
         Type::Nominal { def, .. } => {
-            world.struct_decl(def).is_some() || world.enum_decl(def).is_some()
+            is_list_type(ty) || world.struct_decl(def).is_some() || world.enum_decl(def).is_some()
         }
         Type::Linear(inner) => is_boxed(world, inner),
         _ => false,
@@ -169,6 +169,11 @@ pub fn type_of(world: &World, c: &Core, tys: &mut Vec<Option<Type>>) -> Option<T
         // (MARV-33); the store rebinds the root to this value.
         Core::IndexSet { base, .. } => atom_type(world, base, tys),
 
+        Core::ListNew { elem, .. } => Some(list_type(elem.clone())),
+        Core::ListPush { list, .. } | Core::ListPop { list } | Core::ListSet { list, .. } => {
+            atom_type(world, list, tys)
+        }
+
         Core::Proj { base, idx } => {
             let bt = atom_type(world, base, tys)?;
             variant_fields(world, &bt, 0)?
@@ -243,9 +248,33 @@ fn prim_type(world: &World, op: PrimOp, args: &[Atom], tys: &[Option<Type>]) -> 
             let base = atom_type(world, args.first()?, tys)?;
             match base {
                 Type::Array(elem, _) | Type::Slice(elem) => Some(*elem),
+                t if list_elem_type(&t).is_some() => list_elem_type(&t).cloned(),
                 Type::Tuple(elems) => elems.into_iter().next(),
                 _ => None,
             }
         }
+    }
+}
+
+fn list_type(elem: Type) -> Type {
+    Type::Nominal {
+        def: marv_core::symbol_hash("std.collections.List"),
+        args: vec![elem],
+    }
+}
+
+fn is_list_type(t: &Type) -> bool {
+    list_elem_type(t).is_some()
+}
+
+fn list_elem_type(t: &Type) -> Option<&Type> {
+    match t {
+        Type::Nominal { def, args }
+            if *def == marv_core::symbol_hash("std.collections.List") && args.len() == 1 =>
+        {
+            args.first()
+        }
+        Type::Linear(inner) => list_elem_type(inner),
+        _ => None,
     }
 }

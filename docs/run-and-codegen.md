@@ -147,6 +147,17 @@ with a runtime loop, then overwrite the one element. The result is a new block (
 functional update; the source is untouched, `spec/01` §4). A fixed-length array
 coerces to a slice at no runtime cost (the layout is identical).
 
+A **list** `List[T]` (MARV-42) is the growable cousin with layout
+`[len, cap, e0, …]`. `new(alloc)` / `with_capacity(alloc, n)` and
+`push(alloc, list, value)` require an explicit `Alloc` capability in source; the
+compiled backends allocate through their existing arenas, so no hidden ambient
+allocator appears. `push`, `set`, and `pop` return the updated list value; compiled
+backends update the block in place when capacity allows and allocate-copy only on
+growth. `len(list)` reads word 0, and
+`list[i]`/`get(list, i)` bounds-check against `len` then load from word `i + 2`.
+The existing `for x in collection` desugar works unchanged because it is already
+defined in terms of `len` and index.
+
 ### The Tier-1 bounds check (MARV-34)
 
 A runtime subscript outside `0..len` — an element read `a[i]`/`s[i]` or a slice

@@ -53,6 +53,25 @@ fn max[T: Ord](a: T, b: T) -> T
 fn min[T: Ord](a: T, b: T) -> T
 ```
 
+### `std/collections.mv` — `List[T]`
+A growable list. Construction and `push` take an explicit `Alloc` capability; `push`, `pop`,
+and `set` return the updated list value, so callers rebind a `var`.
+`len(list)`, `list[i]`, `get`, `set`, and `for x in list` run on the interpreter, Cranelift,
+and WASM backends. The runtime layout is `[len, cap, e0, …]`; `len` is a header load and index
+loads skip the two-word header. Backends update the backing block in place when capacity allows
+and allocate-copy only on growth.
+
+```marv
+struct List[T] { … }
+fn new[T](alloc: Alloc) -> List[T]
+fn with_capacity[T](alloc: Alloc, capacity: usize) -> List[T]
+fn push[T](alloc: Alloc, list: List[T], value: T) -> List[T]
+fn pop[T](list: List[T]) -> List[T]
+fn get[T](list: List[T], index: usize) -> T
+fn set[T](list: List[T], index: usize, value: T) -> List[T]
+pure fn len[T](list: List[T]) -> usize
+```
+
 ## Capabilities
 
 `std/capabilities.mv` declares the standard capability types as interfaces — the operations a

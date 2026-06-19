@@ -432,6 +432,32 @@ fn encode_core(e: &mut Encoder, c: &Core) {
             encode_atom(e, index);
             encode_atom(e, value);
         }
+        Core::ListNew {
+            elem,
+            alloc,
+            capacity,
+        } => {
+            e.u8(15);
+            encode_type(e, elem);
+            encode_atom(e, alloc);
+            encode_atom(e, capacity);
+        }
+        Core::ListPush { alloc, list, value } => {
+            e.u8(16);
+            encode_atom(e, alloc);
+            encode_atom(e, list);
+            encode_atom(e, value);
+        }
+        Core::ListPop { list } => {
+            e.u8(17);
+            encode_atom(e, list);
+        }
+        Core::ListSet { list, index, value } => {
+            e.u8(18);
+            encode_atom(e, list);
+            encode_atom(e, index);
+            encode_atom(e, value);
+        }
     }
 }
 

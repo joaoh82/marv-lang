@@ -156,6 +156,26 @@ fn collect_core_syms(c: &Core, out: &mut Vec<Hash>) {
             atom(index, out);
             atom(value, out);
         }
+        Core::ListNew {
+            elem,
+            alloc,
+            capacity,
+        } => {
+            collect_type_syms(elem, out);
+            atom(alloc, out);
+            atom(capacity, out);
+        }
+        Core::ListPush { alloc, list, value } => {
+            atom(alloc, out);
+            atom(list, out);
+            atom(value, out);
+        }
+        Core::ListPop { list } => atom(list, out),
+        Core::ListSet { list, index, value } => {
+            atom(list, out);
+            atom(index, out);
+            atom(value, out);
+        }
         Core::Match {
             scrutinee,
             branches,

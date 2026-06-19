@@ -1,0 +1,24 @@
+mod list
+import std.io (Alloc)
+import std.collections (List, with_capacity, push, pop, get, set)
+
+fn exercise(alloc: Alloc, n: i64) -> i64
+    requires (n >= 1)
+{
+    var xs: List[i64] = with_capacity(alloc, 2)
+    var i: i64 = 0
+    while (i < n)
+        invariant (i >= 0)
+    {
+        xs = push(alloc, xs, (i + 1))
+        i = (i + 1)
+    }
+    xs = set(xs, 1, 20)
+    let second = get(xs, 1)
+    xs = pop(xs)
+    var sum: i64 = 0
+    for x in xs {
+        sum = (sum + x)
+    }
+    (sum + second)
+}

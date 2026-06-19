@@ -29,6 +29,13 @@ pub enum Value {
         tag: u32,
         fields: Vec<Value>,
     },
+    /// A growable list value. The public type is `std.collections.List[T]`;
+    /// the interpreter keeps the capacity explicit so `with_capacity`/`push`
+    /// mirror the compiled backends' `[len, cap, e0, …]` layout.
+    List {
+        items: Vec<Value>,
+        cap: usize,
+    },
     /// An unforgeable capability token, named for effect reporting. Injected at
     /// the entry point by [`crate::Program::run`] from the host's grant set; it
     /// can only be received or passed on, never constructed (`spec/01` §5).
@@ -64,6 +71,10 @@ impl Value {
             Value::Agg { tag, fields } => {
                 let inner: Vec<String> = fields.iter().map(Value::render).collect();
                 format!("#{tag}({})", inner.join(", "))
+            }
+            Value::List { items, .. } => {
+                let inner: Vec<String> = items.iter().map(Value::render).collect();
+                format!("[{}]", inner.join(", "))
             }
             Value::Cap(name) => format!("<cap {name}>"),
             Value::Partial { .. } => "<partial>".to_string(),

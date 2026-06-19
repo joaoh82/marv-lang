@@ -20,8 +20,8 @@ interface Io {
     fn stdout(io: &Io) -> Stream
 }
 
-/// A text/byte output stream (e.g. standard output). Stage-0 writes a `str`;
-/// a byte-slice overload arrives with the collection surface.
+/// A text output stream (e.g. standard output). Stage-0 writes a `str`;
+/// byte-slice output remains a later std I/O overload.
 interface Stream {
     fn write(s: &Stream, text: str) -> !
 }

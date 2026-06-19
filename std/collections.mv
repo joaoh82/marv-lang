@@ -1,0 +1,34 @@
+mod std.collections
+import std.io (Alloc)
+
+/// A growable list. Operations that may allocate take `Alloc` explicitly and
+/// mutating operations return the updated list value for rebinding.
+struct List[T] { raw: [0]T }
+
+fn new[T](alloc: Alloc) -> List[T] {
+    List { raw: [] }
+}
+
+fn with_capacity[T](alloc: Alloc, capacity: usize) -> List[T] {
+    List { raw: [] }
+}
+
+fn push[T](alloc: Alloc, list: List[T], value: T) -> List[T] {
+    list
+}
+
+fn pop[T](list: List[T]) -> List[T] {
+    list
+}
+
+fn get[T](list: List[T], index: usize) -> T {
+    list.raw[index]
+}
+
+fn set[T](list: List[T], index: usize, value: T) -> List[T] {
+    list
+}
+
+pure fn len[T](list: List[T]) -> usize {
+    len(list.raw)
+}
