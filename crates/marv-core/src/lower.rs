@@ -979,11 +979,13 @@ impl Lowerer {
         })
     }
 
-    /// Module-qualify a value reference if it names an in-module item; otherwise
-    /// leave it bare (an import or builtin).
+    /// Module-qualify a value reference if it names an in-module item or an
+    /// imported item; otherwise leave it bare (a builtin).
     fn qualify_value(&self, name: &str) -> String {
         if self.local_items.contains(name) {
             format!("{}.{}", self.module_path, name)
+        } else if let Some(module) = self.imports.get(name) {
+            format!("{module}.{name}")
         } else {
             name.to_string()
         }

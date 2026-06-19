@@ -253,6 +253,19 @@ pub fn compile_reachable(
     compile_inner(module_path, defs, world, opts, Some(entry))
 }
 
+/// Compile definitions whose `Global` references have already been rewritten
+/// to content dag hashes by `marv-store`. `aliases` maps human entry names to
+/// those hashes.
+pub fn compile_hashed_reachable(
+    defs: &[(Hash, String, Def)],
+    aliases: &[(String, Hash)],
+    world: &World,
+    opts: &Options,
+    entry: &str,
+) -> Result<JitProgram, CodegenError> {
+    compile_hashed_inner(defs, aliases, world, opts, Some(entry))
+}
+
 fn compile_inner(
     module_path: &str,
     defs: &[(String, Def)],
@@ -368,6 +381,183 @@ fn compile_inner(
         metas,
         names,
     })
+}
+
+fn compile_hashed_inner(
+    defs: &[(Hash, String, Def)],
+    aliases: &[(String, Hash)],
+    world: &World,
+    opts: &Options,
+    entry: Option<&str>,
+) -> Result<JitProgram, CodegenError> {
+    let mask = entry.map(|e| hashed_reachable_mask(defs, aliases, e));
+
+    let mut module = make_module()?;
+
+    let mut alloc_sig = module.make_signature();
+    alloc_sig.params.push(AbiParam::new(WORD));
+    alloc_sig.returns.push(AbiParam::new(WORD));
+    let alloc_id = module.declare_function("marv_rt_alloc", Linkage::Import, &alloc_sig)?;
+
+    let mut mark_sig = module.make_signature();
+    mark_sig.returns.push(AbiParam::new(WORD));
+    let heap_mark_id = module.declare_function("marv_rt_heap_mark", Linkage::Import, &mark_sig)?;
+    let mut reset_sig = module.make_signature();
+    reset_sig.params.push(AbiParam::new(WORD));
+    let heap_reset_id =
+        module.declare_function("marv_rt_heap_reset", Linkage::Import, &reset_sig)?;
+
+    let mut bounds_sig = module.make_signature();
+    bounds_sig.params.push(AbiParam::new(WORD));
+    bounds_sig.params.push(AbiParam::new(WORD));
+    let bounds_fail_id =
+        module.declare_function("marv_rt_bounds_fail", Linkage::Import, &bounds_sig)?;
+
+    let mut metas: HashMap<Hash, FnMeta> = HashMap::new();
+    let mut names: HashMap<String, Hash> = HashMap::new();
+    let mut order: Vec<(Hash, usize)> = Vec::new();
+    for (idx, (h, name, def)) in defs.iter().enumerate() {
+        if def.kind != DefKind::Fn {
+            continue;
+        }
+        if mask.as_ref().is_some_and(|m| !m[idx]) {
+            continue;
+        }
+        if def.ty.is_polymorphic() {
+            continue;
+        }
+        let param_tys = peel_param_types(&def.ty);
+        let param_is_unit: Vec<bool> = param_tys.iter().map(|t| is_no_slot(t, world)).collect();
+        let arity = param_tys.len();
+
+        let mut sig = module.make_signature();
+        for _ in 0..param_is_unit.iter().filter(|u| !**u).count() {
+            sig.params.push(AbiParam::new(WORD));
+        }
+        sig.returns.push(AbiParam::new(WORD));
+        let symbol = hashed_symbol_name(h);
+        let id = module.declare_function(&symbol, Linkage::Export, &sig)?;
+
+        metas.insert(
+            *h,
+            FnMeta {
+                id,
+                arity,
+                param_is_unit,
+                param_tys,
+            },
+        );
+        names.insert(name.clone(), *h);
+        names.insert(h.to_b3(), *h);
+        order.push((*h, idx));
+    }
+    for (alias, h) in aliases {
+        names.insert(alias.clone(), *h);
+    }
+
+    let mut ctx = module.make_context();
+    let mut fb_ctx = FunctionBuilderContext::new();
+    for (h, idx) in &order {
+        let (_, _, def) = &defs[*idx];
+        compile_fn(
+            &mut module,
+            &metas,
+            world,
+            alloc_id,
+            heap_mark_id,
+            heap_reset_id,
+            bounds_fail_id,
+            opts,
+            &mut ctx,
+            &mut fb_ctx,
+            *h,
+            def,
+        )?;
+        module.clear_context(&mut ctx);
+    }
+
+    module
+        .finalize_definitions()
+        .map_err(|e| CodegenError::Backend(e.to_string()))?;
+
+    Ok(JitProgram {
+        module,
+        metas,
+        names,
+    })
+}
+
+fn hashed_symbol_name(h: &Hash) -> String {
+    format!("marv_b3_{}", h.to_hex())
+}
+
+fn hashed_reachable_mask(
+    defs: &[(Hash, String, Def)],
+    aliases: &[(String, Hash)],
+    entry: &str,
+) -> Vec<bool> {
+    let n = defs.len();
+    let Some(start) = resolve_hashed_entry(defs, aliases, entry) else {
+        return vec![true; n];
+    };
+    let idx_by_hash: HashMap<Hash, usize> = defs
+        .iter()
+        .enumerate()
+        .map(|(idx, (h, _, _))| (*h, idx))
+        .collect();
+    let Some(&start_idx) = idx_by_hash.get(&start) else {
+        return vec![true; n];
+    };
+    let mut mask = vec![false; n];
+    mask[start_idx] = true;
+    let mut queue = vec![start_idx];
+    while let Some(i) = queue.pop() {
+        let mut syms = Vec::new();
+        marv_core::reach::collect_global_syms(&defs[i].2, &mut syms);
+        for s in syms {
+            if let Some(&j) = idx_by_hash.get(&s) {
+                if !mask[j] {
+                    mask[j] = true;
+                    queue.push(j);
+                }
+            }
+        }
+    }
+    mask
+}
+
+fn resolve_hashed_entry(
+    defs: &[(Hash, String, Def)],
+    aliases: &[(String, Hash)],
+    entry: &str,
+) -> Option<Hash> {
+    let concrete_fn = |def: &Def| def.kind == DefKind::Fn && !def.ty.is_polymorphic();
+    if !entry.is_empty() {
+        return aliases
+            .iter()
+            .find_map(|(name, h)| (name == entry).then_some(*h))
+            .or_else(|| {
+                defs.iter()
+                    .find_map(|(h, name, def)| (name == entry && concrete_fn(def)).then_some(*h))
+            });
+    }
+    if let Some((_, h)) = aliases.iter().find(|(name, _)| name == "main") {
+        return Some(*h);
+    }
+    if let Some((h, _, _)) = defs
+        .iter()
+        .find(|(_, name, def)| name == "main" && concrete_fn(def))
+    {
+        return Some(*h);
+    }
+    let mut fns = defs
+        .iter()
+        .filter(|(_, _, def)| concrete_fn(def))
+        .map(|(h, _, _)| *h);
+    match (fns.next(), fns.next()) {
+        (Some(h), None) => Some(h),
+        _ => None,
+    }
 }
 
 impl JitProgram {

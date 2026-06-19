@@ -357,6 +357,14 @@ impl WorldBuilder {
         self
     }
 
+    /// Register a top-level value signature under an already-resolved hash.
+    /// This is used by content-addressed store fetches, where Core references
+    /// have been rewritten from `symbol_hash(name)` to pinned dag hashes.
+    pub fn global_hash(mut self, hash: Hash, ty: Type) -> Self {
+        self.world.globals.insert(hash, ty);
+        self
+    }
+
     /// Register a capability `name` with the given operations, under
     /// `symbol_hash(name)`.
     pub fn cap(mut self, name: &str, ops: Vec<OpSig>) -> Self {
@@ -370,6 +378,12 @@ impl WorldBuilder {
         self
     }
 
+    /// Register a capability declaration under an already-resolved hash.
+    pub fn cap_hash(mut self, hash: Hash, name: String, ops: Vec<OpSig>) -> Self {
+        self.world.caps.insert(hash, CapDecl { name, ops });
+        self
+    }
+
     /// Register an error `name` carrying the given payload types.
     pub fn error(mut self, name: &str, payload: Vec<Type>) -> Self {
         self.world.errors.insert(
@@ -379,6 +393,12 @@ impl WorldBuilder {
                 payload,
             },
         );
+        self
+    }
+
+    /// Register an error declaration under an already-resolved hash.
+    pub fn error_hash(mut self, hash: Hash, name: String, payload: Vec<Type>) -> Self {
+        self.world.errors.insert(hash, ErrorDecl { name, payload });
         self
     }
 
@@ -402,12 +422,46 @@ impl WorldBuilder {
         self
     }
 
+    /// Register an enum declaration under an already-resolved hash.
+    pub fn enum_hash(
+        mut self,
+        hash: Hash,
+        name: String,
+        variants: Vec<(String, Vec<Type>)>,
+    ) -> Self {
+        let variants = variants
+            .into_iter()
+            .map(|(name, fields)| VariantDecl { name, fields })
+            .collect();
+        self.world.enums.insert(hash, EnumDecl { name, variants });
+        self
+    }
+
     /// Register a struct `name` with the given field types.
     pub fn struct_decl(mut self, name: &str, fields: Vec<Type>, linear: bool) -> Self {
         self.world.structs.insert(
             symbol_hash(name),
             StructDecl {
                 name: name.to_string(),
+                fields,
+                linear,
+            },
+        );
+        self
+    }
+
+    /// Register a struct declaration under an already-resolved hash.
+    pub fn struct_hash(
+        mut self,
+        hash: Hash,
+        name: String,
+        fields: Vec<Type>,
+        linear: bool,
+    ) -> Self {
+        self.world.structs.insert(
+            hash,
+            StructDecl {
+                name,
                 fields,
                 linear,
             },

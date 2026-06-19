@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 use marv_core::ir::Def;
 use marv_core::lower_modules;
 use marv_db::{qualify, CoreModuleSpec};
+use marv_store::{DefMeta, StoredOpSig, StoredVariant};
 use marv_syntax::{parse, Module};
 use marv_types::{check_bounds, check_def, Diagnostic, Severity, World};
 
@@ -22,6 +23,9 @@ use marv_types::{check_bounds, check_def, Diagnostic, Severity, World};
 pub struct Loaded {
     pub module_path: String,
     pub defs: Vec<(String, Def)>,
+    /// Declaration metadata aligned with `defs`, persisted into `marv-store`
+    /// so fetched blobs can rebuild a hash-keyed declaration world.
+    pub store_meta: Vec<DefMeta>,
     /// Parameter names per definition, aligned with `defs`. Core erases names,
     /// so these come from the AST (source) or the snapshot's `params` field;
     /// `verify` uses them to label counterexamples.
@@ -97,6 +101,7 @@ fn load_source(src: &str, path: &Path) -> Result<Loaded, LoadError> {
 
     // The user's file is module 0; `check`/`run` operate on its definitions
     // (the std modules are resolved-but-trusted library code).
+    let store_meta = store_meta_for_module(lowered.first().expect("main module was lowered"));
     let main = lowered.into_iter().next().expect("main module was lowered");
     let param_names = main
         .defs
@@ -107,6 +112,7 @@ fn load_source(src: &str, path: &Path) -> Result<Loaded, LoadError> {
     Ok(Loaded {
         module_path,
         defs,
+        store_meta,
         param_names,
         world,
         bound_diags,
@@ -225,15 +231,61 @@ fn load_core(src: &str) -> Result<Loaded, LoadError> {
         .map_err(|e| LoadError::Front(format!("core ingest error: {e}")))?;
     let world = spec.world.build();
     let module_path = spec.module.clone();
-    let param_names = spec.defs.iter().map(|d| d.params.clone()).collect();
+    let param_names: Vec<Vec<String>> = spec.defs.iter().map(|d| d.params.clone()).collect();
     let defs = spec.defs.into_iter().map(|d| (d.name, d.def)).collect();
+    let store_meta = vec![DefMeta::default(); param_names.len()];
     Ok(Loaded {
         module_path,
         defs,
+        store_meta,
         param_names,
         world,
         bound_diags: Vec::new(),
     })
+}
+
+fn store_meta_for_module(m: &marv_core::LoweredModule) -> Vec<DefMeta> {
+    let cap_ops_by_name: std::collections::HashMap<&str, Vec<StoredOpSig>> = m
+        .interfaces
+        .iter()
+        .filter(|iface| iface.is_capability)
+        .map(|iface| {
+            let ops = iface
+                .method_sigs
+                .iter()
+                .map(|sig| StoredOpSig {
+                    // Drop the receiver; `Perform` operands carry only the
+                    // non-receiver arguments.
+                    params: sig.params.iter().skip(1).cloned().collect(),
+                    ret: sig.ret.clone(),
+                    errors: Vec::new(),
+                })
+                .collect();
+            (iface.name.as_str(), ops)
+        })
+        .collect();
+
+    m.defs
+        .iter()
+        .map(|entry| DefMeta {
+            enum_variants: entry
+                .enum_variants
+                .as_ref()
+                .map(|vars| {
+                    vars.iter()
+                        .map(|v| StoredVariant {
+                            name: v.name.clone(),
+                            fields: v.fields.clone(),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+            capability_ops: cap_ops_by_name
+                .get(entry.name.as_str())
+                .cloned()
+                .unwrap_or_default(),
+        })
+        .collect()
 }
 
 impl Loaded {

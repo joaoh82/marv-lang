@@ -96,9 +96,10 @@ cd web && python3 -m http.server 8087   # open http://localhost:8087/
 | `marv fmt [--write\|--check] [files…]` | Canonicalize source. The formatter is the parser's inverse — exactly one form per program. |
 | `marv check <file>` | Type / effect / capability / error-set / reference / linearity checks; fix-carrying diagnostics. |
 | `marv run [--grant CAP,…] [--entry NAME] <file> [args…]` | Interpret an entry point (the semantics oracle). Capabilities enter only via `--grant`. |
-| `marv build [--target native-cranelift\|wasm-component] [--run] [--release] [--out PATH] [--entry NAME] <file>` | Compile via Cranelift (JIT, `--run` to execute) or to a WebAssembly module. Only definitions reachable from the entry are compiled (MARV-8). Debug builds (default) carry the Tier-1 bounds check; `--release` omits it. |
+| `marv build [--target native-cranelift\|wasm-component] [--run] [--release] [--store DIR] [--out PATH] [--entry NAME] <file>` | Compile via Cranelift (JIT, `--run` to execute) or to a WebAssembly module. Only definitions reachable from the entry are compiled (MARV-8). With `--store`, imports/deps are fetched from pinned dag hashes. Debug builds (default) carry the Tier-1 bounds check; `--release` omits it. |
 | `marv verify [--def NAME] <file>` | Discharge `requires`/`ensures` contracts via SMT: `proved` / `failed` (with a counterexample) / `unsupported` (→ runtime fallback). |
 | `marv commit [--store DIR] <file>` | Freeze definitions into the content-addressed store; report the lockfile delta (new vs. already-reviewed). |
+| `marv store audit/gc [--store DIR]` | Inspect provenance/reachability or remove blobs unreachable from the lockfile. |
 
 Both `.mv` source and `*.core.json` Core-IR snapshots are accepted. See
 [`docs/cli.md`](docs/cli.md) for full details and exit codes.
@@ -168,7 +169,8 @@ capability parameters), struct literals + indexing + assignment, `char` literals
 `let`/`var`, `if`/`else`, arithmetic/boolean ops, the prefix unary
 operators (`-e`, `not e`, `&e`/`&mut e`), calls/recursion,
 `pure` + `requires`/`ensures` contracts); collection literals, `linear` capabilities, and
-cross-module linking are the next surface work. The full backlog (surface growth → backend breadth → verification breadth → AOT/LLVM →
+broader non-`std` source-module discovery are the next surface work. The content store now
+supports lockfile-pinned cross-module builds by hash. The full backlog (surface growth → backend breadth → verification breadth → AOT/LLVM →
 self-hosting) — with phases, ordering, and the dependency graph — is in
 [`docs/roadmap.md`](docs/roadmap.md), mapped to the `MARV-#` tasks in the project tracker.
 

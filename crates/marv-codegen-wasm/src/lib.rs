@@ -234,6 +234,18 @@ pub fn compile_reachable(
     compile_inner(module_path, defs, world, opts, Some(entry))
 }
 
+/// Compile definitions whose references have already been rewritten to
+/// content dag hashes by `marv-store`.
+pub fn compile_hashed_reachable(
+    defs: &[(Hash, String, Def)],
+    aliases: &[(String, Hash)],
+    world: &World,
+    opts: &Options,
+    entry: &str,
+) -> Result<WasmArtifact, WasmError> {
+    compile_hashed_inner(defs, aliases, world, opts, Some(entry))
+}
+
 fn compile_inner(
     module_path: &str,
     defs: &[(String, Def)],
@@ -376,6 +388,205 @@ fn compile_inner(
         imports,
         exports,
     })
+}
+
+fn compile_hashed_inner(
+    defs: &[(Hash, String, Def)],
+    aliases: &[(String, Hash)],
+    world: &World,
+    opts: &Options,
+    entry: Option<&str>,
+) -> Result<WasmArtifact, WasmError> {
+    let mask = entry.map(|e| hashed_reachable_mask(defs, aliases, e));
+
+    let fns: Vec<(Hash, &str, &Def)> = defs
+        .iter()
+        .enumerate()
+        .filter(|(idx, (_, _, d))| {
+            d.kind == DefKind::Fn && !d.ty.is_polymorphic() && mask.as_ref().is_none_or(|m| m[*idx])
+        })
+        .map(|(_, (h, name, d))| (*h, name.as_str(), d))
+        .collect();
+
+    let mut metas: HashMap<Hash, FnMeta> = HashMap::new();
+    for (h, _, def) in &fns {
+        let param_tys = peel_param_types(&def.ty);
+        let no_slot = param_tys.iter().map(|t| is_no_slot(t, world)).collect();
+        metas.insert(
+            *h,
+            FnMeta {
+                arity: param_tys.len(),
+                no_slot,
+            },
+        );
+    }
+
+    let imports = collect_imports(&fns, world)?;
+    let mut import_index: HashMap<(String, u32), u32> = HashMap::new();
+    for (i, imp) in imports.iter().enumerate() {
+        import_index.insert((imp.cap.clone(), imp.op), i as u32);
+    }
+    let import_count = imports.len() as u32;
+
+    let mut fn_index: HashMap<Hash, u32> = HashMap::new();
+    for (pos, (h, _, _)) in fns.iter().enumerate() {
+        fn_index.insert(*h, import_count + pos as u32);
+    }
+
+    let mut types = TypeSection::new();
+    let mut type_count: u32 = 0;
+    let mut import_sec = ImportSection::new();
+    for imp in &imports {
+        let params = vec![ValType::I64; imp.params];
+        let results: Vec<ValType> = if imp.returns_value {
+            vec![ValType::I64]
+        } else {
+            vec![]
+        };
+        types.ty().function(params, results);
+        import_sec.import(
+            &imp.cap,
+            &format!("op{}", imp.op),
+            EntityType::Function(type_count),
+        );
+        type_count += 1;
+    }
+
+    let mut func_sec = FunctionSection::new();
+    let mut export_sec = ExportSection::new();
+    let mut exports = Vec::new();
+    for (h, name, _def) in &fns {
+        let meta = &metas[h];
+        let params = vec![ValType::I64; meta.abi_param_count()];
+        types.ty().function(params, vec![ValType::I64]);
+        func_sec.function(type_count);
+        type_count += 1;
+
+        let export_name = aliases
+            .iter()
+            .find_map(|(alias, ah)| (ah == h).then_some(alias.as_str()))
+            .unwrap_or(name);
+        export_sec.export(export_name, ExportKind::Func, fn_index[h]);
+        exports.push(ExportInfo {
+            name: export_name.to_string(),
+            arity: meta.abi_param_count(),
+        });
+    }
+
+    let mut code_sec = CodeSection::new();
+    for (h, _, def) in &fns {
+        let func = compile_fn(*h, def, world, &metas, &fn_index, &import_index, opts)?;
+        code_sec.function(&func);
+    }
+
+    let mut mem_sec = MemorySection::new();
+    mem_sec.memory(MemoryType {
+        minimum: MEM_PAGES,
+        maximum: None,
+        memory64: false,
+        shared: false,
+        page_size_log2: None,
+    });
+
+    let mut global_sec = GlobalSection::new();
+    global_sec.global(
+        GlobalType {
+            val_type: ValType::I64,
+            mutable: true,
+            shared: false,
+        },
+        &ConstExpr::i64_const(HEAP_START),
+    );
+
+    let mut module = Module::new();
+    module.section(&types);
+    if !imports.is_empty() {
+        module.section(&import_sec);
+    }
+    module.section(&func_sec);
+    module.section(&mem_sec);
+    module.section(&global_sec);
+    module.section(&export_sec);
+    module.section(&code_sec);
+    let bytes = module.finish();
+    wasmparser::Validator::new()
+        .validate_all(&bytes)
+        .map_err(|e| WasmError::Invalid(e.to_string()))?;
+
+    Ok(WasmArtifact {
+        bytes,
+        imports,
+        exports,
+    })
+}
+
+fn hashed_reachable_mask(
+    defs: &[(Hash, String, Def)],
+    aliases: &[(String, Hash)],
+    entry: &str,
+) -> Vec<bool> {
+    let n = defs.len();
+    let Some(start) = resolve_hashed_entry(defs, aliases, entry) else {
+        return vec![true; n];
+    };
+    let idx_by_hash: HashMap<Hash, usize> = defs
+        .iter()
+        .enumerate()
+        .map(|(idx, (h, _, _))| (*h, idx))
+        .collect();
+    let Some(&start_idx) = idx_by_hash.get(&start) else {
+        return vec![true; n];
+    };
+    let mut mask = vec![false; n];
+    mask[start_idx] = true;
+    let mut queue = vec![start_idx];
+    while let Some(i) = queue.pop() {
+        let mut syms = Vec::new();
+        marv_core::reach::collect_global_syms(&defs[i].2, &mut syms);
+        for s in syms {
+            if let Some(&j) = idx_by_hash.get(&s) {
+                if !mask[j] {
+                    mask[j] = true;
+                    queue.push(j);
+                }
+            }
+        }
+    }
+    mask
+}
+
+fn resolve_hashed_entry(
+    defs: &[(Hash, String, Def)],
+    aliases: &[(String, Hash)],
+    entry: &str,
+) -> Option<Hash> {
+    let concrete_fn = |def: &Def| def.kind == DefKind::Fn && !def.ty.is_polymorphic();
+    if !entry.is_empty() {
+        return aliases
+            .iter()
+            .find_map(|(name, h)| (name == entry).then_some(*h))
+            .or_else(|| {
+                defs.iter()
+                    .find_map(|(h, name, def)| (name == entry && concrete_fn(def)).then_some(*h))
+            });
+    }
+    if let Some((_, h)) = aliases.iter().find(|(name, _)| name == "main") {
+        return Some(*h);
+    }
+    if let Some((h, _, _)) = defs
+        .iter()
+        .find(|(_, name, def)| name == "main" && concrete_fn(def))
+    {
+        return Some(*h);
+    }
+    let mut fns = defs
+        .iter()
+        .filter(|(_, _, def)| concrete_fn(def))
+        .map(|(h, _, _)| *h);
+    match (fns.next(), fns.next()) {
+        (Some(h), None) => Some(h),
+        _ => None,
+    }
 }
 
 // ---- capability-import collection --------------------------------------

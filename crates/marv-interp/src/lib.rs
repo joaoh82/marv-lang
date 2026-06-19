@@ -357,11 +357,39 @@ impl Program {
     /// `marv_core::lower`), so calls resolve. The `world` supplies the
     /// declarations (capabilities, enums, …) the bodies reference.
     pub fn new(module_path: &str, defs: Vec<(String, Def)>, world: World) -> Self {
+        let defs = defs
+            .into_iter()
+            .map(|(name, def)| {
+                let qualified = qualify(module_path, &name);
+                (symbol_hash(&qualified), name, qualified, def)
+            })
+            .collect();
+        Program::from_keyed(defs, Vec::new(), world)
+    }
+
+    /// Assemble a program whose definitions are already keyed by resolved dag
+    /// hashes from `marv-store`. `aliases` maps human entry names (for example
+    /// `main.run`) to those hashes; calls inside the Core use the same hashes.
+    pub fn new_hashed(
+        defs: Vec<(Hash, String, Def)>,
+        aliases: Vec<(String, Hash)>,
+        world: World,
+    ) -> Self {
+        let keyed = defs
+            .into_iter()
+            .map(|(hash, name, def)| (hash, name.clone(), name, def))
+            .collect();
+        Program::from_keyed(keyed, aliases, world)
+    }
+
+    fn from_keyed(
+        defs: Vec<(Hash, String, String, Def)>,
+        aliases: Vec<(String, Hash)>,
+        world: World,
+    ) -> Self {
         let mut def_map = HashMap::new();
         let mut names = HashMap::new();
-        for (name, def) in defs {
-            let qualified = qualify(module_path, &name);
-            let h = symbol_hash(&qualified);
+        for (h, name, qualified, def) in defs {
             names.insert(name.clone(), h);
             names.insert(qualified.clone(), h);
             def_map.insert(
@@ -372,6 +400,9 @@ impl Program {
                     def,
                 },
             );
+        }
+        for (name, hash) in aliases {
+            names.insert(name, hash);
         }
         Program {
             defs: def_map,

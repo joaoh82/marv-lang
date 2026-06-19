@@ -33,7 +33,7 @@ where each one sits and what must land first. Each task references back here.
 | ~~**MARV-38** Tier-2 fixed-width integer wraparound (close the mathematical-integers soundness gap)~~ ✅ done — every `+ - * / %` and unary `-` is reduced through a two's-complement `wrap64` over SMT `Int`s (a bitvector sort was ruled out: nonlinear `div`/`mul` is intractable — the division identity times out as a 64-bit bitvector but discharges in well under a second as wrapped `Int`s), and every havocked int/length is range-constrained to `[i64::MIN, i64::MAX]`; `ensures result > x` for `x + 1` is now refuted at `x = i64::MAX`. Tier 2 is *correctly stricter*: an accumulator claimed `>= 0` whose running sum can overflow (`examples/loops.mv`'s `sum_to`) no longer proves; the bounded `count_down_sum` does | 3 · Verification | ~~MARV-11~~ ✅ | — | medium |
 | ~~**MARV-12** formatter doc-comments + real source spans~~ ✅ done | 5 · Infra/polish | — *(independent)* | — | medium |
 | **MARV-13** port more compiler passes to marv (self-hosting) | 4 · Self-hosting | Phase-1 surface *(incremental now)* | — | low |
-| **MARV-14** persistent on-disk store + cross-module resolution | 4 · Store | — *(std linking wants Phase 1)* | — | low |
+| ~~**MARV-14** persistent on-disk store + cross-module resolution~~ ✅ done | 4 · Store | — *(std linking wants Phase 1)* | — | low |
 
 Done (Phase 0 · Infra/agent): **MARV-15** repo housekeeping · **MARV-16** CI/CD + release ·
 **MARV-17** agent enablement (AGENTS.md, MCP server, skill).
@@ -237,7 +237,8 @@ they unblock the rest. Then:
   (which closed the last big gap between the design and what real `.mv` can express).
 - **Compounds on the surface:** ~~MARV-9 aggregate codegen~~ ✅ → MARV-10; and
   ~~MARV-11 verification expansion~~ ✅.
-- **Longer horizon:** MARV-13 more self-hosting, MARV-14 persistent store.
+- **Longer horizon:** MARV-13 more self-hosting; broader non-`std` source-module discovery
+  on top of the MARV-14 pinned store.
 
 **Parallel track (no surface dependency — pick up anytime):** ~~MARV-8 (reachability-pruned
 builds)~~ ✅ and ~~MARV-12 (doc-comments + spans)~~ ✅ are both done — the track is clear.
