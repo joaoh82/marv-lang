@@ -2,9 +2,9 @@
 //! and free renames — including through recursion and across call edges
 //! (`spec/01` §8).
 
-use marv_core::ir::Def;
-use marv_core::lower_module;
-use marv_store::{commit, resolve, CommitStatus, Lockfile, Store};
+use marv_core::ir::{Atom, Core, Def, DefKind, EffectRow, IntTy, Type};
+use marv_core::{lower_module, symbol_hash};
+use marv_store::{commit, resolve, CommitStatus, Lockfile, Store, StoreDir};
 use std::collections::HashMap;
 
 /// Lower a source module into `(name, Def)` pairs in source order.
@@ -147,4 +147,119 @@ fn already_reviewed_query() {
     assert!(
         !store.is_reviewed("b3:0000000000000000000000000000000000000000000000000000000000000000")
     );
+}
+
+fn fn_calling(qualified: &str) -> Def {
+    Def {
+        kind: DefKind::Fn,
+        ty: Type::Arrow {
+            param: Box::new(Type::Int(IntTy::I64)),
+            ret: Box::new(Type::Int(IntTy::I64)),
+            effects: EffectRow::default(),
+        },
+        requires: Vec::new(),
+        ensures: Vec::new(),
+        body: Some(Core::Lam {
+            param: Type::Int(IntTy::I64),
+            effects: EffectRow::default(),
+            body: Box::new(Core::App {
+                func: Atom::Global(symbol_hash(qualified)),
+                arg: Atom::Var(0),
+            }),
+        }),
+    }
+}
+
+#[test]
+fn closure_fetches_lockfile_pinned_external_deps() {
+    let mut store = Store::new();
+    let mut lock = Lockfile::new();
+    commit(
+        &mut store,
+        &mut lock,
+        "lib",
+        &lower("mod lib\npure fn inc(x: i64) -> i64 {\n    x + 1\n}\n"),
+    );
+    let lib_hash = lock.get("lib.inc").unwrap().clone();
+
+    let app_defs = vec![("run".to_string(), fn_calling("lib.inc"))];
+    let resolved = resolve("app", &app_defs, &lock.external_index());
+    assert!(
+        resolved.deps[0].iter().any(|h| h.to_b3() == lib_hash),
+        "app.run records the pinned lib.inc hash as a Merkle edge"
+    );
+
+    let closure = store
+        .closure_for_hashes(std::slice::from_ref(&lib_hash))
+        .unwrap();
+    assert_eq!(closure.defs.len(), 1);
+    assert_eq!(closure.defs[0].hash, lib_hash);
+}
+
+#[test]
+fn store_dir_persists_content_addressed_blobs() {
+    let root = std::env::temp_dir().join(format!("marv-store-blobs-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+
+    let mut store = Store::new();
+    let mut lock = Lockfile::new();
+    commit(&mut store, &mut lock, "demo", &lower(FACTORIAL));
+    let dir = StoreDir::new(&root);
+    dir.save(&store, &lock).expect("save blob store");
+
+    assert!(
+        !root.join("store.json").exists(),
+        "new persistence writes per-hash blobs, not the legacy monolith"
+    );
+    let blob_count = count_json_files(&root.join("blobs").join("b3"));
+    assert_eq!(blob_count, store.len(), "one JSON blob per stored def");
+
+    let (loaded_store, loaded_lock) = dir.load().expect("load blob store");
+    assert_eq!(loaded_store.len(), store.len());
+    assert_eq!(loaded_lock.bindings, lock.bindings);
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn audit_and_gc_track_lockfile_reachability() {
+    let mut store = Store::new();
+    let mut lock = Lockfile::new();
+    commit(
+        &mut store,
+        &mut lock,
+        "live",
+        &lower("mod live\npure fn keep(x: i64) -> i64 {\n    x + 1\n}\n"),
+    );
+    let mut other_lock = Lockfile::new();
+    commit(
+        &mut store,
+        &mut other_lock,
+        "dead",
+        &lower("mod dead\npure fn drop_me(x: i64) -> i64 {\n    x - 1\n}\n"),
+    );
+    assert_eq!(store.len(), 2);
+
+    let audit = store.audit(&lock);
+    assert_eq!(audit.entries.iter().filter(|e| e.reachable).count(), 1);
+    assert_eq!(audit.entries.iter().filter(|e| !e.reachable).count(), 1);
+
+    let gc = store.gc(&lock);
+    assert_eq!(gc.removed.len(), 1);
+    assert_eq!(gc.retained, 1);
+    assert_eq!(store.len(), 1);
+}
+
+fn count_json_files(root: &std::path::Path) -> usize {
+    let mut n = 0;
+    if let Ok(entries) = std::fs::read_dir(root) {
+        for entry in entries.flatten() {
+            if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                n += count_json_files(&entry.path());
+            } else if entry.path().extension().and_then(|s| s.to_str()) == Some("json") {
+                n += 1;
+            }
+        }
+    }
+    n
 }

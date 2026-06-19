@@ -15,11 +15,12 @@ marv <command> [args]
 |---------|--------|-------------|
 | `fmt`    | **working** (M0, parse-and-reprint + whitespace fallback) | Canonicalize marv source. |
 | `check`  | **working** (M2) | Type / effect / capability / error-set / reference / linearity checking. |
-| `build`  | **working** (M4 `native-cranelift`, M5 `wasm-component`) | Compile a target: Cranelift JIT or a WebAssembly module. |
-| `run`    | **working** (M4) | Interpret an entry point with an explicit capability grant set. |
+| `build`  | **working** (M4 `native-cranelift`, M5 `wasm-component`, MARV-14 pinned store) | Compile a target: Cranelift JIT or a WebAssembly module. |
+| `run`    | **working** (M4, MARV-14 pinned store) | Interpret an entry point with an explicit capability grant set. |
 | `resolve-impl` | **working** (MARV-5) | Report each generic instantiation and which coherent `impl` its bounded type arguments select. |
 | `verify` | **working** (M6, Tier 2) | Discharge `requires`/`ensures` contracts via SMT. |
-| `commit` | **working** (M7) | Freeze definitions into the content-addressed store; report the lockfile delta. |
+| `commit` | **working** (M7/MARV-14) | Freeze definitions into the content-addressed store; report the lockfile delta. |
+| `store audit/gc` | **working** (MARV-14) | Inspect blob provenance/reachability or collect unreachable blobs. |
 
 `check`, `build`, `run`, `verify`, and `commit` accept either a `.mv` **source** file (parsed and
 lowered through the front end) or a `*.core.json` **Core-IR snapshot**
@@ -39,8 +40,9 @@ real constructors with the imported enum's nominal and tags, so
 `marv check std/result.mv` works standalone. If an imported enum's source cannot
 be resolved (the named `std` module has no file, or the import is not `std.*`),
 referencing its constructors is a clear lower error naming the import and its
-module. General cross-module linking via the content store is MARV-14; this is
-the minimal resolution the capability and enum surfaces need.
+module. `build --store` / `run --store` now use the content store for pinned
+hash linking; the source loader still parses `std/` so the current std surface
+can typecheck while std is being grown.
 
 ## `marv fmt`
 
@@ -104,7 +106,7 @@ marv check tests/run/uses_ungranted_cap.core.json   # reports E0110, exits 1
 ## `marv run`
 
 ```
-marv run [--grant CAP,CAP] [--entry NAME] <file> [args...]
+marv run [--grant CAP,CAP] [--entry NAME] [--store DIR] <file> [args...]
 ```
 
 Interprets an entry point with the tree-walking interpreter (`marv-interp`) —
@@ -116,6 +118,8 @@ there are errors.
   ungranted capability makes the entry un-runnable (`spec/03` §4.5, the sandbox).
 - **`--entry`** — which function to call. Defaults to `main`, or the sole
   function if there is exactly one.
+- **`--store DIR`** — use the lockfile-pinned dependency closure from `DIR`
+  before interpreting, so calls resolve by dag hash rather than source names.
 - **`[args...]`** — fill the entry's non-capability value parameters, in order
   (parsed at each parameter's type).
 
@@ -136,7 +140,7 @@ marv run examples/hello.mv                              # refused: capability `I
 ## `marv build`
 
 ```
-marv build [--target T] [--run] [--release] [--out PATH] [--entry NAME] <file> [args...]
+marv build [--target T] [--run] [--release] [--store DIR] [--out PATH] [--entry NAME] <file> [args...]
 ```
 
 Compiles with the selected backend. Like `run`, it first runs `check` and
@@ -174,6 +178,9 @@ always operate on every definition; pruning is a `build` behavior only.
   [run-and-codegen.md](run-and-codegen.md).
 - **`--out PATH`** *(wasm only)* — where to write the `.wasm` module (default
   `<file>.wasm`).
+- **`--store DIR`** — resolve known imports through `DIR/lockfile.json`, fetch
+  their transitive closure from `DIR/blobs/b3/`, and compile Core whose calls
+  are keyed by pinned dag hashes. Missing blobs are hard errors.
 - **`--entry`** / **`[args...]`** — as for `run` (integer arguments).
 
 ### `--target native-cranelift`
@@ -273,7 +280,27 @@ marv commit examples/clamp.mv          # = math.clamp  b3:d94f…  (already revi
 ```
 
 See [`store.md`](store.md) for the dag-hash / Merkle-DAG scheme, free renames,
-dedup, the lockfile, and how this underpins Stage-1 self-hosting.
+dedup, the blob layout, pinned builds, GC/audit commands, and how this
+underpins Stage-1 self-hosting.
+
+## `marv store audit`
+
+```
+marv store audit [--store DIR]
+```
+
+Prints every stored blob with its hash, last-seen name, reviewed flag, lockfile
+reachability, dependency count, and unsafe-site count. `unsafe` is still
+future surface syntax, so current blobs report zero unsafe sites.
+
+## `marv store gc`
+
+```
+marv store gc [--store DIR]
+```
+
+Removes blobs not reachable from any current lockfile binding and rewrites the
+content-addressed blob directory.
 
 ## Exit codes
 

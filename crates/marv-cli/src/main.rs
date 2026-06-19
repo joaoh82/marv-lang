@@ -15,13 +15,16 @@
 
 mod pipeline;
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, Read, Write};
 use std::process::ExitCode;
 
 use marv_codegen_cl as codegen;
 use marv_codegen_wasm as wasm;
+use marv_core::ir::{Def, DefKind, Hash, Type};
 use marv_interp::Program;
-use marv_store::{commit, CommitStatus, StoreDir};
+use marv_store::{commit_with_meta, resolve, CommitStatus, DefMeta, Store, StoreDir, StoredDef};
+use marv_types::{OpSig, World, WorldBuilder};
 use marv_verify::{verify_def, VerifyOutcome};
 
 use pipeline::{any_errors, load, print_diags, Loaded};
@@ -57,6 +60,8 @@ COMMANDS:
                                compiled. Debug builds (the default) carry the
                                Tier-1 bounds check on runtime element
                                reads/stores; --release omits it.
+                               With --store DIR, resolve imports through DIR's
+                               lockfile and build from fetched pinned hashes.
     run [--grant CAP,CAP] [--entry NAME] <file> [args...]
                                Interpret an entry point (the semantics oracle).
                                Capabilities enter only through --grant; the
@@ -72,6 +77,8 @@ COMMANDS:
                                lockfile, and report the delta (new vs. already
                                reviewed). Identity is the content (dag) hash, so
                                re-committing is idempotent and renames are free.
+    store audit [--store DIR]  Print reviewed/reachable provenance for blobs.
+    store gc [--store DIR]     Remove blobs unreachable from the lockfile.
 
     -h, --help                 Print this help.
 ";
@@ -98,6 +105,7 @@ fn main() -> ExitCode {
         "resolve-impl" => cmd_resolve_impl(rest),
         "verify" => cmd_verify(rest),
         "commit" => cmd_commit(rest),
+        "store" => cmd_store(rest),
         other => {
             eprintln!("marv: unknown command `{other}`\n");
             eprint!("{USAGE}");
@@ -352,7 +360,8 @@ fn cmd_commit(args: &[String]) -> ExitCode {
         }
     };
 
-    let report = commit(&mut store, &mut lock, &loaded.module_path, &loaded.defs);
+    let entries = loaded.store_entries();
+    let report = commit_with_meta(&mut store, &mut lock, &loaded.module_path, &entries);
 
     for e in &report.entries {
         let short = &e.hash[..e.hash.len().min(15)];
@@ -388,6 +397,94 @@ fn cmd_commit(args: &[String]) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+fn cmd_store(args: &[String]) -> ExitCode {
+    let Some(action) = args.first() else {
+        eprintln!("marv store: expected `audit` or `gc`");
+        return ExitCode::FAILURE;
+    };
+    let mut store_dir = ".marv".to_string();
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--store" => {
+                i += 1;
+                match args.get(i) {
+                    Some(v) => store_dir = v.clone(),
+                    None => {
+                        eprintln!("marv store {action}: --store requires a value");
+                        return ExitCode::FAILURE;
+                    }
+                }
+            }
+            f if f.starts_with("--") => {
+                eprintln!("marv store {action}: unknown flag `{f}`");
+                return ExitCode::FAILURE;
+            }
+            extra => {
+                eprintln!("marv store {action}: unexpected argument `{extra}`");
+                return ExitCode::FAILURE;
+            }
+        }
+        i += 1;
+    }
+
+    let dir = StoreDir::new(&store_dir);
+    let (mut store, lock) = match dir.load() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("marv store {action}: {store_dir}: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    match action.as_str() {
+        "audit" => {
+            let report = store.audit(&lock);
+            for e in &report.entries {
+                let reach = if e.reachable {
+                    "reachable"
+                } else {
+                    "unreachable"
+                };
+                let review = if e.reviewed { "reviewed" } else { "unreviewed" };
+                println!(
+                    "{}  {}  {review}  {reach}  deps:{}  unsafe:{}",
+                    e.hash,
+                    e.name,
+                    e.deps.len(),
+                    e.unsafe_sites.len()
+                );
+            }
+            eprintln!(
+                "marv store audit: {} blob(s), {} lock binding(s) in {store_dir}",
+                report.entries.len(),
+                lock.bindings.len()
+            );
+            ExitCode::SUCCESS
+        }
+        "gc" => {
+            let report = store.gc(&lock);
+            for hash in &report.removed {
+                println!("  - {hash}");
+            }
+            if let Err(e) = dir.save(&store, &lock) {
+                eprintln!("marv store gc: {store_dir}: {e}");
+                return ExitCode::FAILURE;
+            }
+            eprintln!(
+                "marv store gc: removed {} blob(s), retained {} in {store_dir}",
+                report.removed.len(),
+                report.retained
+            );
+            ExitCode::SUCCESS
+        }
+        other => {
+            eprintln!("marv store: unknown action `{other}` (expected `audit` or `gc`)");
+            ExitCode::FAILURE
+        }
+    }
+}
+
 // ---- check --------------------------------------------------------------
 
 /// `marv check <file>` — run the M2 checker and print every diagnostic.
@@ -414,6 +511,214 @@ fn cmd_check(args: &[String]) -> ExitCode {
             loaded.defs.len()
         );
         ExitCode::SUCCESS
+    }
+}
+
+impl Loaded {
+    fn store_entries(&self) -> Vec<(String, Def, DefMeta)> {
+        self.defs
+            .iter()
+            .zip(self.store_meta.iter())
+            .map(|((name, def), meta)| (name.clone(), def.clone(), meta.clone()))
+            .collect()
+    }
+}
+
+#[derive(Clone)]
+struct PinnedDef {
+    hash: Hash,
+    name: String,
+    def: Def,
+    meta: DefMeta,
+}
+
+struct PinnedProgram {
+    defs: Vec<PinnedDef>,
+    aliases: Vec<(String, Hash)>,
+    world: World,
+}
+
+impl PinnedProgram {
+    fn defs_for_backend(&self) -> Vec<(Hash, String, Def)> {
+        self.defs
+            .iter()
+            .map(|d| (d.hash, d.name.clone(), d.def.clone()))
+            .collect()
+    }
+}
+
+fn pin_loaded(loaded: &Loaded, store_dir: &str, entry: &str) -> Result<PinnedProgram, String> {
+    let dir = StoreDir::new(store_dir);
+    let (store, lock) = dir.load().map_err(|e| format!("{store_dir}: {e}"))?;
+    let external = lock.external_index();
+    let resolved = resolve(&loaded.module_path, &loaded.defs, &external);
+
+    let mut local: BTreeMap<String, StoredDef> = BTreeMap::new();
+    let mut aliases = Vec::new();
+    for (i, (name, _)) in loaded.defs.iter().enumerate() {
+        let hash = resolved.dag_hashes[i].to_b3();
+        let qualified = qualify_name(&loaded.module_path, name);
+        aliases.push((name.clone(), resolved.dag_hashes[i]));
+        aliases.push((qualified.clone(), resolved.dag_hashes[i]));
+        let deps = resolved.deps[i].iter().map(|h| h.to_b3()).collect();
+        local.insert(
+            hash.clone(),
+            StoredDef {
+                hash,
+                name: qualified,
+                def: resolved.resolved_defs[i].clone(),
+                meta: loaded.store_meta[i].clone(),
+                deps,
+                reviewed: false,
+            },
+        );
+    }
+
+    let roots = root_hashes(loaded, &resolved.dag_hashes, entry);
+    let mut seen = BTreeSet::new();
+    let mut defs = Vec::new();
+    for root in roots {
+        visit_pinned(&root.to_b3(), &local, &store, &mut seen, &mut defs)?;
+    }
+    let world = world_for_pinned(&defs);
+    Ok(PinnedProgram {
+        defs,
+        aliases,
+        world,
+    })
+}
+
+fn visit_pinned(
+    hash: &str,
+    local: &BTreeMap<String, StoredDef>,
+    store: &Store,
+    seen: &mut BTreeSet<String>,
+    out: &mut Vec<PinnedDef>,
+) -> Result<(), String> {
+    if !seen.insert(hash.to_string()) {
+        return Ok(());
+    }
+    let blob = local
+        .get(hash)
+        .cloned()
+        .or_else(|| store.get(hash).cloned())
+        .ok_or_else(|| format!("store is missing pinned dependency `{hash}`"))?;
+    let parsed =
+        Hash::from_b3(&blob.hash).ok_or_else(|| format!("invalid hash `{}`", blob.hash))?;
+    out.push(PinnedDef {
+        hash: parsed,
+        name: blob.name.clone(),
+        def: blob.def.clone(),
+        meta: blob.meta.clone(),
+    });
+    for dep in &blob.deps {
+        visit_pinned(dep, local, store, seen, out)?;
+    }
+    Ok(())
+}
+
+fn root_hashes(loaded: &Loaded, hashes: &[Hash], entry: &str) -> Vec<Hash> {
+    let concrete_fn = |def: &Def| def.kind == DefKind::Fn && !def.ty.is_polymorphic();
+    if !entry.is_empty() {
+        if let Some((idx, _)) = loaded.defs.iter().enumerate().find(|(_, (name, def))| {
+            concrete_fn(def) && (name == entry || qualify_name(&loaded.module_path, name) == entry)
+        }) {
+            return vec![hashes[idx]];
+        }
+        return hashes.to_vec();
+    }
+    if let Some((idx, _)) = loaded
+        .defs
+        .iter()
+        .enumerate()
+        .find(|(_, (name, def))| name == "main" && concrete_fn(def))
+    {
+        return vec![hashes[idx]];
+    }
+    let fns: Vec<_> = loaded
+        .defs
+        .iter()
+        .enumerate()
+        .filter(|(_, (_, def))| concrete_fn(def))
+        .map(|(idx, _)| hashes[idx])
+        .collect();
+    match fns.as_slice() {
+        [h] => vec![*h],
+        _ => hashes.to_vec(),
+    }
+}
+
+fn world_for_pinned(defs: &[PinnedDef]) -> World {
+    let mut b = WorldBuilder::new();
+    for d in defs {
+        match d.def.kind {
+            DefKind::Struct => {
+                let (fields, linear) = struct_fields(&d.def.ty);
+                b = b.struct_hash(d.hash, d.name.clone(), fields, linear);
+            }
+            DefKind::Enum => {
+                let variants = d
+                    .meta
+                    .enum_variants
+                    .iter()
+                    .map(|v| (v.name.clone(), v.fields.clone()))
+                    .collect();
+                b = b.enum_hash(d.hash, d.name.clone(), variants);
+            }
+            DefKind::Error => {
+                let variants = d
+                    .meta
+                    .enum_variants
+                    .iter()
+                    .map(|v| (v.name.clone(), v.fields.clone()))
+                    .collect();
+                b = b.error_hash(d.hash, d.name.clone(), Vec::new()).enum_hash(
+                    d.hash,
+                    d.name.clone(),
+                    variants,
+                );
+            }
+            DefKind::Interface if !d.meta.capability_ops.is_empty() => {
+                let ops: Vec<OpSig> = d
+                    .meta
+                    .capability_ops
+                    .iter()
+                    .map(|op| OpSig {
+                        params: op.params.clone(),
+                        ret: op.ret.clone(),
+                        errors: op.errors.clone(),
+                    })
+                    .collect();
+                let bare = d.name.rsplit('.').next().unwrap_or(&d.name).to_string();
+                b = b
+                    .cap_hash(d.hash, bare.clone(), ops.clone())
+                    .cap(&bare, ops);
+            }
+            DefKind::Interface => {}
+            _ => {
+                b = b.global_hash(d.hash, d.def.ty.clone());
+            }
+        }
+    }
+    b.build()
+}
+
+fn struct_fields(ty: &Type) -> (Vec<Type>, bool) {
+    match ty {
+        Type::Linear(inner) => {
+            let (fields, _) = struct_fields(inner);
+            (fields, true)
+        }
+        Type::Tuple(fields) => (fields.clone(), false),
+        other => (vec![other.clone()], false),
+    }
+}
+
+fn qualify_name(module_path: &str, name: &str) -> String {
+    if module_path.is_empty() {
+        name.to_string()
+    } else {
+        format!("{module_path}.{name}")
     }
 }
 
@@ -457,6 +762,27 @@ fn cmd_build(args: &[String]) -> ExitCode {
         return ExitCode::FAILURE;
     }
 
+    if let Some(store_dir) = &inv.store_dir {
+        let pinned = match pin_loaded(&loaded, store_dir, &inv.entry) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("marv build: {e}");
+                return ExitCode::FAILURE;
+            }
+        };
+        return match inv.target.as_str() {
+            "native-cranelift" => build_native_pinned(&inv, &file, &pinned),
+            "wasm-component" | "wasm" => build_wasm_pinned(&inv, &file, &pinned),
+            other => {
+                eprintln!(
+                    "marv build: unsupported target `{other}` (have `native-cranelift`, \
+                     `wasm-component`; LLVM is a later milestone)"
+                );
+                ExitCode::FAILURE
+            }
+        };
+    }
+
     match inv.target.as_str() {
         "native-cranelift" => build_native(&inv, &file, &loaded),
         // `wasm-component` is the spec's name for the WASM target; today the
@@ -471,6 +797,95 @@ fn cmd_build(args: &[String]) -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+fn build_native_pinned(inv: &Invocation, file: &str, pinned: &PinnedProgram) -> ExitCode {
+    let opts = codegen::Options {
+        bounds_checks: !inv.release,
+    };
+    let jit = match codegen::compile_hashed_reachable(
+        &pinned.defs_for_backend(),
+        &pinned.aliases,
+        &pinned.world,
+        &opts,
+        &inv.entry,
+    ) {
+        Ok(j) => j,
+        Err(e) => {
+            eprintln!("marv build: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let arity = match jit.entry_arity(&inv.entry) {
+        Ok(n) => n,
+        Err(e) => {
+            eprintln!("marv build: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    if !inv.run {
+        eprintln!(
+            "marv build: {file}: compiled from pinned hashes via native-cranelift \
+             (entry takes {arity} word argument(s))"
+        );
+        return ExitCode::SUCCESS;
+    }
+    let ints = match parse_int_args(&inv.args, arity) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("marv build: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    match jit.run_i64(&inv.entry, &ints) {
+        Ok(v) => {
+            println!("{v}");
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("marv build: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn build_wasm_pinned(inv: &Invocation, file: &str, pinned: &PinnedProgram) -> ExitCode {
+    let opts = wasm::Options {
+        bounds_checks: !inv.release,
+    };
+    let artifact = match wasm::compile_hashed_reachable(
+        &pinned.defs_for_backend(),
+        &pinned.aliases,
+        &pinned.world,
+        &opts,
+        &inv.entry,
+    ) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("marv build: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let out = inv.out.clone().unwrap_or_else(|| default_wasm_out(file));
+    if let Err(e) = std::fs::write(&out, &artifact.bytes) {
+        eprintln!("marv build: {out}: {e}");
+        return ExitCode::FAILURE;
+    }
+    eprintln!(
+        "marv build: {file}: wrote {out} ({} bytes) from pinned hashes via wasm-component",
+        artifact.bytes.len()
+    );
+    if artifact.imports.is_empty() {
+        eprintln!("  capabilities required: none (pure — imports nothing)");
+    } else {
+        eprintln!("  capabilities required (host imports):");
+        for imp in &artifact.imports {
+            eprintln!("    {}::op{} ({} arg(s))", imp.cap, imp.op, imp.params);
+        }
+    }
+    eprintln!("  exports: {}", join_exports(&artifact.exports));
+    ExitCode::SUCCESS
 }
 
 /// Cranelift backend: JIT-compile, and with `--run` execute the entry point.
@@ -631,13 +1046,24 @@ fn cmd_run(args: &[String]) -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    let Loaded {
-        module_path,
-        defs,
-        world,
-        ..
-    } = loaded;
-    let program = Program::new(&module_path, defs, world);
+    let program = if let Some(store_dir) = &inv.store_dir {
+        let pinned = match pin_loaded(&loaded, store_dir, &inv.entry) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("marv run: {e}");
+                return ExitCode::FAILURE;
+            }
+        };
+        Program::new_hashed(pinned.defs_for_backend(), pinned.aliases, pinned.world)
+    } else {
+        let Loaded {
+            module_path,
+            defs,
+            world,
+            ..
+        } = loaded;
+        Program::new(&module_path, defs, world)
+    };
     match program.run(&inv.entry, &inv.grant, &inv.args) {
         Ok(outcome) => {
             println!("{}", outcome.value.render());
@@ -667,6 +1093,8 @@ struct Invocation {
     grant: Vec<String>,
     /// Output path for `build` artifacts (`--out`/`-o`); defaults per target.
     out: Option<String>,
+    /// Content store to resolve imports/build dependencies from.
+    store_dir: Option<String>,
     file: Option<String>,
     args: Vec<String>,
 }
@@ -682,6 +1110,7 @@ fn parse_invocation(args: &[String]) -> Result<Invocation, String> {
         entry: String::new(),
         grant: Vec::new(),
         out: None,
+        store_dir: None,
         file: None,
         args: Vec::new(),
     };
@@ -702,6 +1131,7 @@ fn parse_invocation(args: &[String]) -> Result<Invocation, String> {
             "--release" => inv.release = true,
             "--target" => inv.target = take_value(args, &mut i, "--target")?,
             "--out" | "-o" => inv.out = Some(take_value(args, &mut i, "--out")?),
+            "--store" => inv.store_dir = Some(take_value(args, &mut i, "--store")?),
             "--entry" => inv.entry = take_value(args, &mut i, "--entry")?,
             "--grant" => {
                 let list = take_value(args, &mut i, "--grant")?;

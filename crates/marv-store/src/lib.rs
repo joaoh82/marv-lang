@@ -20,13 +20,46 @@
 
 mod resolve;
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
 
-use marv_core::ir::{Def, Hash};
+use marv_core::ir::{Def, Hash, Type};
 use serde::{Deserialize, Serialize};
 
 pub use resolve::{resolve, Resolved};
+
+/// Declaration metadata that lives beside the name-erased Core definition.
+/// Core carries the structural type, but enum variant names/field lists and
+/// capability operation signatures are needed to rebuild a checker/codegen
+/// world after fetching definitions by hash.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct DefMeta {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub enum_variants: Vec<StoredVariant>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capability_ops: Vec<StoredOpSig>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StoredVariant {
+    pub name: String,
+    #[serde(default)]
+    pub fields: Vec<Type>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StoredOpSig {
+    #[serde(default)]
+    pub params: Vec<Type>,
+    #[serde(default = "unit_type")]
+    pub ret: Type,
+    #[serde(default)]
+    pub errors: Vec<Hash>,
+}
+
+fn unit_type() -> Type {
+    Type::Unit
+}
 
 /// One stored definition, keyed in the [`Store`] by its dag hash. Identity is
 /// the hash; `name` is the last label seen (informational — renaming does not
@@ -39,6 +72,10 @@ pub struct StoredDef {
     pub name: String,
     /// The name-free, references-resolved Core definition (the Merkle node).
     pub def: Def,
+    /// Non-hashed declaration metadata needed when this blob is fetched without
+    /// the original source module.
+    #[serde(default)]
+    pub meta: DefMeta,
     /// Dag hashes this definition references — its Merkle-DAG out-edges.
     pub deps: Vec<String>,
     /// Whether this exact hash has been frozen/reviewed (`spec/01` §8 provenance).
@@ -59,6 +96,54 @@ pub struct Store {
 pub struct Lockfile {
     /// Qualified name (`math.clamp`) → dag hash (`b3:…`).
     pub bindings: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StoreError {
+    MissingLockBinding(String),
+    InvalidHash(String),
+    MissingDef(String),
+}
+
+impl std::fmt::Display for StoreError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            StoreError::MissingLockBinding(n) => write!(f, "lockfile has no binding for `{n}`"),
+            StoreError::InvalidHash(h) => write!(f, "`{h}` is not a valid b3 hash"),
+            StoreError::MissingDef(h) => write!(f, "store is missing blob `{h}`"),
+        }
+    }
+}
+
+impl std::error::Error for StoreError {}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Closure {
+    /// Fetched definitions in deterministic DFS order, roots first.
+    pub defs: Vec<StoredDef>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GcReport {
+    pub removed: Vec<String>,
+    pub retained: usize,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AuditReport {
+    pub entries: Vec<AuditEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuditEntry {
+    pub hash: String,
+    pub name: String,
+    pub reviewed: bool,
+    pub reachable: bool,
+    pub deps: Vec<String>,
+    /// Placeholder for `marv/unsafeSites`; unsafe surface syntax is still spec
+    /// only, so current Core blobs have no unsafe-site metadata to report.
+    pub unsafe_sites: Vec<String>,
 }
 
 /// Whether a committed definition was new to the store or already present
@@ -145,7 +230,7 @@ impl Lockfile {
 
     /// `symbol_hash(qualified) → dag_hash` for every binding — the table
     /// [`resolve`] uses to link a new module against already-committed ones.
-    fn external_index(&self) -> HashMap<Hash, Hash> {
+    pub fn external_index(&self) -> HashMap<Hash, Hash> {
         let mut idx = HashMap::new();
         for (name, hash) in &self.bindings {
             if let Some(h) = Hash::from_b3(hash) {
@@ -179,11 +264,31 @@ pub fn commit(
     module_path: &str,
     defs: &[(String, Def)],
 ) -> CommitReport {
+    let entries: Vec<(String, Def, DefMeta)> = defs
+        .iter()
+        .map(|(name, def)| (name.clone(), def.clone(), DefMeta::default()))
+        .collect();
+    commit_with_meta(store, lock, module_path, &entries)
+}
+
+/// [`commit`] with declaration metadata supplied by the front end. The metadata
+/// is not part of the content identity; it lets fetched blobs reconstruct the
+/// declaration world needed by checkers/backends.
+pub fn commit_with_meta(
+    store: &mut Store,
+    lock: &mut Lockfile,
+    module_path: &str,
+    defs: &[(String, Def, DefMeta)],
+) -> CommitReport {
     let external = lock.external_index();
-    let resolved = resolve(module_path, defs, &external);
+    let core_defs: Vec<(String, Def)> = defs
+        .iter()
+        .map(|(name, def, _)| (name.clone(), def.clone()))
+        .collect();
+    let resolved = resolve(module_path, &core_defs, &external);
 
     let mut report = CommitReport::default();
-    for (i, (name, _)) in defs.iter().enumerate() {
+    for (i, (name, _, meta)) in defs.iter().enumerate() {
         let qualified = qualify(module_path, name);
         let hash = resolved.dag_hashes[i].to_b3();
 
@@ -199,6 +304,7 @@ pub fn commit(
                     hash: hash.clone(),
                     name: name.clone(),
                     def: resolved.resolved_defs[i].clone(),
+                    meta: meta.clone(),
                     deps,
                     reviewed: true,
                 },
@@ -224,6 +330,111 @@ pub fn commit(
     report
 }
 
+impl Store {
+    /// Fetch one blob by hash.
+    pub fn fetch(&self, hash: &str) -> Result<&StoredDef, StoreError> {
+        if Hash::from_b3(hash).is_none() {
+            return Err(StoreError::InvalidHash(hash.to_string()));
+        }
+        self.defs
+            .get(hash)
+            .ok_or_else(|| StoreError::MissingDef(hash.to_string()))
+    }
+
+    /// Resolve the full transitive closure rooted at lockfile names.
+    pub fn closure_for_names(
+        &self,
+        lock: &Lockfile,
+        roots: &[String],
+    ) -> Result<Closure, StoreError> {
+        let mut hashes = Vec::new();
+        for root in roots {
+            let hash = lock
+                .bindings
+                .get(root)
+                .ok_or_else(|| StoreError::MissingLockBinding(root.clone()))?;
+            hashes.push(hash.clone());
+        }
+        self.closure_for_hashes(&hashes)
+    }
+
+    /// Resolve the full transitive closure rooted at concrete dag hashes.
+    pub fn closure_for_hashes(&self, roots: &[String]) -> Result<Closure, StoreError> {
+        let mut out = Vec::new();
+        let mut seen = BTreeSet::new();
+        for root in roots {
+            self.visit_closure(root, &mut seen, &mut out)?;
+        }
+        Ok(Closure { defs: out })
+    }
+
+    fn visit_closure(
+        &self,
+        hash: &str,
+        seen: &mut BTreeSet<String>,
+        out: &mut Vec<StoredDef>,
+    ) -> Result<(), StoreError> {
+        if !seen.insert(hash.to_string()) {
+            return Ok(());
+        }
+        let def = self.fetch(hash)?.clone();
+        out.push(def.clone());
+        for dep in &def.deps {
+            self.visit_closure(dep, seen, out)?;
+        }
+        Ok(())
+    }
+
+    /// Remove blobs unreachable from every lockfile binding.
+    pub fn gc(&mut self, lock: &Lockfile) -> GcReport {
+        let roots: Vec<String> = lock.bindings.values().cloned().collect();
+        let reachable = match self.closure_for_hashes(&roots) {
+            Ok(c) => c.defs.into_iter().map(|d| d.hash).collect::<BTreeSet<_>>(),
+            Err(_) => {
+                return GcReport {
+                    removed: Vec::new(),
+                    retained: self.defs.len(),
+                }
+            }
+        };
+        let before: Vec<String> = self.defs.keys().cloned().collect();
+        let mut removed = Vec::new();
+        for hash in before {
+            if !reachable.contains(&hash) {
+                self.defs.remove(&hash);
+                removed.push(hash);
+            }
+        }
+        GcReport {
+            removed,
+            retained: self.defs.len(),
+        }
+    }
+
+    /// Provenance/audit view over the store, marking blobs reachable from the
+    /// current lockfile and listing their Merkle-DAG edges.
+    pub fn audit(&self, lock: &Lockfile) -> AuditReport {
+        let roots: Vec<String> = lock.bindings.values().cloned().collect();
+        let reachable = self
+            .closure_for_hashes(&roots)
+            .map(|c| c.defs.into_iter().map(|d| d.hash).collect::<BTreeSet<_>>())
+            .unwrap_or_default();
+        let entries = self
+            .defs
+            .values()
+            .map(|d| AuditEntry {
+                hash: d.hash.clone(),
+                name: d.name.clone(),
+                reviewed: d.reviewed,
+                reachable: reachable.contains(&d.hash),
+                deps: d.deps.clone(),
+                unsafe_sites: Vec::new(),
+            })
+            .collect();
+        AuditReport { entries }
+    }
+}
+
 // ---- persistence --------------------------------------------------------
 
 /// The on-disk store/lockfile pair under a directory (default `.marv/`).
@@ -241,17 +452,29 @@ impl StoreDir {
     fn store_path(&self) -> std::path::PathBuf {
         self.root.join("store.json")
     }
+    fn blobs_dir(&self) -> std::path::PathBuf {
+        self.root.join("blobs").join("b3")
+    }
+    fn blob_path(&self, hash: &str) -> std::path::PathBuf {
+        let hex = hash.strip_prefix("b3:").unwrap_or(hash);
+        let (prefix, rest) = hex.split_at(hex.len().min(2));
+        self.blobs_dir().join(prefix).join(format!("{rest}.json"))
+    }
     fn lock_path(&self) -> std::path::PathBuf {
         self.root.join("lockfile.json")
     }
 
     /// Load the store and lockfile, or empty ones if they do not exist yet.
     pub fn load(&self) -> std::io::Result<(Store, Lockfile)> {
-        let store = match std::fs::read_to_string(self.store_path()) {
-            Ok(s) => serde_json::from_str(&s).map_err(to_io)?,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Store::new(),
-            Err(e) => return Err(e),
-        };
+        let mut store = self.load_blobs()?;
+        // Backward-compatible migration path from the original single JSON file.
+        if store.is_empty() {
+            store = match std::fs::read_to_string(self.store_path()) {
+                Ok(s) => serde_json::from_str(&s).map_err(to_io)?,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Store::new(),
+                Err(e) => return Err(e),
+            };
+        }
         let lock = match std::fs::read_to_string(self.lock_path()) {
             Ok(s) => serde_json::from_str(&s).map_err(to_io)?,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Lockfile::new(),
@@ -260,18 +483,82 @@ impl StoreDir {
         Ok((store, lock))
     }
 
-    /// Write the store and lockfile (creating the directory if needed),
-    /// pretty-printed and deterministically ordered.
+    /// Write the content-addressed blob store and lockfile (creating the
+    /// directory if needed), pretty-printed and deterministically ordered.
     pub fn save(&self, store: &Store, lock: &Lockfile) -> std::io::Result<()> {
         std::fs::create_dir_all(&self.root)?;
-        std::fs::write(
-            self.store_path(),
-            serde_json::to_string_pretty(store).map_err(to_io)?,
-        )?;
+        std::fs::create_dir_all(self.blobs_dir())?;
+        self.prune_blob_files(store)?;
+        for (hash, def) in &store.defs {
+            let path = self.blob_path(hash);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(path, serde_json::to_string_pretty(def).map_err(to_io)?)?;
+        }
         std::fs::write(
             self.lock_path(),
             serde_json::to_string_pretty(lock).map_err(to_io)?,
         )?;
+        Ok(())
+    }
+
+    fn load_blobs(&self) -> std::io::Result<Store> {
+        let mut store = Store::new();
+        let root = self.blobs_dir();
+        let Ok(prefixes) = std::fs::read_dir(&root) else {
+            return Ok(store);
+        };
+        for prefix in prefixes {
+            let prefix = prefix?;
+            if !prefix.file_type()?.is_dir() {
+                continue;
+            }
+            for entry in std::fs::read_dir(prefix.path())? {
+                let entry = entry?;
+                if entry.path().extension().and_then(|s| s.to_str()) != Some("json") {
+                    continue;
+                }
+                let s = std::fs::read_to_string(entry.path())?;
+                let def: StoredDef = serde_json::from_str(&s).map_err(to_io)?;
+                store.defs.insert(def.hash.clone(), def);
+            }
+        }
+        Ok(store)
+    }
+
+    fn prune_blob_files(&self, store: &Store) -> std::io::Result<()> {
+        let root = self.blobs_dir();
+        let Ok(prefixes) = std::fs::read_dir(&root) else {
+            return Ok(());
+        };
+        for prefix in prefixes {
+            let prefix = prefix?;
+            if !prefix.file_type()?.is_dir() {
+                continue;
+            }
+            for entry in std::fs::read_dir(prefix.path())? {
+                let entry = entry?;
+                let path = entry.path();
+                if path.extension().and_then(|s| s.to_str()) != Some("json") {
+                    continue;
+                }
+                let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+                    continue;
+                };
+                let Some(dir) = path
+                    .parent()
+                    .and_then(|p| p.file_name())
+                    .and_then(|s| s.to_str())
+                else {
+                    continue;
+                };
+                let hash = format!("b3:{dir}{stem}");
+                if !store.defs.contains_key(&hash) {
+                    std::fs::remove_file(path)?;
+                }
+            }
+        }
         Ok(())
     }
 }

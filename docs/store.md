@@ -29,14 +29,18 @@ Two consequences fall straight out:
 ## The store and lockfile
 
 - The **store** maps `dag hash → definition` (the name-free Merkle node, plus
-  its dependency edges and a `reviewed` flag). Identical definitions dedup to one
-  entry. Two libraries pinning *different* hashes of the "same"-named function
-  are just two keys — they coexist with no conflict (no dependency hell).
+  its dependency edges, declaration metadata, and a `reviewed` flag). Identical
+  definitions dedup to one entry. Two libraries pinning *different* hashes of
+  the "same"-named function are just two keys — they coexist with no conflict
+  (no dependency hell).
 - The **lockfile** maps `name → dag hash` — names are *labels over hashes*. It
   pins a build to an exact set of hashes (reproducibility); rebinding a name (a
   rename, or a version bump) never disturbs the stored definitions.
 
-Both persist as deterministic JSON under a store directory (default `.marv/`).
+On disk, the lockfile is deterministic JSON at `.marv/lockfile.json`, while
+definitions are individual content-addressed blobs under `.marv/blobs/b3/`.
+The loader still understands the original `.marv/store.json` monolith as a
+compatibility/import path, but new writes use one blob per dag hash.
 
 ## `marv commit`
 
@@ -63,6 +67,38 @@ $ marv commit --store .marv renamed.mv
 The same logic is exposed as `marv/commit` (`spec/03` §3.4), returning
 `{ committed: [{name, hash, status, reviewed}], added, alreadyReviewed, rebound,
 storeSize }`.
+
+## Pinned builds
+
+```
+marv build --store .marv --run app.mv --entry main
+marv run --store .marv app.mv
+```
+
+With `--store`, the CLI resolves the freshly-lowered module against the
+lockfile's `name → dag hash` bindings, rewrites known imports and local edges to
+dag hashes, fetches the full transitive dependency closure through each stored
+blob's `deps`, and hands the interpreter/backend a hash-keyed program. Missing
+dependency blobs are hard errors: a stored build never falls back to whatever
+source happens to be on disk.
+
+The current source loader still parses `std/` modules to typecheck imported
+surface declarations while the Phase-1 std surface settles. Once those modules
+parse completely, committing them pins the first real std dependency in the same
+lockfile/blob machinery.
+
+## Audit and GC
+
+```
+marv store audit [--store .marv]
+marv store gc [--store .marv]
+```
+
+`audit` prints each blob's reviewed flag, lockfile reachability, dependency
+count, and unsafe-site count. The unsafe-site list is currently empty because
+`unsafe fn` remains spec-only surface, but the view is wired so the metadata can
+land there when the parser/checker grow it. `gc` removes blobs unreachable from
+every current lockfile binding and rewrites the blob directory.
 
 ## Self-hosting
 
