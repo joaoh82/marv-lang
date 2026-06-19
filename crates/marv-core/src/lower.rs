@@ -989,6 +989,17 @@ impl Lowerer {
         }
     }
 
+    fn is_std_collection_op(&self, name: &str) -> bool {
+        matches!(
+            name,
+            "new" | "with_capacity" | "push" | "pop" | "get" | "set" | "len"
+        ) && self
+            .imports
+            .get(name)
+            .map(|m| m == "std.collections")
+            .unwrap_or(self.module_path == "std.collections")
+    }
+
     // ---- monomorphization (`spec/01` §§3.3–3.4) -------------------------
 
     /// When lowering a specialized body, resolve an interface-method `name` to the
@@ -1528,7 +1539,11 @@ impl Lowerer {
                     // Best-effort surface type for the bound name (annotation
                     // first, else inferred from the value where M1 can).
                     let vty = ty.clone().or_else(|| self.type_of_expr(value, env));
-                    let atom = self.emit_atom(value, env, b)?;
+                    let atom = if let Some(target) = ty {
+                        self.emit_atom_with_expected(value, target, env, b)?
+                    } else {
+                        self.emit_atom(value, env, b)?
+                    };
                     env.push(Binding {
                         name: name.clone(),
                         atom,
@@ -1756,6 +1771,41 @@ impl Lowerer {
 
     // ---- expressions ----------------------------------------------------
 
+    fn emit_atom_with_expected(
+        &self,
+        e: &Expr,
+        expected: &SType,
+        env: &[Binding],
+        b: &mut Builder,
+    ) -> Result<Atom, LowerError> {
+        if let Some(elem) = list_elem_stype(expected) {
+            if let Expr::Call(callee, args) = e {
+                if let Expr::Var(name) = &**callee {
+                    if self.is_std_collection_op(name) && self.resolve_local(name, env).is_none() {
+                        let alloc = args
+                            .first()
+                            .map(|a| self.emit_atom(a, env, b))
+                            .transpose()?;
+                        let cap = match (name.as_str(), args.as_slice()) {
+                            ("new", [_]) => Atom::Lit(Literal::Int(0)),
+                            ("with_capacity", [_, cap]) => self.emit_atom(cap, env, b)?,
+                            _ => return self.emit_atom(e, env, b),
+                        };
+                        let Some(alloc) = alloc else {
+                            return self.emit_atom(e, env, b);
+                        };
+                        return Ok(b.push(Core::ListNew {
+                            elem: self.lower_type(elem, &[]),
+                            alloc,
+                            capacity: cap,
+                        }));
+                    }
+                }
+            }
+        }
+        self.emit_atom(e, env, b)
+    }
+
     /// Lower `e` to an **atom**, hoisting any compound computation into a `let`
     /// recorded in `b`. Atomic expressions add no binding.
     fn emit_atom(&self, e: &Expr, env: &[Binding], b: &mut Builder) -> Result<Atom, LowerError> {
@@ -1917,8 +1967,55 @@ impl Lowerer {
                     args: vec![a],
                 }));
             }
+            if self.is_std_collection_op(name) && self.resolve_local(name, env).is_none() {
+                return self.list_builtin_call(name, args, env, b);
+            }
         }
         Ok(None)
+    }
+
+    fn list_builtin_call(
+        &self,
+        name: &str,
+        args: &[Expr],
+        env: &[Binding],
+        b: &mut Builder,
+    ) -> Result<Option<Core>, LowerError> {
+        let node = match (name, args) {
+            ("push", [alloc, list, value]) => {
+                let alloc = self.emit_atom(alloc, env, b)?;
+                let list = self.emit_atom(list, env, b)?;
+                let value = self.emit_atom(value, env, b)?;
+                Core::ListPush { alloc, list, value }
+            }
+            ("pop", [list]) => {
+                let list = self.emit_atom(list, env, b)?;
+                Core::ListPop { list }
+            }
+            ("get", [list, index]) => {
+                let list = self.emit_atom(list, env, b)?;
+                let index = self.emit_atom(index, env, b)?;
+                Core::Prim {
+                    op: PrimOp::Index,
+                    args: vec![list, index],
+                }
+            }
+            ("set", [list, index, value]) => {
+                let list = self.emit_atom(list, env, b)?;
+                let index = self.emit_atom(index, env, b)?;
+                let value = self.emit_atom(value, env, b)?;
+                Core::ListSet { list, index, value }
+            }
+            ("len", [list]) => {
+                let list = self.emit_atom(list, env, b)?;
+                Core::Prim {
+                    op: PrimOp::Len,
+                    args: vec![list],
+                }
+            }
+            _ => return Ok(None),
+        };
+        Ok(Some(node))
     }
 
     /// Lower `e` as a block's **tail** computation: like [`Self::emit_atom`] but
@@ -3070,6 +3167,14 @@ impl Lowerer {
                 format!("{}.{}", self.module_path, path[0])
             } else if let Some(q) = self.reg.enum_qualified(&path[0]) {
                 q.clone()
+            } else if self
+                .imports
+                .get(&path[0])
+                .map(|m| m == "std.collections" && path[0] == "List")
+                .unwrap_or(false)
+            {
+                let module = self.imports.get(&path[0]).expect("checked above");
+                format!("{module}.{}", path[0])
             } else {
                 path[0].clone()
             };
@@ -3131,7 +3236,21 @@ impl Lowerer {
                     .find(|f| f.name == *field)
                     .map(|f| f.ty.clone())
             }
-            Expr::Call(callee, _) => match &**callee {
+            Expr::Call(callee, args) => match &**callee {
+                Expr::Var(fname) if self.is_std_collection_op(fname) => {
+                    match (fname.as_str(), args.as_slice()) {
+                        ("new" | "with_capacity", _) => None,
+                        ("push", [_, list, _]) => self.type_of_expr(list, env),
+                        ("pop", [list]) | ("set", [list, _, _]) => self.type_of_expr(list, env),
+                        ("get", [list, _]) => self
+                            .type_of_expr(list, env)
+                            .as_ref()
+                            .and_then(list_elem_stype)
+                            .cloned(),
+                        ("len", [_]) => Some(SType::Named(vec!["usize".to_string()])),
+                        _ => None,
+                    }
+                }
                 Expr::Var(fname) => self.fn_rets.get(fname).cloned().flatten(),
                 // A capability narrowing op (`io.fs()`) has the operation's
                 // declared return type, so `let fs = io.fs()` types `fs` as the
@@ -3152,7 +3271,7 @@ impl Lowerer {
             Expr::Index(base, _) => match peel_ref_ty(self.type_of_expr(base, env)?) {
                 SType::Slice(inner) => Some(*inner),
                 SType::Array { elem, .. } => Some(*elem),
-                _ => None,
+                ty => list_elem_stype(&ty).cloned(),
             },
             // An array literal has a fixed-length array type `[N]T`, where `N` is
             // the element count and `T` the inferred element type. This pins the
@@ -3490,7 +3609,20 @@ fn builtin_type(name: &str) -> Option<Type> {
 fn struct_name(t: &SType) -> Option<String> {
     match t {
         SType::Named(path) if path.len() == 1 => Some(path[0].clone()),
+        SType::Generic { path, .. } if path.len() == 1 => Some(path[0].clone()),
         SType::Ref { inner, .. } => struct_name(inner),
+        _ => None,
+    }
+}
+
+fn list_elem_stype(t: &SType) -> Option<&SType> {
+    match t {
+        SType::Generic { path, args }
+            if path.last().map(|s| s == "List").unwrap_or(false) && args.len() == 1 =>
+        {
+            args.first()
+        }
+        SType::Ref { inner, .. } => list_elem_stype(inner),
         _ => None,
     }
 }
@@ -3620,6 +3752,28 @@ fn to_indices(c: &Core, depth: u32) -> Core {
         },
         Core::IndexSet { base, index, value } => Core::IndexSet {
             base: atom_to_index(base, depth),
+            index: atom_to_index(index, depth),
+            value: atom_to_index(value, depth),
+        },
+        Core::ListNew {
+            elem,
+            alloc,
+            capacity,
+        } => Core::ListNew {
+            elem: elem.clone(),
+            alloc: atom_to_index(alloc, depth),
+            capacity: atom_to_index(capacity, depth),
+        },
+        Core::ListPush { alloc, list, value } => Core::ListPush {
+            alloc: atom_to_index(alloc, depth),
+            list: atom_to_index(list, depth),
+            value: atom_to_index(value, depth),
+        },
+        Core::ListPop { list } => Core::ListPop {
+            list: atom_to_index(list, depth),
+        },
+        Core::ListSet { list, index, value } => Core::ListSet {
+            list: atom_to_index(list, depth),
             index: atom_to_index(index, depth),
             value: atom_to_index(value, depth),
         },

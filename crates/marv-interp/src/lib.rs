@@ -594,6 +594,90 @@ impl Program {
                 }
             }
 
+            Core::ListNew {
+                alloc, capacity, ..
+            } => {
+                self.eval_alloc_cap(alloc, env, eff)?;
+                let cap = match self.eval_atom(capacity, env)? {
+                    Value::Int(n) => usize::try_from(n).unwrap_or(0),
+                    other => {
+                        return Err(RunError::Unsupported(format!(
+                            "list capacity is not an integer: `{}`",
+                            other.render()
+                        )))
+                    }
+                };
+                Ok(Value::List {
+                    items: Vec::new(),
+                    cap,
+                })
+            }
+
+            Core::ListPush { alloc, list, value } => {
+                self.eval_alloc_cap(alloc, env, eff)?;
+                let list = self.eval_atom(list, env)?;
+                let value = self.eval_atom(value, env)?;
+                match list {
+                    Value::List { mut items, mut cap } => {
+                        if items.len() == cap {
+                            cap = if cap == 0 { 4 } else { cap.saturating_mul(2) };
+                        }
+                        items.push(value);
+                        Ok(Value::List { items, cap })
+                    }
+                    other => Err(RunError::Unsupported(format!(
+                        "push on non-list `{}`",
+                        other.render()
+                    ))),
+                }
+            }
+
+            Core::ListPop { list } => match self.eval_atom(list, env)? {
+                Value::List { mut items, cap } => {
+                    if items.pop().is_none() {
+                        return Err(RunError::BoundsCheckFailed { index: 0, len: 0 });
+                    }
+                    Ok(Value::List { items, cap })
+                }
+                other => Err(RunError::Unsupported(format!(
+                    "pop on non-list `{}`",
+                    other.render()
+                ))),
+            },
+
+            Core::ListSet { list, index, value } => {
+                let list = self.eval_atom(list, env)?;
+                let i = match self.eval_atom(index, env)? {
+                    Value::Int(n) => n,
+                    other => {
+                        return Err(RunError::Unsupported(format!(
+                            "list set index is not an integer: `{}`",
+                            other.render()
+                        )))
+                    }
+                };
+                let value = self.eval_atom(value, env)?;
+                match list {
+                    Value::List { mut items, cap } => {
+                        let idx = usize::try_from(i).ok().filter(|&i| i < items.len());
+                        match idx {
+                            Some(i) => {
+                                items[i] = value;
+                                Ok(Value::List { items, cap })
+                            }
+                            None => Err(RunError::BoundsCheckFailed {
+                                index: i,
+                                len: items.len() as i64,
+                            }),
+                        }
+                    }
+                    other => Err(RunError::Unsupported(format!(
+                        "set on non-list `{}`",
+                        other.render()
+                    ))),
+                }
+            }
+
             Core::Proj { base, idx } => {
                 let base = self.eval_atom(base, env)?;
                 match base {
@@ -730,6 +814,29 @@ impl Program {
                     fields: final_state,
                 })
             }
+        }
+    }
+
+    fn eval_alloc_cap(
+        &self,
+        alloc: &Atom,
+        env: &[Value],
+        eff: &mut Vec<Effect>,
+    ) -> Result<(), RunError> {
+        let capv = self.eval_atom(alloc, env)?;
+        match capv {
+            Value::Cap(name) => {
+                eff.push(Effect {
+                    cap: name,
+                    op: 0,
+                    args: Vec::new(),
+                });
+                Ok(())
+            }
+            other => Err(RunError::Unsupported(format!(
+                "list allocation on non-capability `{}`",
+                other.render()
+            ))),
         }
     }
 
@@ -1045,6 +1152,7 @@ fn eval_prim(op: PrimOp, args: &[Value]) -> Result<Value, RunError> {
         }
         Len => match a {
             Some(Value::Agg { fields, .. }) => Ok(Value::Int(fields.len() as i64)),
+            Some(Value::List { items, .. }) => Ok(Value::Int(items.len() as i64)),
             Some(Value::Str(s)) => Ok(Value::Int(s.len() as i64)),
             _ => Err(RunError::Unsupported("len of non-collection".into())),
         },
@@ -1058,6 +1166,13 @@ fn eval_prim(op: PrimOp, args: &[Value]) -> Result<Value, RunError> {
                 .ok_or(RunError::BoundsCheckFailed {
                     index: *i,
                     len: fields.len() as i64,
+                }),
+            (Some(Value::List { items, .. }), Some(Value::Int(i))) => usize::try_from(*i)
+                .ok()
+                .and_then(|idx| items.get(idx).cloned())
+                .ok_or(RunError::BoundsCheckFailed {
+                    index: *i,
+                    len: items.len() as i64,
                 }),
             _ => Err(RunError::Unsupported("index of non-collection".into())),
         },

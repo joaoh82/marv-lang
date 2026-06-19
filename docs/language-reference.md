@@ -320,6 +320,6 @@ function calls and recursion, field
 projection, and `requires`/`ensures` contracts. That is enough for the
 [`examples/`](../examples) that run end to end (`factorial`, `arithmetic`, `clamp`, `color`,
 `mutation`, `loops`, `casts`, `hello`, `read_file`, …), the `std/` prelude (`option`, `result`,
-`ord`, `capabilities`), and the M4/M6 gates.
+`ord`, `capabilities`, `collections`), and the M4/M6 gates.
 Everything still marked **[core]**/**[design]** above is the surface roadmap — tracked in the
-project tracker, with collections, `linear` capabilities, and cross-module linking next.
+project tracker, with collection literals, `linear` capabilities, and cross-module linking next.

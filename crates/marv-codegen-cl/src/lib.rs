@@ -313,7 +313,7 @@ fn compile_inner(
         let qualified = qualify(module_path, name);
         let h = symbol_hash(&qualified);
         let param_tys = peel_param_types(&def.ty);
-        let param_is_unit: Vec<bool> = param_tys.iter().map(|t| matches!(t, Type::Unit)).collect();
+        let param_is_unit: Vec<bool> = param_tys.iter().map(|t| is_no_slot(t, world)).collect();
         let arity = param_tys.len();
 
         let mut sig = module.make_signature();
@@ -556,6 +556,14 @@ fn compile_fn(
     Ok(())
 }
 
+fn is_no_slot(t: &Type, world: &World) -> bool {
+    match t {
+        Type::Unit => true,
+        Type::Nominal { def, .. } => world.is_cap(def),
+        _ => false,
+    }
+}
+
 /// A compile-time value: a real machine word, a (zero-sized) unit, a
 /// partially-applied call accumulating its arguments (the currying mirror), or a
 /// compile-time aggregate.
@@ -667,6 +675,10 @@ impl Trans<'_, '_> {
             }
 
             Core::IndexSet { base, index, value } => self.eval_index_set(base, index, value),
+            Core::ListNew { capacity, .. } => self.eval_list_new(capacity),
+            Core::ListPush { list, value, .. } => self.eval_list_push(list, value),
+            Core::ListPop { list } => self.eval_list_pop(list),
+            Core::ListSet { list, index, value } => self.eval_list_set(list, index, value),
 
             Core::Proj { base, idx } => self.eval_proj(base, *idx),
 
@@ -1011,6 +1023,143 @@ impl Trans<'_, '_> {
         Ok(Slot::Val(newptr))
     }
 
+    fn eval_list_new(&mut self, capacity: &Atom) -> Result<Slot, CodegenError> {
+        let cap = self.eval_atom(capacity)?;
+        let cap = self.as_word(cap)?;
+        let total = self.builder.ins().iadd_imm(cap, 2);
+        let ptr = self.alloc_dyn(total);
+        let zero = self.builder.ins().iconst(WORD, 0);
+        self.builder.ins().store(MemFlags::trusted(), zero, ptr, 0);
+        self.builder
+            .ins()
+            .store(MemFlags::trusted(), cap, ptr, SLOT);
+        Ok(Slot::Val(ptr))
+    }
+
+    fn eval_list_push(&mut self, list: &Atom, value: &Atom) -> Result<Slot, CodegenError> {
+        let ptr = self.eval_atom(list)?;
+        let ptr = self.as_word(ptr)?;
+        let val = self.eval_atom(value)?;
+        let val = self.as_word(val)?;
+        let len = self.builder.ins().load(WORD, MemFlags::trusted(), ptr, 0);
+        let cap = self
+            .builder
+            .ins()
+            .load(WORD, MemFlags::trusted(), ptr, SLOT);
+
+        let has_space = self.builder.ins().icmp(IntCC::UnsignedLessThan, len, cap);
+        let inplace = self.builder.create_block();
+        let grow = self.builder.create_block();
+        let merge = self.builder.create_block();
+        self.builder.append_block_param(merge, WORD);
+        self.builder.ins().brif(has_space, inplace, &[], grow, &[]);
+
+        self.builder.switch_to_block(inplace);
+        self.builder.seal_block(inplace);
+        let new_len = self.builder.ins().iadd_imm(len, 1);
+        self.builder
+            .ins()
+            .store(MemFlags::trusted(), new_len, ptr, 0);
+        let slot = self.builder.ins().iadd_imm(len, 2);
+        let off = self.builder.ins().imul_imm(slot, SLOT as i64);
+        let addr = self.builder.ins().iadd(ptr, off);
+        self.builder.ins().store(MemFlags::trusted(), val, addr, 0);
+        self.builder.ins().jump(merge, &[ptr.into()]);
+
+        self.builder.switch_to_block(grow);
+        self.builder.seal_block(grow);
+        let doubled = self.builder.ins().imul_imm(cap, 2);
+        let four = self.builder.ins().iconst(WORD, 4);
+        let too_small = self
+            .builder
+            .ins()
+            .icmp(IntCC::UnsignedLessThan, doubled, four);
+        let new_cap = self.builder.ins().select(too_small, four, doubled);
+        let total = self.builder.ins().iadd_imm(new_cap, 2);
+        let newptr = self.alloc_dyn(total);
+
+        let copy_words = self.builder.ins().iadd_imm(len, 2);
+        self.copy_words(ptr, newptr, copy_words);
+
+        let new_len = self.builder.ins().iadd_imm(len, 1);
+        self.builder
+            .ins()
+            .store(MemFlags::trusted(), new_len, newptr, 0);
+        self.builder
+            .ins()
+            .store(MemFlags::trusted(), new_cap, newptr, SLOT);
+        let slot = self.builder.ins().iadd_imm(len, 2);
+        let off = self.builder.ins().imul_imm(slot, SLOT as i64);
+        let addr = self.builder.ins().iadd(newptr, off);
+        self.builder.ins().store(MemFlags::trusted(), val, addr, 0);
+        self.builder.ins().jump(merge, &[newptr.into()]);
+
+        self.builder.switch_to_block(merge);
+        self.builder.seal_block(merge);
+        Ok(Slot::Val(self.builder.block_params(merge)[0]))
+    }
+
+    fn eval_list_pop(&mut self, list: &Atom) -> Result<Slot, CodegenError> {
+        let ptr = self.eval_atom(list)?;
+        let ptr = self.as_word(ptr)?;
+        let len = self.builder.ins().load(WORD, MemFlags::trusted(), ptr, 0);
+        let zero = self.builder.ins().iconst(WORD, 0);
+        self.emit_bounds_check(ptr, zero);
+        let new_len = self.builder.ins().iadd_imm(len, -1);
+        self.builder
+            .ins()
+            .store(MemFlags::trusted(), new_len, ptr, 0);
+        Ok(Slot::Val(ptr))
+    }
+
+    fn eval_list_set(
+        &mut self,
+        list: &Atom,
+        index: &Atom,
+        value: &Atom,
+    ) -> Result<Slot, CodegenError> {
+        let ptr = self.eval_atom(list)?;
+        let ptr = self.as_word(ptr)?;
+        let idx = self.eval_atom(index)?;
+        let idx = self.as_word(idx)?;
+        let val = self.eval_atom(value)?;
+        let val = self.as_word(val)?;
+        self.emit_bounds_check(ptr, idx);
+        let slot = self.builder.ins().iadd_imm(idx, 2);
+        let off = self.builder.ins().imul_imm(slot, SLOT as i64);
+        let addr = self.builder.ins().iadd(ptr, off);
+        self.builder.ins().store(MemFlags::trusted(), val, addr, 0);
+        Ok(Slot::Val(ptr))
+    }
+
+    fn copy_words(&mut self, src_base: Value, dst_base: Value, total: Value) {
+        let header = self.builder.create_block();
+        let body = self.builder.create_block();
+        let exit = self.builder.create_block();
+        self.builder.append_block_param(header, WORD);
+        let zero = self.builder.ins().iconst(WORD, 0);
+        self.builder.ins().jump(header, &[zero.into()]);
+
+        self.builder.switch_to_block(header);
+        let k = self.builder.block_params(header)[0];
+        let more = self.builder.ins().icmp(IntCC::UnsignedLessThan, k, total);
+        self.builder.ins().brif(more, body, &[], exit, &[]);
+
+        self.builder.switch_to_block(body);
+        self.builder.seal_block(body);
+        let off = self.builder.ins().imul_imm(k, SLOT as i64);
+        let src = self.builder.ins().iadd(src_base, off);
+        let w = self.builder.ins().load(WORD, MemFlags::trusted(), src, 0);
+        let dst = self.builder.ins().iadd(dst_base, off);
+        self.builder.ins().store(MemFlags::trusted(), w, dst, 0);
+        let k1 = self.builder.ins().iadd_imm(k, 1);
+        self.builder.ins().jump(header, &[k1.into()]);
+        self.builder.seal_block(header);
+
+        self.builder.switch_to_block(exit);
+        self.builder.seal_block(exit);
+    }
+
     fn eval_atom(&mut self, a: &Atom) -> Result<Slot, CodegenError> {
         match a {
             Atom::Lit(l) => self.lit(l),
@@ -1119,9 +1268,15 @@ impl Trans<'_, '_> {
                 // Tier-1 bounds check (debug builds, MARV-34): abort unless the
                 // subscript falls inside `0..len` (the header word).
                 self.emit_bounds_check(v(0), v(1));
-                // addr = base + (i + 1) * SLOT, then load the element word.
-                let plus1 = self.builder.ins().iadd_imm(v(1), 1);
-                let off = self.builder.ins().imul_imm(plus1, SLOT as i64);
+                // Arrays/slices use `[len, e0, …]`; lists use
+                // `[len, cap, e0, …]`.
+                let header_words = if args.first().is_some_and(|a| self.atom_is_list(a)) {
+                    2
+                } else {
+                    1
+                };
+                let slot = self.builder.ins().iadd_imm(v(1), header_words);
+                let off = self.builder.ins().imul_imm(slot, SLOT as i64);
                 let addr = self.builder.ins().iadd(v(0), off);
                 self.builder.ins().load(WORD, MemFlags::trusted(), addr, 0)
             }
@@ -1384,6 +1539,12 @@ impl Trans<'_, '_> {
         self.builder.inst_results(call)[0]
     }
 
+    fn atom_is_list(&self, a: &Atom) -> bool {
+        layout::atom_type(self.world, a, &self.tys)
+            .as_ref()
+            .is_some_and(is_list_type)
+    }
+
     fn heap_reset(&mut self, mark: Value) {
         let rref = match self.heap_reset_ref {
             Some(r) => r,
@@ -1462,4 +1623,12 @@ fn peel_param_types(mut ty: &Type) -> Vec<Type> {
         ty = ret;
     }
     params
+}
+
+fn is_list_type(t: &Type) -> bool {
+    matches!(
+        t,
+        Type::Nominal { def, args }
+            if *def == symbol_hash("std.collections.List") && args.len() == 1
+    )
 }

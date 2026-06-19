@@ -237,6 +237,23 @@ fn walk(c: &Core, out: &mut Vec<Hash>) {
             atom(index, out);
             atom(value, out);
         }
+        Core::ListNew {
+            alloc, capacity, ..
+        } => {
+            atom(alloc, out);
+            atom(capacity, out);
+        }
+        Core::ListPush { alloc, list, value } => {
+            atom(alloc, out);
+            atom(list, out);
+            atom(value, out);
+        }
+        Core::ListPop { list } => atom(list, out),
+        Core::ListSet { list, index, value } => {
+            atom(list, out);
+            atom(index, out);
+            atom(value, out);
+        }
         Core::Proj { base, .. } => atom(base, out),
         Core::Match {
             scrutinee,

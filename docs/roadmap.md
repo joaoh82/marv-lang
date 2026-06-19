@@ -55,6 +55,11 @@ tail is an `if`/`match` now threads the carried `var`s through the branch join (
 branch yields the next-state tuple, kept register/local-resident so the loop stays alloc-free);
 only a `return` tail (early function exit) still awaits lowering; Tier-2 SMT discharge of
 loop invariants landed as **MARV-22** (the loop slice of MARV-11)
+· **MARV-42** growable `std.collections.List[T]` (depends on MARV-41 `Alloc`): `List`
+is now a concrete std type instead of an opaque soft-skipped import, with
+`new`/`with_capacity`, value-semantics `push`/`pop`/`set`, `get`/index, `len`,
+and `for x in list` execution across interpreter + Cranelift + WASM. Runtime
+layout is `[len, cap, e0, …]`; growable allocation is explicit through `Alloc`.
 · **MARV-3** error handling (`error E { … }` decls, `!T`/bare-`!` error unions → `Result[T,
 error-union]`, `E.Variant` → `Core::Raise`, postfix `?`; **full cross-call error-set inference**
 via a fixpoint over the call graph in `marv-db`, surfaced through `marv/errorSet`; exhaustive
