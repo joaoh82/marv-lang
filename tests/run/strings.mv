@@ -1,0 +1,16 @@
+mod strings
+import std.io (Alloc)
+import std.collections (List, with_capacity, push)
+import std.str (from_chars)
+
+fn exercise(alloc: Alloc) -> i64 {
+    let greeting: str = ("he" + "llo")
+    let mid: str = greeting[1..4]
+    let first: i64 = (greeting[0] as i64)
+    var chars: List[char] = with_capacity(alloc, len(greeting))
+    for c in greeting {
+        chars = push(alloc, chars, (((c as i64) + 1) as char))
+    }
+    let shifted: str = from_chars(alloc, chars)
+    ((len(mid) as i64) + first) + ((shifted[0] as i64) + (shifted[4] as i64))
+}

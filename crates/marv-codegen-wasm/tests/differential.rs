@@ -65,7 +65,7 @@ fn interp_i64(
 ) -> i64 {
     let arg_strs: Vec<String> = args.iter().map(|a| a.to_string()).collect();
     let program = Program::new(module_path, defs, world);
-    let grant = if file == "list.mv" {
+    let grant = if matches!(file, "list.mv" | "strings.mv") {
         vec!["Alloc".to_string()]
     } else {
         Vec::new()
@@ -264,6 +264,9 @@ fn corpus_cases() -> Vec<(&'static str, &'static str, Vec<i64>, i64)> {
         // Growable lists: explicit Alloc construction/growth, get/set/pop, and
         // `for x in xs` over the list's len/index surface.
         ("list.mv", "exercise", vec![6], 53),
+        // Strings: literal concat, slice, char access, `for c in s`, and
+        // explicit-Alloc building from `List[char]`.
+        ("strings.mv", "exercise", vec![], 324),
     ]
 }
 

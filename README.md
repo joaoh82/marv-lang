@@ -165,7 +165,8 @@ deliberate growing subset (today: `fn`/`struct`, `enum`/`match`, `error`/`!T`/`?
 handling, `interface`/`impl` + generics, **capabilities & `perform` from source**
 (`io.fs()` narrowing, `out.write(...)` → `Perform`, inferred effect rows checked against the
 capability parameters), struct literals + indexing + assignment, `char` literals + `as` casts +
-`len`, `std.collections.List[T]` with explicit-`Alloc` growable operations, `while`/`for` loops,
+`len`, string concat/slice/index/iteration/building, `std.collections.List[T]` with
+explicit-`Alloc` growable operations, `while`/`for` loops,
 `let`/`var`, `if`/`else`, arithmetic/boolean ops, the prefix unary
 operators (`-e`, `not e`, `&e`/`&mut e`), calls/recursion,
 `pure` + `requires`/`ensures` contracts); collection literals, `linear` capabilities, and

@@ -242,17 +242,27 @@ fn prim_type(world: &World, op: PrimOp, args: &[Atom], tys: &[Option<Type>]) -> 
     use PrimOp::*;
     match op {
         Eq | Ne | Lt | Le | Gt | Ge | And | Or | Not => Some(Type::Bool),
-        Add | Sub | Mul | Div | Rem | Neg => atom_type(world, args.first()?, tys),
+        Add => {
+            let left = atom_type(world, args.first()?, tys)?;
+            if left == Type::Str {
+                Some(Type::Str)
+            } else {
+                Some(left)
+            }
+        }
+        Sub | Mul | Div | Rem | Neg => atom_type(world, args.first()?, tys),
         Len => Some(Type::Int(IntTy::Usize)),
         Index => {
             let base = atom_type(world, args.first()?, tys)?;
             match base {
                 Type::Array(elem, _) | Type::Slice(elem) => Some(*elem),
+                Type::Str => Some(Type::Char),
                 t if list_elem_type(&t).is_some() => list_elem_type(&t).cloned(),
                 Type::Tuple(elems) => elems.into_iter().next(),
                 _ => None,
             }
         }
+        Slice | FromChars => Some(Type::Str),
     }
 }
 

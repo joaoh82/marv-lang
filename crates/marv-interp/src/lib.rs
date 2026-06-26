@@ -301,7 +301,7 @@ fn eval_cnode(n: &CNode, eval: &mut dyn FnMut(&CExpr) -> Option<Value>) -> Optio
         CNode::Neg(inner) => Some(Value::Int(as_int(eval(inner)?)?.wrapping_neg())),
         CNode::Len(inner) => match eval(inner)? {
             Value::Agg { fields, .. } => Some(Value::Int(fields.len() as i64)),
-            Value::Str(s) => Some(Value::Int(s.len() as i64)),
+            Value::Str(s) => Some(Value::Int(s.chars().count() as i64)),
             _ => None,
         },
         CNode::Index(base, index) => {
@@ -310,6 +310,10 @@ fn eval_cnode(n: &CNode, eval: &mut dyn FnMut(&CExpr) -> Option<Value>) -> Optio
                 Value::Agg { fields, .. } => {
                     usize::try_from(i).ok().and_then(|u| fields.get(u).cloned())
                 }
+                Value::Str(s) => usize::try_from(i)
+                    .ok()
+                    .and_then(|u| s.chars().nth(u))
+                    .map(|c| Value::Int(c as i64)),
                 _ => None,
             }
         }
@@ -1114,6 +1118,11 @@ fn eval_prim(op: PrimOp, args: &[Value]) -> Result<Value, RunError> {
     match op {
         Add | Sub | Mul | Div | Rem => {
             let (a, b) = (a.unwrap(), b.unwrap());
+            if op == Add {
+                if let (Value::Str(l), Value::Str(r)) = (a, b) {
+                    return Ok(Value::Str(format!("{l}{r}")));
+                }
+            }
             if let (Some(x), Some(y)) = (int(a), int(b)) {
                 let r = match op {
                     Add => x.wrapping_add(y),
@@ -1184,7 +1193,7 @@ fn eval_prim(op: PrimOp, args: &[Value]) -> Result<Value, RunError> {
         Len => match a {
             Some(Value::Agg { fields, .. }) => Ok(Value::Int(fields.len() as i64)),
             Some(Value::List { items, .. }) => Ok(Value::Int(items.len() as i64)),
-            Some(Value::Str(s)) => Ok(Value::Int(s.len() as i64)),
+            Some(Value::Str(s)) => Ok(Value::Int(s.chars().count() as i64)),
             _ => Err(RunError::Unsupported("len of non-collection".into())),
         },
         Index => match (a, b) {
@@ -1205,7 +1214,48 @@ fn eval_prim(op: PrimOp, args: &[Value]) -> Result<Value, RunError> {
                     index: *i,
                     len: items.len() as i64,
                 }),
+            (Some(Value::Str(s)), Some(Value::Int(i))) => usize::try_from(*i)
+                .ok()
+                .and_then(|idx| s.chars().nth(idx))
+                .map(|c| Value::Int(c as i64))
+                .ok_or(RunError::BoundsCheckFailed {
+                    index: *i,
+                    len: s.chars().count() as i64,
+                }),
             _ => Err(RunError::Unsupported("index of non-collection".into())),
+        },
+        Slice => match (a, b, args.get(2)) {
+            (Some(Value::Str(s)), Some(Value::Int(lo)), Some(Value::Int(hi))) => {
+                let len = s.chars().count() as i64;
+                if *lo < 0 || *hi < *lo || *hi > len {
+                    return Err(RunError::BoundsCheckFailed { index: *hi, len });
+                }
+                Ok(Value::Str(
+                    s.chars()
+                        .skip(*lo as usize)
+                        .take((*hi - *lo) as usize)
+                        .collect(),
+                ))
+            }
+            _ => Err(RunError::Unsupported("slice of non-string".into())),
+        },
+        FromChars => match b {
+            Some(Value::List { items, .. }) => {
+                let mut out = String::new();
+                for item in items {
+                    let Some(cp) = int(item) else {
+                        return Err(RunError::Unsupported(format!(
+                            "from_chars item is not a char code point: {item:?}"
+                        )));
+                    };
+                    let c = char::from_u32(cp as u32).ok_or_else(|| {
+                        RunError::Unsupported(format!("invalid char code point {cp}"))
+                    })?;
+                    out.push(c);
+                }
+                Ok(Value::Str(out))
+            }
+            _ => Err(RunError::Unsupported("from_chars of non-list".into())),
         },
     }
 }

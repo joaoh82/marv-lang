@@ -60,6 +60,12 @@ The integer/boolean core the M0/M1 front end can express and lower:
   `[len, …]` block, copy it with a **runtime loop**, and overwrite element `i`
   (the source block is left untouched). `tests/run/slices.mv` asserts
   interp == Cranelift == wasm.
+- **strings (MARV-43):** string literals, `+` concatenation, `len(s)`, `s[i]`,
+  `s[a..b]`, `for c in s`, and `std.str.from_chars(alloc, chars)` run on the
+  interpreter, Cranelift, and WASM. Native backends store strings as one-word
+  pointers to `[len, codepoint0, …]` blocks, so indexing and iteration yield
+  `char` code points and dynamic string creation allocates a fresh block.
+  `tests/run/strings.mv` asserts interp == Cranelift == wasm.
 - **monomorphized generics (MARV-26):** monomorphization is a lowering-time pass
   (`spec/01` §§3.3–3.4), so a generic call has already specialized to a concrete
   def (`max@i64`) with its interface methods dispatched to the coherent `impl`
@@ -271,6 +277,8 @@ lowers to a **call to an imported function** — one import per
 - A capability parameter carries **no ABI slot** — authority is the import, not a
   value threaded through the call. `demo.fetch(net)` exports as a zero-argument
   wasm function; the `Net` it needs shows up as an *import*, not a parameter.
+- String operands to an import are passed as the normal `str` ABI word: a pointer
+  to the module's `[len, codepoint…]` linear-memory block.
 
 ### The differential gate and the browser demo
 

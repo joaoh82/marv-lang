@@ -1,0 +1,9 @@
+mod string_perform
+
+interface Sink {
+    fn put(sink: &Sink, text: str) -> ()
+}
+
+fn main(sink: Sink) -> () {
+    sink.put("hello")
+}

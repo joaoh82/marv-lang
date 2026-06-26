@@ -122,6 +122,7 @@ unary          = [ "not" | "-" | "&" | "&mut" ] , postfix ;
 postfix        = primary , { "." , ident                      (* field / method *)
                            | "(" , [ args ] , ")"             (* call *)
                            | "[" , expr , "]"                 (* index *)
+                           | "[" , expr , ".." , expr , "]"   (* string slice *)
                            | "?"                              (* error propagate *)
                            | "as" , type } ;                  (* cast *)
 primary        = literal | path | "(" , expr , ")" | block
@@ -358,6 +359,10 @@ The `Hash` of a `Def` is `blake3-256` over a canonical binary encoding with thes
 3. **Canonical field order.** Struct fields, enum variants, and effect-row/error-set members
    are sorted by a fixed total order before encoding, so set-like data has one encoding.
 4. **No incidental data.** Formatting, comments, doc strings, and source spans are excluded.
+5. **Stable primitive tags.** `PrimOp` hash tags are append-only: `Add=0`, `Sub=1`,
+   `Mul=2`, `Div=3`, `Rem=4`, `Eq=5`, `Ne=6`, `Lt=7`, `Le=8`, `Gt=9`, `Ge=10`,
+   `And=11`, `Or=12`, `Not=13`, `Len=14`, `Index=15`, `Neg=16`, `Slice=17`,
+   `FromChars=18`.
 
 Properties this buys (see `01` §8): reproducible builds, dependency conflicts as mere
 distinct hashes, free renames, automatic deduplication of identical code, and "has this exact

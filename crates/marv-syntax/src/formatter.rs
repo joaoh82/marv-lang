@@ -501,6 +501,14 @@ fn format_expr(expr: &Expr) -> String {
         Expr::Index(base, index) => {
             format!("{}[{}]", format_expr(base), format_expr(index))
         }
+        Expr::Slice(base, start, end) => {
+            format!(
+                "{}[{}..{}]",
+                format_expr(base),
+                format_expr(start),
+                format_expr(end)
+            )
+        }
         // An array literal is its bracketed, comma-separated elements: `[1, 2, 3]`
         // (and `[]` for the empty form). Re-parses to the same `Array`.
         Expr::Array(elems) => {

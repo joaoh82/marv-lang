@@ -451,6 +451,8 @@ pub enum Expr {
     Call(Box<Expr>, Vec<Expr>),
     /// `base[index]` — index into a slice/array/aggregate (`spec/02` §B `postfix`).
     Index(Box<Expr>, Box<Expr>),
+    /// `base[start..end]` — substring/slice over a `str`.
+    Slice(Box<Expr>, Box<Expr>, Box<Expr>),
     /// `[e0, e1, ...]` — an array literal (`spec/02` §B `primary`). A homogeneous,
     /// fixed-length product whose type is `[N]T`; lowers to a `Core::Array`. The
     /// empty form `[]` parses but needs a type annotation to fix its element type.

@@ -9,6 +9,7 @@ links against once a build references them by content hash (`spec/01` §8).
 | [`result.mv`](result.mv) | `Result[T, E]` — success/typed-failure (`!T` sugar, `?` propagation). |
 | [`capabilities.mv`](capabilities.mv) | The capability types `Io`/`Fs`/`Net`/`Clock`/`Rand`/`Alloc` (plus `Stream`/`Conn`) as declared interfaces — power enters only through these (`spec/01` §5). |
 | [`collections.mv`](collections.mv) | `List[T]` — growable lists allocated through explicit `Alloc`; core ops run on interpreter, Cranelift, and WASM. |
+| [`str.mv`](str.mv) | `from_chars(alloc, chars)` — explicit-`Alloc` string building from `List[char]`; lowered to a Core string primitive. |
 
 ## Status
 
@@ -31,3 +32,8 @@ functions at the surface, while the compiler lowers their call sites to list Cor
 runtime `[len, cap, e0, …]` layout. `push`, `pop`, and `set` return the updated list value,
 so surface code normally rebinds the `var` that holds the list. Backends update the backing
 block directly when no growth is needed.
+
+`str.mv` is live parsed source as well. Its `from_chars` body is a placeholder in source form:
+the lowerer rewrites calls imported from `std.str` to a Core primitive that copies a
+`List[char]` into the runtime string block. Taking `Alloc` keeps user-visible string building
+explicit in signatures.

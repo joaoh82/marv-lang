@@ -1382,7 +1382,16 @@ impl Trans<'_, '_> {
             Literal::Bool(b) => Ok(Slot::Val(self.builder.ins().iconst(WORD, *b as i64))),
             Literal::Int(n) => Ok(Slot::Val(self.builder.ins().iconst(WORD, *n))),
             Literal::Float(_) => Err(CodegenError::Unsupported("float literal".into())),
-            Literal::Str(_) => Err(CodegenError::Unsupported("string literal".into())),
+            Literal::Str(s) => {
+                let fields = s
+                    .chars()
+                    .map(|c| Slot::Val(self.builder.ins().iconst(WORD, c as i64)))
+                    .collect();
+                Ok(Slot::Tuple {
+                    tag: s.chars().count() as u32,
+                    fields,
+                })
+            }
             // A `char` is its Unicode code point as a machine word — the same
             // scalar the interpreter computes, keeping the two in agreement.
             Literal::Char(c) => Ok(Slot::Val(self.builder.ins().iconst(WORD, *c as i64))),
@@ -1434,6 +1443,9 @@ impl Trans<'_, '_> {
         }
         let v = |i: usize| vals[i];
         let out = match op {
+            Add if args.first().is_some_and(|a| self.atom_is_str(a)) => {
+                return Ok(Slot::Val(self.eval_string_concat(v(0), v(1))));
+            }
             Add => self.builder.ins().iadd(v(0), v(1)),
             Sub => self.builder.ins().isub(v(0), v(1)),
             Mul => self.builder.ins().imul(v(0), v(1)),
@@ -1470,8 +1482,120 @@ impl Trans<'_, '_> {
                 let addr = self.builder.ins().iadd(v(0), off);
                 self.builder.ins().load(WORD, MemFlags::trusted(), addr, 0)
             }
+            Slice => return Ok(Slot::Val(self.eval_string_slice(v(0), v(1), v(2)))),
+            FromChars => return Ok(Slot::Val(self.eval_string_from_chars(v(1)))),
         };
         Ok(Slot::Val(out))
+    }
+
+    fn eval_string_concat(&mut self, left: Value, right: Value) -> Value {
+        let llen = self.builder.ins().load(WORD, MemFlags::trusted(), left, 0);
+        let rlen = self.builder.ins().load(WORD, MemFlags::trusted(), right, 0);
+        let total = self.builder.ins().iadd(llen, rlen);
+        let words = self.builder.ins().iadd_imm(total, 1);
+        let out = self.alloc_dyn(words);
+        self.builder.ins().store(MemFlags::trusted(), total, out, 0);
+        let one = self.builder.ins().iconst(WORD, 1);
+        self.copy_word_range(left, one, out, one, llen);
+        let dst_start = self.builder.ins().iadd_imm(llen, 1);
+        self.copy_word_range(right, one, out, dst_start, rlen);
+        out
+    }
+
+    fn eval_string_slice(&mut self, ptr: Value, lo: Value, hi: Value) -> Value {
+        if self.bounds_checks {
+            let len = self.builder.ins().load(WORD, MemFlags::trusted(), ptr, 0);
+            let lo_gt_len = self.builder.ins().icmp(IntCC::UnsignedGreaterThan, lo, len);
+            let hi_gt_len = self.builder.ins().icmp(IntCC::UnsignedGreaterThan, hi, len);
+            let lo_gt_hi = self.builder.ins().icmp(IntCC::UnsignedGreaterThan, lo, hi);
+            let bad = self.builder.ins().bor(lo_gt_len, hi_gt_len);
+            let bad = self.builder.ins().bor(bad, lo_gt_hi);
+            let fail = self.builder.create_block();
+            let cont = self.builder.create_block();
+            self.builder.ins().brif(bad, fail, &[], cont, &[]);
+
+            self.builder.switch_to_block(fail);
+            self.builder.seal_block(fail);
+            let len = self.builder.ins().load(WORD, MemFlags::trusted(), ptr, 0);
+            let bref = match self.bounds_fail_ref {
+                Some(r) => r,
+                None => {
+                    let r = self
+                        .module
+                        .declare_func_in_func(self.bounds_fail_id, self.builder.func);
+                    self.bounds_fail_ref = Some(r);
+                    r
+                }
+            };
+            self.builder.ins().call(bref, &[hi, len]);
+            self.builder.ins().trap(TrapCode::unwrap_user(2));
+
+            self.builder.switch_to_block(cont);
+            self.builder.seal_block(cont);
+        }
+
+        let count = self.builder.ins().isub(hi, lo);
+        let words = self.builder.ins().iadd_imm(count, 1);
+        let out = self.alloc_dyn(words);
+        self.builder.ins().store(MemFlags::trusted(), count, out, 0);
+        let src_start = self.builder.ins().iadd_imm(lo, 1);
+        let one = self.builder.ins().iconst(WORD, 1);
+        self.copy_word_range(ptr, src_start, out, one, count);
+        out
+    }
+
+    fn eval_string_from_chars(&mut self, list: Value) -> Value {
+        let len = self.builder.ins().load(WORD, MemFlags::trusted(), list, 0);
+        let words = self.builder.ins().iadd_imm(len, 1);
+        let out = self.alloc_dyn(words);
+        self.builder.ins().store(MemFlags::trusted(), len, out, 0);
+        let src_start = self.builder.ins().iconst(WORD, 2);
+        let dst_start = self.builder.ins().iconst(WORD, 1);
+        self.copy_word_range(list, src_start, out, dst_start, len);
+        out
+    }
+
+    fn copy_word_range(
+        &mut self,
+        src: Value,
+        src_start: Value,
+        dst: Value,
+        dst_start: Value,
+        count: Value,
+    ) {
+        let header = self.builder.create_block();
+        let body = self.builder.create_block();
+        let exit = self.builder.create_block();
+        self.builder.append_block_param(header, WORD);
+        let zero = self.builder.ins().iconst(WORD, 0);
+        self.builder.ins().jump(header, &[zero.into()]);
+
+        self.builder.switch_to_block(header);
+        let k = self.builder.block_params(header)[0];
+        let more = self.builder.ins().icmp(IntCC::UnsignedLessThan, k, count);
+        self.builder.ins().brif(more, body, &[], exit, &[]);
+
+        self.builder.switch_to_block(body);
+        self.builder.seal_block(body);
+        let src_slot = self.builder.ins().iadd(src_start, k);
+        let src_off = self.builder.ins().imul_imm(src_slot, SLOT as i64);
+        let src_addr = self.builder.ins().iadd(src, src_off);
+        let word = self
+            .builder
+            .ins()
+            .load(WORD, MemFlags::trusted(), src_addr, 0);
+        let dst_slot = self.builder.ins().iadd(dst_start, k);
+        let dst_off = self.builder.ins().imul_imm(dst_slot, SLOT as i64);
+        let dst_addr = self.builder.ins().iadd(dst, dst_off);
+        self.builder
+            .ins()
+            .store(MemFlags::trusted(), word, dst_addr, 0);
+        let k1 = self.builder.ins().iadd_imm(k, 1);
+        self.builder.ins().jump(header, &[k1.into()]);
+        self.builder.seal_block(header);
+
+        self.builder.switch_to_block(exit);
+        self.builder.seal_block(exit);
     }
 
     /// Emit an `as` cast (`spec/01` §3.1). Integer targets truncate/wrap to their
@@ -1733,6 +1857,10 @@ impl Trans<'_, '_> {
         layout::atom_type(self.world, a, &self.tys)
             .as_ref()
             .is_some_and(is_list_type)
+    }
+
+    fn atom_is_str(&self, a: &Atom) -> bool {
+        layout::atom_type(self.world, a, &self.tys).as_ref() == Some(&Type::Str)
     }
 
     fn heap_reset(&mut self, mark: Value) {

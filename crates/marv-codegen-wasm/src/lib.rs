@@ -611,11 +611,11 @@ fn collect_imports(fns: &[(Hash, &str, &Def)], world: &World) -> Result<Vec<CapI
                 let mut params = 0usize;
                 for p in &sig.params {
                     match p {
-                        Type::Int(_) | Type::Bool => params += 1,
+                        Type::Int(_) | Type::Bool | Type::Str => params += 1,
                         Type::Unit => {}
                         _ => {
                             return Err(WasmError::Unsupported(format!(
-                                "capability operand type `{}` (only scalar i64/bool/unit operands \
+                                "capability operand type `{}` (only i64/bool/str/unit operands \
                                  are supported in wasm today)",
                                 show_type(p)
                             )))
@@ -844,6 +844,13 @@ impl Trans<'_> {
     fn alloc_local(&mut self) -> u32 {
         let l = self.next_local;
         self.next_local += 1;
+        l
+    }
+
+    fn const_local(&mut self, value: i64) -> u32 {
+        let l = self.alloc_local();
+        self.emit(Instruction::I64Const(value));
+        self.emit(Instruction::LocalSet(l));
         l
     }
 
@@ -1458,6 +1465,47 @@ impl Trans<'_> {
         self.emit(Instruction::End);
     }
 
+    fn copy_word_range(&mut self, src: u32, src_start: u32, dst: u32, dst_start: u32, count: u32) {
+        let k = self.alloc_local();
+        self.emit(Instruction::I64Const(0));
+        self.emit(Instruction::LocalSet(k));
+        self.emit(Instruction::Block(BlockType::Empty));
+        self.emit(Instruction::Loop(BlockType::Empty));
+        self.emit(Instruction::LocalGet(k));
+        self.emit(Instruction::LocalGet(count));
+        self.emit(Instruction::I64LtU);
+        self.emit(Instruction::I32Eqz);
+        self.emit(Instruction::BrIf(1));
+
+        self.emit(Instruction::LocalGet(dst));
+        self.emit(Instruction::LocalGet(dst_start));
+        self.emit(Instruction::LocalGet(k));
+        self.emit(Instruction::I64Add);
+        self.emit(Instruction::I64Const(SLOT as i64));
+        self.emit(Instruction::I64Mul);
+        self.emit(Instruction::I64Add);
+        self.emit(Instruction::I32WrapI64);
+
+        self.emit(Instruction::LocalGet(src));
+        self.emit(Instruction::LocalGet(src_start));
+        self.emit(Instruction::LocalGet(k));
+        self.emit(Instruction::I64Add);
+        self.emit(Instruction::I64Const(SLOT as i64));
+        self.emit(Instruction::I64Mul);
+        self.emit(Instruction::I64Add);
+        self.emit(Instruction::I32WrapI64);
+        self.emit(Instruction::I64Load(memarg(0)));
+        self.emit(Instruction::I64Store(memarg(0)));
+
+        self.emit(Instruction::LocalGet(k));
+        self.emit(Instruction::I64Const(1));
+        self.emit(Instruction::I64Add);
+        self.emit(Instruction::LocalSet(k));
+        self.emit(Instruction::Br(0));
+        self.emit(Instruction::End);
+        self.emit(Instruction::End);
+    }
+
     fn load_word_local(&mut self, base: u32, offset: u64) -> u32 {
         let out = self.alloc_local();
         self.emit(Instruction::LocalGet(base));
@@ -1491,6 +1539,10 @@ impl Trans<'_> {
         layout::atom_type(self.world, a, &self.tys)
             .as_ref()
             .is_some_and(is_list_type)
+    }
+
+    fn atom_is_str(&self, a: &Atom) -> bool {
+        layout::atom_type(self.world, a, &self.tys).as_ref() == Some(&Type::Str)
     }
 
     /// Bump-allocate a block of `total_words` words (a runtime count) and return
@@ -1647,7 +1699,16 @@ impl Trans<'_> {
                 Ok(Out::Stack)
             }
             Atom::Lit(Literal::Float(_)) => Err(WasmError::Unsupported("float literal".into())),
-            Atom::Lit(Literal::Str(_)) => Err(WasmError::Unsupported("string literal".into())),
+            Atom::Lit(Literal::Str(s)) => {
+                let fields = s
+                    .chars()
+                    .map(|c| Slot::Local(self.const_local(c as i64)))
+                    .collect();
+                Ok(Out::Tuple {
+                    tag: s.chars().count() as u32,
+                    fields,
+                })
+            }
             // A `char` is its Unicode code point as an `i64` — the same scalar
             // the interpreter and Cranelift compute (`spec/01` §3.1).
             Atom::Lit(Literal::Char(c)) => {
@@ -1715,6 +1776,10 @@ impl Trans<'_> {
             Atom::Lit(Literal::Int(n)) => Ok(ArgVal::Const(*n)),
             Atom::Lit(Literal::Bool(b)) => Ok(ArgVal::Const(*b as i64)),
             Atom::Lit(Literal::Char(c)) => Ok(ArgVal::Const(*c as i64)),
+            Atom::Lit(Literal::Str(s)) => Ok(ArgVal::Boxed {
+                tag: s.chars().count() as u32,
+                fields: s.chars().map(|c| ArgVal::Const(c as i64)).collect(),
+            }),
             Atom::Lit(Literal::Unit) => Ok(ArgVal::Unit),
             Atom::Var(idx) => self.slot_to_argval(&self.slot(*idx)?),
             Atom::Lit(_) => Err(WasmError::Unsupported("non-scalar literal argument".into())),
@@ -1757,6 +1822,15 @@ impl Trans<'_> {
 
     fn eval_prim(&mut self, op: PrimOp, args: &[Atom]) -> Result<Out, WasmError> {
         use PrimOp::*;
+        if op == Add && args.first().is_some_and(|a| self.atom_is_str(a)) {
+            return self.eval_string_concat(&args[0], &args[1]);
+        }
+        if op == Slice {
+            return self.eval_string_slice(&args[0], &args[1], &args[2]);
+        }
+        if op == FromChars {
+            return self.eval_string_from_chars(&args[1]);
+        }
         let resolved: Vec<ArgVal> = args
             .iter()
             .map(|a| self.resolve_arg(a))
@@ -1826,7 +1900,112 @@ impl Trans<'_> {
                 self.emit(Instruction::I32WrapI64);
                 self.emit(Instruction::I64Load(memarg(0)));
             }
+            Slice | FromChars => unreachable!("handled before generic primitive emission"),
         }
+        Ok(Out::Stack)
+    }
+
+    fn eval_string_concat(&mut self, left: &Atom, right: &Atom) -> Result<Out, WasmError> {
+        let left = self.atom_to_word_local(left)?;
+        let right = self.atom_to_word_local(right)?;
+        let llen = self.load_word_local(left, 0);
+        let rlen = self.load_word_local(right, 0);
+        let total = self.alloc_local();
+        self.emit(Instruction::LocalGet(llen));
+        self.emit(Instruction::LocalGet(rlen));
+        self.emit(Instruction::I64Add);
+        self.emit(Instruction::LocalSet(total));
+        let words = self.alloc_local();
+        self.emit(Instruction::LocalGet(total));
+        self.emit(Instruction::I64Const(1));
+        self.emit(Instruction::I64Add);
+        self.emit(Instruction::LocalSet(words));
+        let out = self.bump_alloc_dyn(words);
+        self.store_word(out, 0, |t| {
+            t.emit(Instruction::LocalGet(total));
+            Ok(())
+        })?;
+        let one = self.const_local(1);
+        self.copy_word_range(left, one, out, one, llen);
+        let dst_right = self.alloc_local();
+        self.emit(Instruction::LocalGet(llen));
+        self.emit(Instruction::I64Const(1));
+        self.emit(Instruction::I64Add);
+        self.emit(Instruction::LocalSet(dst_right));
+        self.copy_word_range(right, one, out, dst_right, rlen);
+        self.emit(Instruction::LocalGet(out));
+        Ok(Out::Stack)
+    }
+
+    fn eval_string_slice(
+        &mut self,
+        base: &Atom,
+        start: &Atom,
+        end: &Atom,
+    ) -> Result<Out, WasmError> {
+        let ptr = self.atom_to_word_local(base)?;
+        let lo = self.atom_to_word_local(start)?;
+        let hi = self.atom_to_word_local(end)?;
+        let len = self.load_word_local(ptr, 0);
+        if self.bounds_checks {
+            self.emit(Instruction::LocalGet(lo));
+            self.emit(Instruction::LocalGet(len));
+            self.emit(Instruction::I64GtU);
+            self.emit(Instruction::LocalGet(hi));
+            self.emit(Instruction::LocalGet(len));
+            self.emit(Instruction::I64GtU);
+            self.emit(Instruction::I32Or);
+            self.emit(Instruction::LocalGet(lo));
+            self.emit(Instruction::LocalGet(hi));
+            self.emit(Instruction::I64GtU);
+            self.emit(Instruction::I32Or);
+            self.emit(Instruction::If(BlockType::Empty));
+            self.emit(Instruction::Unreachable);
+            self.emit(Instruction::End);
+        }
+        let count = self.alloc_local();
+        self.emit(Instruction::LocalGet(hi));
+        self.emit(Instruction::LocalGet(lo));
+        self.emit(Instruction::I64Sub);
+        self.emit(Instruction::LocalSet(count));
+        let words = self.alloc_local();
+        self.emit(Instruction::LocalGet(count));
+        self.emit(Instruction::I64Const(1));
+        self.emit(Instruction::I64Add);
+        self.emit(Instruction::LocalSet(words));
+        let out = self.bump_alloc_dyn(words);
+        self.store_word(out, 0, |t| {
+            t.emit(Instruction::LocalGet(count));
+            Ok(())
+        })?;
+        let src_start = self.alloc_local();
+        self.emit(Instruction::LocalGet(lo));
+        self.emit(Instruction::I64Const(1));
+        self.emit(Instruction::I64Add);
+        self.emit(Instruction::LocalSet(src_start));
+        let dst_start = self.const_local(1);
+        self.copy_word_range(ptr, src_start, out, dst_start, count);
+        self.emit(Instruction::LocalGet(out));
+        Ok(Out::Stack)
+    }
+
+    fn eval_string_from_chars(&mut self, chars: &Atom) -> Result<Out, WasmError> {
+        let list = self.atom_to_word_local(chars)?;
+        let len = self.load_word_local(list, 0);
+        let words = self.alloc_local();
+        self.emit(Instruction::LocalGet(len));
+        self.emit(Instruction::I64Const(1));
+        self.emit(Instruction::I64Add);
+        self.emit(Instruction::LocalSet(words));
+        let out = self.bump_alloc_dyn(words);
+        self.store_word(out, 0, |t| {
+            t.emit(Instruction::LocalGet(len));
+            Ok(())
+        })?;
+        let src_start = self.const_local(2);
+        let dst_start = self.const_local(1);
+        self.copy_word_range(list, src_start, out, dst_start, len);
+        self.emit(Instruction::LocalGet(out));
         Ok(Out::Stack)
     }
 

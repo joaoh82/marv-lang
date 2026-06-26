@@ -1022,6 +1022,12 @@ impl<'a> Checker<'a> {
         match op {
             Add | Sub | Mul | Div | Rem => {
                 let (l, r) = (arg(args, 0), arg(args, 1));
+                if op == Add
+                    && compatible(&Ty::Known(Type::Str), l)
+                    && compatible(&Ty::Known(Type::Str), r)
+                {
+                    return Ty::Known(Type::Str);
+                }
                 if !numeric(l) || !numeric(r) {
                     bad(self, "requires numeric operands");
                     return Ty::Unknown;
@@ -1077,8 +1083,8 @@ impl<'a> Checker<'a> {
                 // reference to it (`&[]T`), so peel references before matching.
                 match arg(args, 0) {
                     Ty::Unknown => {}
-                    // A `str` is a UTF-8 slice (`spec/01` §3.1), so `len` accepts
-                    // it (its byte length) just as the interpreter does.
+                    // A `str` is a sequence of character code points at runtime,
+                    // so `len` accepts it and returns the character count.
                     Ty::Known(t)
                         if matches!(peel(t), Type::Slice(_) | Type::Array(_, _) | Type::Str)
                             || list_elem_type(t).is_some() => {}
@@ -1091,6 +1097,7 @@ impl<'a> Checker<'a> {
                 let elem = match arg(args, 0) {
                     Ty::Known(t) => match peel(t) {
                         Type::Slice(e) | Type::Array(e, _) => Ty::Known((**e).clone()),
+                        Type::Str => Ty::Known(Type::Char),
                         _ if list_elem_type(t).is_some() => {
                             Ty::Known(list_elem_type(t).unwrap().clone())
                         }
@@ -1115,6 +1122,23 @@ impl<'a> Checker<'a> {
                     bad(self, "requires an integer index");
                 }
                 elem
+            }
+            Slice => {
+                if !compatible(&Ty::Known(Type::Str), arg(args, 0)) {
+                    bad(self, "requires a `str` as its first operand");
+                }
+                if !numeric(arg(args, 1)) || !numeric(arg(args, 2)) {
+                    bad(self, "requires integer slice bounds");
+                }
+                Ty::Known(Type::Str)
+            }
+            FromChars => {
+                match arg(args, 1) {
+                    Ty::Known(t) if list_elem_type(t) == Some(&Type::Char) => {}
+                    Ty::Unknown => {}
+                    _ => bad(self, "requires a `List[char]` as its second operand"),
+                }
+                Ty::Known(Type::Str)
             }
         }
     }
@@ -1799,6 +1823,8 @@ fn prim_name(op: PrimOp) -> &'static str {
         Neg => "-",
         Len => "len",
         Index => "index",
+        Slice => "slice",
+        FromChars => "from_chars",
     }
 }
 
