@@ -252,6 +252,10 @@ pub enum PrimOp {
     Neg,
     Len,
     Index,
+    /// `s[a..b]` over a string, using character offsets.
+    Slice,
+    /// `std.str.from_chars(alloc, chars)` over a `List[char]`.
+    FromChars,
 }
 
 /// Comparison operator used inside contract predicates ([`Pred`]).

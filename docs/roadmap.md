@@ -60,6 +60,11 @@ is now a concrete std type instead of an opaque soft-skipped import, with
 `new`/`with_capacity`, value-semantics `push`/`pop`/`set`, `get`/index, `len`,
 and `for x in list` execution across interpreter + Cranelift + WASM. Runtime
 layout is `[len, cap, e0, …]`; growable allocation is explicit through `Alloc`.
+· **MARV-43** string manipulation: string literals now lower and run on every backend;
+`str + str`, `s[i] -> char`, `s[a..b] -> str`, `for c in s`, and
+`std.str.from_chars(alloc, chars: List[char])` share a `[len, codepoint…]` runtime block in
+Cranelift and WASM. The builder path keeps growable construction explicit through `Alloc`,
+and `tests/run/strings.mv` differentially checks interpreter == Cranelift == WASM.
 · **MARV-3** error handling (`error E { … }` decls, `!T`/bare-`!` error unions → `Result[T,
 error-union]`, `E.Variant` → `Core::Raise`, postfix `?`; **full cross-call error-set inference**
 via a fixpoint over the call graph in `marv-db`, surfaced through `marv/errorSet`; exhaustive

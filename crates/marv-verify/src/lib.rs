@@ -627,6 +627,9 @@ impl Encoder<'_, '_> {
                 }
                 _ => Err(stop("`index` of a non-array value")),
             },
+            PrimOp::Slice | PrimOp::FromChars => {
+                Err(stop("string operations are outside the verified subset"))
+            }
             _ => {
                 let mut scalars = Vec::with_capacity(args.len());
                 for s in args {
@@ -1369,6 +1372,9 @@ fn encode_prim(ctx: &Context, op: PrimOp, a: &[SExpr]) -> Result<(SExpr, SortKin
             (wrap64(ctx, ctx.sub(zero, a[0])), SortKind::Int)
         }
         Len | Index => return Err("len/index of a non-array value".to_string()),
+        Slice | FromChars => {
+            return Err("string operations are outside the verified subset".to_string())
+        }
     })
 }
 

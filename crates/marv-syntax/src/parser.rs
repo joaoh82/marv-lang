@@ -1089,9 +1089,16 @@ impl Parser {
                 Tok::LBracket => {
                     self.bump();
                     // Inside the brackets struct literals are unambiguous again.
-                    let index = self.parse_expr_allow_struct()?;
+                    let start = self.parse_expr_allow_struct()?;
+                    if *self.peek() == Tok::DotDot {
+                        self.bump();
+                        let end = self.parse_expr_allow_struct()?;
+                        self.expect(Tok::RBracket)?;
+                        expr = Expr::Slice(Box::new(expr), Box::new(start), Box::new(end));
+                        continue;
+                    }
                     self.expect(Tok::RBracket)?;
-                    expr = Expr::Index(Box::new(expr), Box::new(index));
+                    expr = Expr::Index(Box::new(expr), Box::new(start));
                 }
                 // Postfix `?` — error propagation (`spec/02` §B `postfix`).
                 Tok::Question => {

@@ -1002,6 +1002,15 @@ impl Lowerer {
             .unwrap_or(self.module_path == "std.collections")
     }
 
+    fn is_std_str_op(&self, name: &str) -> bool {
+        name == "from_chars"
+            && self
+                .imports
+                .get(name)
+                .map(|m| m == "std.str")
+                .unwrap_or(self.module_path == "std.str")
+    }
+
     // ---- monomorphization (`spec/01` §§3.3–3.4) -------------------------
 
     /// When lowering a specialized body, resolve an interface-method `name` to the
@@ -1474,6 +1483,7 @@ impl Lowerer {
                 self.lower_cexpr(base, params, allow_result, binders, cenv)?,
                 self.lower_cexpr(index, params, allow_result, binders, cenv)?,
             ))),
+            Expr::Slice(_, _, _) => Err(LowerError::ContractOperandUnsupported),
             // `base.field` — a struct field projection, resolved to its
             // declaration index against the synthetic contract scope (a
             // quantifier binder shadowing the root name cannot carry fields).
@@ -1879,6 +1889,15 @@ impl Lowerer {
                     args: vec![ab, ai],
                 }))
             }
+            Expr::Slice(base, start, end) => {
+                let ab = self.emit_atom(base, env, b)?;
+                let lo = self.emit_atom(start, env, b)?;
+                let hi = self.emit_atom(end, env, b)?;
+                Ok(b.push(Core::Prim {
+                    op: PrimOp::Slice,
+                    args: vec![ab, lo, hi],
+                }))
+            }
             Expr::Array(items) => {
                 let node = self.emit_array(items, env, b)?;
                 Ok(b.push(node))
@@ -1972,6 +1991,9 @@ impl Lowerer {
             if self.is_std_collection_op(name) && self.resolve_local(name, env).is_none() {
                 return self.list_builtin_call(name, args, env, b);
             }
+            if self.is_std_str_op(name) && self.resolve_local(name, env).is_none() {
+                return self.str_builtin_call(name, args, env, b);
+            }
         }
         Ok(None)
     }
@@ -2013,6 +2035,27 @@ impl Lowerer {
                 Core::Prim {
                     op: PrimOp::Len,
                     args: vec![list],
+                }
+            }
+            _ => return Ok(None),
+        };
+        Ok(Some(node))
+    }
+
+    fn str_builtin_call(
+        &self,
+        name: &str,
+        args: &[Expr],
+        env: &[Binding],
+        b: &mut Builder,
+    ) -> Result<Option<Core>, LowerError> {
+        let node = match (name, args) {
+            ("from_chars", [alloc, chars]) => {
+                let alloc = self.emit_atom(alloc, env, b)?;
+                let chars = self.emit_atom(chars, env, b)?;
+                Core::Prim {
+                    op: PrimOp::FromChars,
+                    args: vec![alloc, chars],
                 }
             }
             _ => return Ok(None),
@@ -2062,6 +2105,15 @@ impl Lowerer {
                 Ok(Core::Prim {
                     op: PrimOp::Index,
                     args: vec![ab, ai],
+                })
+            }
+            Expr::Slice(base, start, end) => {
+                let ab = self.emit_atom(base, env, b)?;
+                let lo = self.emit_atom(start, env, b)?;
+                let hi = self.emit_atom(end, env, b)?;
+                Ok(Core::Prim {
+                    op: PrimOp::Slice,
+                    args: vec![ab, lo, hi],
                 })
             }
             Expr::Array(items) => self.emit_array(items, env, b),
@@ -2934,6 +2986,7 @@ impl Lowerer {
                 self.lower_loop_cexpr(base, env, base_level, binders)?,
                 self.lower_loop_cexpr(index, env, base_level, binders)?,
             ))),
+            Expr::Slice(_, _, _) => Err(LowerError::ContractOperandUnsupported),
             Expr::Field(base, fname) => {
                 if let Expr::Var(root) = field_root(base) {
                     if binders.iter().any(|b| b == root) {
@@ -3253,6 +3306,12 @@ impl Lowerer {
                         _ => None,
                     }
                 }
+                Expr::Var(fname) if self.is_std_str_op(fname) => {
+                    match (fname.as_str(), args.as_slice()) {
+                        ("from_chars", [_, _]) => Some(SType::Named(vec!["str".to_string()])),
+                        _ => None,
+                    }
+                }
                 Expr::Var(fname) => self.fn_rets.get(fname).cloned().flatten(),
                 // A capability narrowing op (`io.fs()`) has the operation's
                 // declared return type, so `let fs = io.fs()` types `fs` as the
@@ -3273,8 +3332,28 @@ impl Lowerer {
             Expr::Index(base, _) => match peel_ref_ty(self.type_of_expr(base, env)?) {
                 SType::Slice(inner) => Some(*inner),
                 SType::Array { elem, .. } => Some(*elem),
+                SType::Named(path) if is_str_path(&path) => {
+                    Some(SType::Named(vec!["char".to_string()]))
+                }
                 ty => list_elem_stype(&ty).cloned(),
             },
+            Expr::Slice(base, _, _) => match peel_ref_ty(self.type_of_expr(base, env)?) {
+                SType::Named(path) if is_str_path(&path) => {
+                    Some(SType::Named(vec!["str".to_string()]))
+                }
+                _ => None,
+            },
+            Expr::Binary(l, BinOp::Add, r) => {
+                let lt = self.type_of_expr(l, env)?;
+                let rt = self.type_of_expr(r, env)?;
+                if matches!(peel_ref_ty(lt), SType::Named(path) if is_str_path(&path))
+                    && matches!(peel_ref_ty(rt), SType::Named(path) if is_str_path(&path))
+                {
+                    Some(SType::Named(vec!["str".to_string()]))
+                } else {
+                    self.type_of_expr(l, env)
+                }
+            }
             // An array literal has a fixed-length array type `[N]T`, where `N` is
             // the element count and `T` the inferred element type. This pins the
             // binder type of `let a = [1, 2, 3]` (so `a[i]`/`len(a)`/`a[i] = e`
@@ -3311,6 +3390,10 @@ fn lvalue_to_expr(lv: &LValue) -> Expr {
         LValue::Field(base, field) => Expr::Field(Box::new(lvalue_to_expr(base)), field.clone()),
         LValue::Index(base, index) => Expr::Index(Box::new(lvalue_to_expr(base)), index.clone()),
     }
+}
+
+fn is_str_path(path: &[String]) -> bool {
+    path.len() == 1 && path[0] == "str"
 }
 
 /// A synthetic, deterministic content hash for an anonymous loop-state tuple (the

@@ -314,6 +314,8 @@ fn encode_primop(e: &mut Encoder, op: PrimOp) {
         PrimOp::Len => 14,
         PrimOp::Index => 15,
         PrimOp::Neg => 16,
+        PrimOp::Slice => 17,
+        PrimOp::FromChars => 18,
     });
 }
 

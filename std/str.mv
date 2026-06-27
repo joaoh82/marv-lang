@@ -1,0 +1,7 @@
+mod std.str
+import std.io (Alloc)
+import std.collections (List)
+
+fn from_chars(alloc: Alloc, chars: List[char]) -> str {
+    ""
+}

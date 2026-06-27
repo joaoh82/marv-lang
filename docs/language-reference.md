@@ -50,6 +50,12 @@ maps nonzero→true. The narrowing range check is enforced statically for consta
 (`256 as u8` → `E0104`). *(Note: the value domain is still 64-bit — sub-width semantics show
 up only at the cast boundary; per-width **arithmetic** wrapping remains roadmap.)*
 
+`str` manipulation is **[impl, MARV-43]** for string literals, concatenation with `+`,
+character indexing `s[i] -> char`, substring slicing `s[a..b] -> str`, `for c in s`, and
+explicit-`Alloc` building via `std.str.from_chars(alloc, chars: List[char])`. Runtime strings
+use a `[len, codepoint0, …]` block in Cranelift and WASM; `len(s)` is the character count.
+`tests/run/strings.mv` differentially tests interpreter, Cranelift, and WASM agreement.
+
 ### Aggregates
 - **struct** (product): `struct Point { x: f64, y: f64 }`. Value semantics. Declarations,
   field projection, **struct literals** (`Point { x: 1, y: 2 }`, fields in any order), and

@@ -72,6 +72,18 @@ fn set[T](list: List[T], index: usize, value: T) -> List[T]
 pure fn len[T](list: List[T]) -> usize
 ```
 
+### `std/str.mv` — string building
+String manipulation is built into the language surface for literals, `+`, `len(s)`, `s[i]`,
+`s[a..b]`, and `for c in s`. Growable construction stays explicit: build a `List[char]`
+with an `Alloc` capability, then call `from_chars`.
+
+```marv
+fn from_chars(alloc: Alloc, chars: List[char]) -> str
+```
+
+The lowerer rewrites `from_chars` call sites to a Core primitive; the source body is only the
+std declaration shape.
+
 ## Capabilities
 
 `std/capabilities.mv` declares the standard capability types as interfaces — the operations a
