@@ -213,7 +213,8 @@ reaches a capability it never received — that performs is `MissingCapability` 
 capabilities: `Io` (root) and narrower `Fs`, `Net`, `Clock`, `Rand`, `Alloc` (see
 [`std/`](../std)). On WebAssembly a capability is a host import the page chooses to provide —
 see [platform support](platform-support.md). (Generic interfaces like `Ord[T]` are bounded
-polymorphism, not capabilities; `linear` capabilities and cross-*module* linking are roadmap.)
+polymorphism, not capabilities; `linear` capabilities and server/runtime resource safety are
+roadmap.)
 
 ## 6. Errors: inferred sets **[impl]**
 
@@ -247,7 +248,8 @@ See `examples/errors.mv`. Status notes: the error union's value type lowers fait
 `error-union` type slot is a fixed marker), so `?` is a success-value pass-through and a `!T`
 value behaves as its success `T`. Errors propagate at runtime by unwinding (a `Raise` aborts),
 so error programs run on the interpreter; aggregate/`Result` codegen is MARV-9. Capability-op
-error sets and cross-*module* propagation arrive with MARV-6 / MARV-14.
+error sets are live from source (MARV-6), and the pinned store/linking layer is MARV-14. Broader
+project/package source discovery beyond `std` is MARV-49.
 
 ## 7. Contracts & layered verification **[impl]**
 
@@ -327,5 +329,7 @@ projection, and `requires`/`ensures` contracts. That is enough for the
 [`examples/`](../examples) that run end to end (`factorial`, `arithmetic`, `clamp`, `color`,
 `mutation`, `loops`, `casts`, `hello`, `read_file`, …), the `std/` prelude (`option`, `result`,
 `ord`, `capabilities`, `collections`), and the M4/M6 gates.
-Everything still marked **[core]**/**[design]** above is the surface roadmap — tracked in the
-project tracker, with collection literals, `linear` capabilities, and cross-module linking next.
+Everything still marked **[core]**/**[design]** above is tracked in the project tracker. The
+MARV-48 application-language wave starts with project/package/module discovery beyond `std`,
+bytes/UTF-8, HTTP/server capabilities, richer collections, collection literals, iterators,
+`linear` resource capabilities, structured concurrency, `unsafeSites`, and broader verification.
