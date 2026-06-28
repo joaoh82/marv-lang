@@ -736,8 +736,10 @@ fn compile_fn(
                 tys,
             };
             let result = trans.eval(inner)?;
-            let ret = trans.as_word(result)?;
-            trans.builder.ins().return_(&[ret]);
+            if !matches!(result, Slot::Returned) {
+                let ret = trans.as_word(result)?;
+                trans.builder.ins().return_(&[ret]);
+            }
         }
         builder.finalize();
     }
@@ -761,6 +763,7 @@ fn is_no_slot(t: &Type, world: &World) -> bool {
 enum Slot {
     Val(Value),
     Unit,
+    Returned,
     Partial {
         func: Hash,
         got: Vec<Slot>,
@@ -775,6 +778,11 @@ enum Slot {
         tag: u32,
         fields: Vec<Slot>,
     },
+}
+
+enum LoopBody {
+    Continue(Vec<Value>),
+    Returned,
 }
 
 /// The per-function translation state.
@@ -811,6 +819,9 @@ impl Trans<'_, '_> {
 
             Core::Let { value, body } => {
                 let v = self.eval(value)?;
+                if matches!(v, Slot::Returned) {
+                    return Ok(Slot::Returned);
+                }
                 let world = self.world;
                 let t = layout::type_of(world, value, &mut self.tys);
                 self.env.push(v);
@@ -885,6 +896,12 @@ impl Trans<'_, '_> {
                 "capability perform (use the interpreter)".into(),
             )),
             Core::Raise { .. } => Err(CodegenError::Unsupported("raise".into())),
+            Core::Return { value } => {
+                let value = self.eval_atom(value)?;
+                let ret = self.as_word(value)?;
+                self.builder.ins().return_(&[ret]);
+                Ok(Slot::Returned)
+            }
         }
     }
 
@@ -972,16 +989,18 @@ impl Trans<'_, '_> {
         // the carried slots, jump back.
         self.builder.switch_to_block(body_block);
         self.builder.seal_block(body_block);
-        let next_words = self.eval_loop_body(body, k)?;
-        let next_args: Vec<BlockArg> = next_words.into_iter().map(BlockArg::from).collect();
+        let body_result = self.eval_loop_body(body, k)?;
         for _ in 0..k {
             self.env.pop();
             self.tys.pop();
         }
-        if let Some(mark) = heap_mark {
-            self.heap_reset(mark);
+        if let LoopBody::Continue(next_words) = body_result {
+            let next_args: Vec<BlockArg> = next_words.into_iter().map(BlockArg::from).collect();
+            if let Some(mark) = heap_mark {
+                self.heap_reset(mark);
+            }
+            self.builder.ins().jump(header, &next_args);
         }
-        self.builder.ins().jump(header, &next_args);
         self.builder.seal_block(header);
 
         // Exit: the loop's result is the final carried state.
@@ -1009,10 +1028,13 @@ impl Trans<'_, '_> {
     /// `Match` whose every arm yields the k-tuple, merged field-by-field through
     /// `k` block params rather than boxed. `Let` bindings in the spine are emitted
     /// in order, exactly as [`Self::eval`] would.
-    fn eval_loop_body(&mut self, body: &Core, k: usize) -> Result<Vec<Value>, CodegenError> {
+    fn eval_loop_body(&mut self, body: &Core, k: usize) -> Result<LoopBody, CodegenError> {
         match body {
             Core::Let { value, body } => {
                 let v = self.eval(value)?;
+                if matches!(v, Slot::Returned) {
+                    return Ok(LoopBody::Returned);
+                }
                 let t = layout::type_of(self.world, value, &mut self.tys);
                 self.env.push(v);
                 self.tys.push(t);
@@ -1032,11 +1054,13 @@ impl Trans<'_, '_> {
             _ => {
                 let s = self.eval(body)?;
                 match s {
+                    Slot::Returned => Ok(LoopBody::Returned),
                     Slot::Tuple { fields, .. } => fields
                         .into_iter()
                         .map(|f| self.as_word(f))
-                        .collect::<Result<Vec<_>, _>>(),
-                    Slot::Unit if k == 0 => Ok(Vec::new()),
+                        .collect::<Result<Vec<_>, _>>()
+                        .map(LoopBody::Continue),
+                    Slot::Unit if k == 0 => Ok(LoopBody::Continue(Vec::new())),
                     _ => Err(CodegenError::Unsupported(
                         "loop body did not produce its carried state".into(),
                     )),
@@ -1054,7 +1078,7 @@ impl Trans<'_, '_> {
         scrutinee: &Atom,
         branches: &[Branch],
         k: usize,
-    ) -> Result<Vec<Value>, CodegenError> {
+    ) -> Result<LoopBody, CodegenError> {
         let scrut_ty = layout::atom_type(self.world, scrutinee, &self.tys);
         let boxed = scrut_ty
             .as_ref()
@@ -1065,6 +1089,7 @@ impl Trans<'_, '_> {
         for _ in 0..k {
             self.builder.append_block_param(merge, WORD);
         }
+        let mut any_continue = false;
 
         if boxed {
             // Boxed enum/struct scrutinee: load the tag and `br_table` over the
@@ -1107,13 +1132,16 @@ impl Trans<'_, '_> {
                     self.env.push(Slot::Val(v));
                     self.tys.push(field_tys.get(i).cloned());
                 }
-                let words = self.eval_loop_body(&br.body, k)?;
+                let result = self.eval_loop_body(&br.body, k)?;
                 for _ in 0..pushed {
                     self.env.pop();
                     self.tys.pop();
                 }
-                let args: Vec<BlockArg> = words.into_iter().map(BlockArg::from).collect();
-                self.builder.ins().jump(merge, &args);
+                if let LoopBody::Continue(words) = result {
+                    any_continue = true;
+                    let args: Vec<BlockArg> = words.into_iter().map(BlockArg::from).collect();
+                    self.builder.ins().jump(merge, &args);
+                }
             }
         } else {
             // Scalar (`bool`/`if`) path: two arms, no bound fields (`spec/02` §D).
@@ -1133,21 +1161,30 @@ impl Trans<'_, '_> {
             // true branch (tag 1)
             self.builder.switch_to_block(then_block);
             self.builder.seal_block(then_block);
-            let tw = self.eval_loop_body(&branches[1].body, k)?;
-            let targs: Vec<BlockArg> = tw.into_iter().map(BlockArg::from).collect();
-            self.builder.ins().jump(merge, &targs);
+            if let LoopBody::Continue(tw) = self.eval_loop_body(&branches[1].body, k)? {
+                any_continue = true;
+                let targs: Vec<BlockArg> = tw.into_iter().map(BlockArg::from).collect();
+                self.builder.ins().jump(merge, &targs);
+            }
 
             // false branch (tag 0)
             self.builder.switch_to_block(else_block);
             self.builder.seal_block(else_block);
-            let ew = self.eval_loop_body(&branches[0].body, k)?;
-            let eargs: Vec<BlockArg> = ew.into_iter().map(BlockArg::from).collect();
-            self.builder.ins().jump(merge, &eargs);
+            if let LoopBody::Continue(ew) = self.eval_loop_body(&branches[0].body, k)? {
+                any_continue = true;
+                let eargs: Vec<BlockArg> = ew.into_iter().map(BlockArg::from).collect();
+                self.builder.ins().jump(merge, &eargs);
+            }
         }
 
+        if !any_continue {
+            return Ok(LoopBody::Returned);
+        }
         self.builder.switch_to_block(merge);
         self.builder.seal_block(merge);
-        Ok(self.builder.block_params(merge).to_vec())
+        Ok(LoopBody::Continue(
+            self.builder.block_params(merge).to_vec(),
+        ))
     }
 
     /// Lower a runtime element store `s[i] = e` ([`Core::IndexSet`], MARV-33).
@@ -1790,6 +1827,9 @@ impl Trans<'_, '_> {
         match s {
             Slot::Val(v) => Ok(v),
             Slot::Unit => Ok(self.builder.ins().iconst(WORD, 0)),
+            Slot::Returned => Err(CodegenError::Unsupported(
+                "early return used as a value".into(),
+            )),
             Slot::Partial { .. } => Err(CodegenError::Unsupported(
                 "a partially-applied function used as a value".into(),
             )),

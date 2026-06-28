@@ -169,11 +169,15 @@ capability parameters), struct literals + indexing + assignment, `char` literals
 explicit-`Alloc` growable operations, `while`/`for` loops,
 `let`/`var`, `if`/`else`, arithmetic/boolean ops, the prefix unary
 operators (`-e`, `not e`, `&e`/`&mut e`), calls/recursion,
-`pure` + `requires`/`ensures` contracts); collection literals, `linear` capabilities, and
-richer package metadata/query coverage are the next surface work. Local non-`std` source imports
-now lower/check/run/build as module sets, and the content store supports lockfile-pinned
-cross-module builds by hash. The full backlog (surface growth → backend breadth → verification breadth → AOT/LLVM →
-self-hosting) — with phases, ordering, and the dependency graph — is in
+`pure` + `requires`/`ensures` contracts). Local non-`std` source imports now
+lower/check/run/build as module sets, and the content store supports
+lockfile-pinned cross-module builds by hash. The remaining MARV-48
+application-language wave covers richer package metadata/query coverage,
+collections and literals, bytes/UTF-8, JSON, HTTP/server capabilities,
+structured concurrency, `unsafe`/FFI auditability, and deeper verification. The
+full backlog (surface growth → backend breadth → verification breadth →
+application runtime → AOT/LLVM → self-hosting) — with phases, ordering, and the
+dependency graph — is in
 [`docs/roadmap.md`](docs/roadmap.md), mapped to the `MARV-#` tasks in the project tracker.
 
 ## Contributing

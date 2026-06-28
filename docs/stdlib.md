@@ -11,10 +11,11 @@ the capability interfaces every program links against (`spec/01` §§3, 5, 6).
 > resolution covers imported **enum constructors and `match`es** (MARV-18): each `std/` file —
 > and any program importing one — checks standalone (`marv check std/result.mv` resolves the
 > `Option.Some(x)` / `Option.None` it builds to the imported enum's constructors;
-> `examples/optionals.mv` does the same from user code). Still pending:
-> cross-*module* error-set propagation and the persistent content store that links defs by
-> hash (MARV-14), and `linear` capabilities (so a `Conn` must be `close`d). The capability
-> *model* is also exercised over the Core IR and on WebAssembly (host imports).
+> `examples/optionals.mv` does the same from user code). The persistent content store and
+> pinned hash linking are done (MARV-14); the remaining module work is broader project/package
+> source discovery beyond `std` (MARV-49). Still pending: `linear` capabilities, so a `Conn`
+> must be `close`d exactly once (MARV-27). The capability *model* is also exercised over the
+> Core IR and on WebAssembly (host imports).
 
 ## Data types
 

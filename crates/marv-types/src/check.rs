@@ -107,6 +107,7 @@ pub fn check_def(world: &World, def: &Def, name: Option<&str>) -> Vec<Diagnostic
     let mut c = Checker {
         world,
         diags: Vec::new(),
+        return_ty: None,
     };
     c.check_def(def, name);
     c.diags
@@ -134,6 +135,7 @@ pub fn effect_row(world: &World, def: &Def) -> EffectRow {
     let mut c = Checker {
         world,
         diags: Vec::new(),
+        return_ty: None,
     };
     // Peel the curried arrow/lambda spine exactly as `check_fn` does, descending
     // into the innermost body before synthesizing its effect row.
@@ -163,6 +165,7 @@ pub fn effect_row(world: &World, def: &Def) -> EffectRow {
 struct Checker<'a> {
     world: &'a World,
     diags: Vec<Diagnostic>,
+    return_ty: Option<Type>,
 }
 
 impl<'a> Checker<'a> {
@@ -226,8 +229,10 @@ impl<'a> Checker<'a> {
             cur_body = lbody;
         }
         let declared_ret = cur_ty;
+        let previous_return_ty = self.return_ty.replace(declared_ret.clone());
 
         let out = self.synth(cur_body, &mut env);
+        self.return_ty = previous_return_ty;
 
         // Return-type check (§E: the body's type is the return type).
         if !compatible(&Ty::Known(declared_ret.clone()), &out.ty) {
@@ -520,6 +525,30 @@ impl<'a> Checker<'a> {
                     ty: Ty::Unknown,
                     eff,
                     uses,
+                }
+            }
+
+            Core::Return { value } => {
+                let vt = self.atom_ty(value, env);
+                if let Some(ret) = self.return_ty.clone() {
+                    if !compatible(&Ty::Known(ret.clone()), &vt) {
+                        self.emit(Diagnostic::error(
+                            Code::TypeMismatch,
+                            format!(
+                                "`return` has type `{}` but the function signature declares `{}`",
+                                show_ty(&vt),
+                                show_type(&ret)
+                            ),
+                        ));
+                    }
+                    if let Type::Ref { .. } = peel_ref_target(&ret) {
+                        self.emit(escaping_ref_diag(EscapeSite::Return));
+                    }
+                }
+                Out {
+                    ty: Ty::Unknown,
+                    eff: EffectRow::empty(),
+                    uses: atom_uses(value, env),
                 }
             }
 

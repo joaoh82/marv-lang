@@ -343,6 +343,9 @@ fn subst_core(c: &Core, subst: &dyn Fn(Hash) -> Option<Hash>) -> Core {
             error: subst_hash(*error, subst),
             args: args.iter().map(|a| subst_atom(a, subst)).collect(),
         },
+        Core::Return { value } => Core::Return {
+            value: subst_atom(value, subst),
+        },
         Core::Loop {
             state,
             invariant,
