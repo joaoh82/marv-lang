@@ -1,0 +1,51 @@
+mod app_invoice_summary
+import std.io (Alloc)
+import std.collections (List, with_capacity, push)
+
+fn is_digit(c: char) -> bool {
+    let n: i64 = (c as i64)
+    ((n >= ('0' as i64)) and (n <= ('9' as i64)))
+}
+
+fn digit_value(c: char) -> i64 {
+    ((c as i64) - ('0' as i64))
+}
+
+fn summarize(alloc: Alloc, record: str) -> i64 {
+    var amounts: List[i64] = with_capacity(alloc, 4)
+    var sign: i64 = 1
+    var i: i64 = 0
+    while (i < len(record))
+        invariant (i >= 0)
+    {
+        let c: char = record[i]
+        if (c == 'p') {
+            sign = 1
+            i = (i + 1)
+        } else if (c == 'd') {
+            sign = -1
+            i = (i + 1)
+        } else if is_digit(c) {
+            var value: i64 = 0
+            while ((i < len(record)) and is_digit(record[i]))
+                invariant (i >= 0)
+                invariant (value >= 0)
+            {
+                value = ((value * 10) + digit_value(record[i]))
+                i = (i + 1)
+            }
+            amounts = push(alloc, amounts, (sign * value))
+        } else {
+            i = (i + 1)
+        }
+    }
+    var total: i64 = 0
+    for amount in amounts {
+        total = (total + amount)
+    }
+    (((len(amounts) as i64) * 1000) + total)
+}
+
+fn main(alloc: Alloc) -> i64 {
+    summarize(alloc, "p:120;d:80;p:30;")
+}

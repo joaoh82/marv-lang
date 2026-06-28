@@ -65,7 +65,10 @@ fn interp_i64(
 ) -> i64 {
     let arg_strs: Vec<String> = args.iter().map(|a| a.to_string()).collect();
     let program = Program::new(module_path, defs, world);
-    let grant = if matches!(file, "list.mv" | "strings.mv") {
+    let grant = if matches!(
+        file,
+        "list.mv" | "strings.mv" | "app_tokenizer.mv" | "app_router.mv" | "app_invoice_summary.mv"
+    ) {
         vec!["Alloc".to_string()]
     } else {
         Vec::new()
@@ -267,6 +270,11 @@ fn corpus_cases() -> Vec<(&'static str, &'static str, Vec<i64>, i64)> {
         // Strings: literal concat, slice, char access, `for c in s`, and
         // explicit-Alloc building from `List[char]`.
         ("strings.mv", "exercise", vec![], 324),
+        // MARV-40 app examples: app-shaped string/list programs with explicit
+        // Alloc, pinned across interpreter, Cranelift, and WASM.
+        ("app_tokenizer.mv", "main", vec![], 310),
+        ("app_router.mv", "main", vec![], 512),
+        ("app_invoice_summary.mv", "main", vec![], 3070),
     ]
 }
 

@@ -1,0 +1,35 @@
+mod app_tokenizer
+import std.io (Alloc)
+import std.collections (List, with_capacity, push, get)
+
+fn is_separator(c: char) -> bool {
+    ((c == ' ') or (c == ','))
+}
+
+fn summarize_tokens(alloc: Alloc, input: str) -> i64
+    requires (len(input) >= 1)
+{
+    var tokens: List[str] = with_capacity(alloc, 4)
+    var start: i64 = 0
+    var i: i64 = 0
+    while (i < len(input))
+        invariant (i >= 0)
+        invariant (start >= 0)
+    {
+        if is_separator(input[i]) {
+            tokens = push(alloc, tokens, input[start..i])
+            start = (i + 1)
+            i = (i + 1)
+        } else {
+            i = (i + 1)
+        }
+    }
+    tokens = push(alloc, tokens, input[start..len(input)])
+    let first: str = get(tokens, 0)
+    let last: str = get(tokens, (len(tokens) - 1))
+    ((((len(tokens) as i64) * 100) + (len(first) as i64)) + (len(last) as i64))
+}
+
+fn main(alloc: Alloc) -> i64 {
+    summarize_tokens(alloc, "alpha beta,gamma")
+}
