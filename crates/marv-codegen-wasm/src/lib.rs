@@ -727,6 +727,8 @@ enum Out {
     Stack,
     /// A unit value: nothing pushed.
     Unit,
+    /// The current path already emitted a function return.
+    Returned,
     /// A partially-applied function (compile-time only): nothing pushed.
     Partial { func: Hash, args: Vec<ArgVal> },
     /// A compile-time aggregate (a product/struct `Ctor`, an enum-variant `Ctor`
@@ -734,6 +736,11 @@ enum Out {
     /// locals; nothing is pushed. A `Proj` selects one; it is **boxed** into
     /// linear memory lazily — only when it must become a single word (MARV-9).
     Tuple { tag: u32, fields: Vec<Slot> },
+}
+
+enum LoopBody {
+    Continue,
+    Returned,
 }
 
 /// An argument resolved to something re-emittable at the saturating call site,
@@ -807,7 +814,9 @@ fn compile_fn(
         next_local: n_params,
     };
     let out = t.eval(inner)?;
-    t.coerce_to_word(out)?;
+    if !matches!(out, Out::Returned) {
+        t.coerce_to_word(out)?;
+    }
 
     let extra = t.next_local - n_params;
     let mut func = Function::new(if extra > 0 {
@@ -867,6 +876,7 @@ impl Trans<'_> {
                         Slot::Local(l)
                     }
                     Out::Unit => Slot::Unit,
+                    Out::Returned => return Ok(Out::Returned),
                     Out::Partial { func, args } => Slot::Partial { func, args },
                     Out::Tuple { tag, fields } => Slot::Tuple { tag, fields },
                 };
@@ -941,6 +951,12 @@ impl Trans<'_> {
 
             Core::Lam { .. } => Err(WasmError::Unsupported("first-class lambda".into())),
             Core::Raise { .. } => Err(WasmError::Unsupported("raise".into())),
+            Core::Return { value } => {
+                let out = self.eval_atom(value)?;
+                self.coerce_to_word(out)?;
+                self.emit(Instruction::Return);
+                Ok(Out::Returned)
+            }
         }
     }
 
@@ -995,12 +1011,13 @@ impl Trans<'_> {
         // through an `if`/`match` branch join, where each arm writes its own
         // k-tuple into them (MARV-21), so the carried state stays in locals and is
         // never boxed (the alloc-free-loops property, MARV-9).
-        self.eval_loop_body(body, &carried)?;
-        if let Some(mark) = heap_mark {
-            self.emit(Instruction::LocalGet(mark));
-            self.emit(Instruction::GlobalSet(BUMP));
+        if let LoopBody::Continue = self.eval_loop_body(body, &carried)? {
+            if let Some(mark) = heap_mark {
+                self.emit(Instruction::LocalGet(mark));
+                self.emit(Instruction::GlobalSet(BUMP));
+            }
+            self.emit(Instruction::Br(0));
         }
-        self.emit(Instruction::Br(0));
         self.emit(Instruction::End); // loop
         self.emit(Instruction::End); // block
         if let Some(mark) = heap_mark {
@@ -1026,7 +1043,7 @@ impl Trans<'_> {
     /// arm copies its own k-tuple into `dest`, so the carried state stays in
     /// locals. `Let` bindings in the spine are emitted in order, exactly as
     /// [`Self::eval`] would.
-    fn eval_loop_body(&mut self, body: &Core, dest: &[u32]) -> Result<(), WasmError> {
+    fn eval_loop_body(&mut self, body: &Core, dest: &[u32]) -> Result<LoopBody, WasmError> {
         match body {
             Core::Let { value, body } => {
                 let out = self.eval(value)?;
@@ -1037,6 +1054,7 @@ impl Trans<'_> {
                         Slot::Local(l)
                     }
                     Out::Unit => Slot::Unit,
+                    Out::Returned => return Ok(LoopBody::Returned),
                     Out::Partial { func, args } => Slot::Partial { func, args },
                     Out::Tuple { tag, fields } => Slot::Tuple { tag, fields },
                 };
@@ -1058,6 +1076,7 @@ impl Trans<'_> {
                 let out = self.eval(body)?;
                 let next_slots = match out {
                     Out::Tuple { fields, .. } => fields,
+                    Out::Returned => return Ok(LoopBody::Returned),
                     Out::Unit if dest.is_empty() => Vec::new(),
                     _ => {
                         return Err(WasmError::Unsupported(
@@ -1065,7 +1084,8 @@ impl Trans<'_> {
                         ))
                     }
                 };
-                self.copy_into_carried(dest, &next_slots)
+                self.copy_into_carried(dest, &next_slots)?;
+                Ok(LoopBody::Continue)
             }
         }
     }
@@ -1104,7 +1124,7 @@ impl Trans<'_> {
         scrutinee: &Atom,
         branches: &[Branch],
         dest: &[u32],
-    ) -> Result<(), WasmError> {
+    ) -> Result<LoopBody, WasmError> {
         let scrut_ty = layout::atom_type(self.world, scrutinee, &self.tys);
         let boxed = scrut_ty
             .as_ref()
@@ -1126,7 +1146,11 @@ impl Trans<'_> {
             self.emit(Instruction::I32WrapI64);
             self.emit(Instruction::I64Load(memarg(0)));
             self.emit(Instruction::LocalSet(tag));
-            self.emit_loop_match_arm(branches, 0, ptr, tag, &scrut_ty, dest)
+            if self.emit_loop_match_arm(branches, 0, ptr, tag, &scrut_ty, dest)? {
+                Ok(LoopBody::Continue)
+            } else {
+                Ok(LoopBody::Returned)
+            }
         } else {
             // Scalar (`bool`/`if`) path: two arms, no bound fields (`spec/02` §D).
             if branches.len() != 2 || branches.iter().any(|b| b.binds != 0) {
@@ -1143,12 +1167,22 @@ impl Trans<'_> {
             self.emit(Instruction::I64Ne); // i32: 1 if nonzero (true)
             self.emit(Instruction::If(BlockType::Empty));
             // `then` = the true arm (branch tag 1).
-            self.eval_loop_body(&branches[1].body, dest)?;
+            let then_continues = matches!(
+                self.eval_loop_body(&branches[1].body, dest)?,
+                LoopBody::Continue
+            );
             self.emit(Instruction::Else);
             // `else` = the false arm (branch tag 0).
-            self.eval_loop_body(&branches[0].body, dest)?;
+            let else_continues = matches!(
+                self.eval_loop_body(&branches[0].body, dest)?,
+                LoopBody::Continue
+            );
             self.emit(Instruction::End);
-            Ok(())
+            if then_continues || else_continues {
+                Ok(LoopBody::Continue)
+            } else {
+                Ok(LoopBody::Returned)
+            }
         }
     }
 
@@ -1165,19 +1199,24 @@ impl Trans<'_> {
         tag: u32,
         scrut_ty: &Type,
         dest: &[u32],
-    ) -> Result<(), WasmError> {
+    ) -> Result<bool, WasmError> {
         if t + 1 == branches.len() {
-            return self.emit_loop_bind_and_body(&branches[t], t, ptr, scrut_ty, dest);
+            return self
+                .emit_loop_bind_and_body(&branches[t], t, ptr, scrut_ty, dest)
+                .map(|r| matches!(r, LoopBody::Continue));
         }
         self.emit(Instruction::LocalGet(tag));
         self.emit(Instruction::I64Const(t as i64));
         self.emit(Instruction::I64Eq);
         self.emit(Instruction::If(BlockType::Empty));
-        self.emit_loop_bind_and_body(&branches[t], t, ptr, scrut_ty, dest)?;
+        let then_continues = matches!(
+            self.emit_loop_bind_and_body(&branches[t], t, ptr, scrut_ty, dest)?,
+            LoopBody::Continue
+        );
         self.emit(Instruction::Else);
-        self.emit_loop_match_arm(branches, t + 1, ptr, tag, scrut_ty, dest)?;
+        let else_continues = self.emit_loop_match_arm(branches, t + 1, ptr, tag, scrut_ty, dest)?;
         self.emit(Instruction::End);
-        Ok(())
+        Ok(then_continues || else_continues)
     }
 
     /// Bind variant `tag`'s fields from the payload (`[i + 1]`) into fresh locals,
@@ -1190,7 +1229,7 @@ impl Trans<'_> {
         ptr: u32,
         scrut_ty: &Type,
         dest: &[u32],
-    ) -> Result<(), WasmError> {
+    ) -> Result<LoopBody, WasmError> {
         let field_tys =
             layout::variant_fields(self.world, scrut_ty, tag as u32).unwrap_or_default();
         let pushed = br.binds as usize;
@@ -1203,12 +1242,12 @@ impl Trans<'_> {
             self.env.push(Slot::Local(l));
             self.tys.push(field_tys.get(i).cloned());
         }
-        self.eval_loop_body(&br.body, dest)?;
+        let result = self.eval_loop_body(&br.body, dest)?;
         for _ in 0..pushed {
             self.env.pop();
             self.tys.pop();
         }
-        Ok(())
+        Ok(result)
     }
 
     /// Lower a runtime element store `s[i] = e` ([`Core::IndexSet`], MARV-33).
@@ -1669,6 +1708,9 @@ impl Trans<'_> {
                 Ok(Slot::Local(l))
             }
             Out::Unit => Ok(Slot::Unit),
+            Out::Returned => Err(WasmError::Unsupported(
+                "early return used as a value".into(),
+            )),
             Out::Partial { func, args } => Ok(Slot::Partial { func, args }),
             Out::Tuple { tag, fields } => Ok(Slot::Tuple { tag, fields }),
         }
@@ -2233,6 +2275,7 @@ impl Trans<'_> {
                 self.emit(Instruction::I64Const(0));
                 Ok(())
             }
+            Out::Returned => Ok(()),
             Out::Partial { .. } => Err(WasmError::Unsupported(
                 "a partially-applied function used as a value".into(),
             )),

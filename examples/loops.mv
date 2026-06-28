@@ -85,3 +85,17 @@ pure fn weighted(n: i64) -> i64 {
     }
     acc
 }
+
+/// MARV-58: a loop body can return from the enclosing function early. Paths
+/// that do not return continue to thread the loop-carried state normally.
+pure fn first_hit(n: i64, target: i64) -> i64 {
+    var i: i64 = n
+    while (i > 0) {
+        if (i == target) {
+            return i
+        } else {
+            i = (i - 1)
+        }
+    }
+    (0 - 1)
+}

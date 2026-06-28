@@ -147,6 +147,11 @@ fn corpus_cases() -> Vec<(&'static str, &'static str, Vec<i64>, i64)> {
         // single-carried-variable loop with no invariant (the `k == 1` path)
         ("loops.mv", "count_down", vec![7], 0),
         ("loops.mv", "count_down", vec![0], 0),
+        // Early return from inside loop bodies (MARV-58): returned paths exit the
+        // enclosing function; non-returning paths keep threading carried state.
+        ("loops.mv", "first_hit", vec![5, 3], 3),
+        ("loops.mv", "first_hit", vec![5, 9], -1),
+        ("loops.mv", "first_even_for", vec![], 4),
         // Branch-join loop bodies (MARV-21): a loop body whose tail is an
         // `if`/`else if`/`match` threads the carried `var`s through the branch
         // join. Each branch yields the next-state tuple, kept in registers/locals

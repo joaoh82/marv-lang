@@ -53,8 +53,9 @@ slice of structs, nested `for`s (depth-keyed index names), and sequential `for`s
 (`tests/run/slices.mv`, `examples/slices.mv`); a loop body whose
 tail is an `if`/`match` now threads the carried `var`s through the branch join (**MARV-21** — each
 branch yields the next-state tuple, kept register/local-resident so the loop stays alloc-free);
-only a `return` tail (early function exit) still awaits lowering; Tier-2 SMT discharge of
-loop invariants landed as **MARV-22** (the loop slice of MARV-11)
+early `return` from inside loop bodies now exits the enclosing function across interpreter,
+Cranelift, and WASM (**MARV-58**); Tier-2 SMT discharge of loop invariants landed as
+**MARV-22** (the loop slice of MARV-11)
 · **MARV-42** growable `std.collections.List[T]` (depends on MARV-41 `Alloc`): `List`
 is now a concrete std type instead of an opaque soft-skipped import, with
 `new`/`with_capacity`, value-semantics `push`/`pop`/`set`, `get`/index, `len`,

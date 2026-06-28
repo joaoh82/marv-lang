@@ -677,6 +677,7 @@ impl Encoder<'_, '_> {
             Core::App { .. } => Err(stop("function calls are outside the verified subset")),
             Core::Perform { .. } => Err(stop("a `perform` makes the function impure")),
             Core::Raise { .. } => Err(stop("`raise` is outside the verified subset")),
+            Core::Return { .. } => Err(stop("early `return` is outside the verified subset")),
             Core::Lam { .. } => Err(stop("nested lambda is outside the verified subset")),
         }
     }

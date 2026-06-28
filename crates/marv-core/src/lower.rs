@@ -117,10 +117,6 @@ pub enum LowerError {
     /// length, so a slice (`[]T`, no compile-time length) or a base whose type
     /// M1 cannot resolve is not yet supported.
     IndexAssignUnsupported,
-    /// A loop body ends in a `return` tail — early function exit from inside a
-    /// loop, which is not lowered yet (MARV-21 threads loop-carried `var`s through
-    /// `if`/`match` branch joins, but `return` is out of scope).
-    LoopBodyControlFlow,
 }
 
 impl std::fmt::Display for LowerError {
@@ -230,11 +226,6 @@ impl std::fmt::Display for LowerError {
                 f,
                 "index assignment `a[i] = e` requires a fixed-length array base (`[N]T`); a slice \
                  (`[]T`) has no compile-time length to unroll the element update over yet"
-            ),
-            LowerError::LoopBodyControlFlow => write!(
-                f,
-                "a loop body cannot yet end in a `return` (early function exit from inside a loop \
-                 is not lowered yet); an `if`/`match` branch join is supported"
             ),
         }
     }
@@ -1599,6 +1590,18 @@ impl Lowerer {
         }
     }
 
+    fn lower_return_value(
+        &self,
+        value: &Option<Expr>,
+        env: &[Binding],
+        b: &mut Builder,
+    ) -> Result<Atom, LowerError> {
+        match value {
+            Some(e) => self.emit_atom(e, env, b),
+            None => Ok(Atom::Lit(Literal::Unit)),
+        }
+    }
+
     /// Lower an `if`/`else` chain to a `bool` `Match`. Branch order follows
     /// variant tag: `false` (tag 0) then `true` (tag 1).
     fn lower_if(&self, ife: &IfExpr, env: &[Binding], b: &mut Builder) -> Result<Core, LowerError> {
@@ -2680,9 +2683,10 @@ impl Lowerer {
             }
             Some(Tail::If(ife)) => self.lower_loop_if(ife, carried, env, b),
             Some(Tail::Match(m)) => self.lower_loop_match(m, carried, env, b),
-            // `return` inside a loop body is early function exit (out of scope);
-            // keep the clear error for it.
-            Some(Tail::Return(_)) => Err(LowerError::LoopBodyControlFlow),
+            Some(Tail::Return(value)) => {
+                let value = self.lower_return_value(value, env, b)?;
+                Ok(Core::Return { value })
+            }
         }
     }
 
@@ -3899,6 +3903,9 @@ fn to_indices(c: &Core, depth: u32) -> Core {
         Core::Raise { error, args } => Core::Raise {
             error: *error,
             args: args.iter().map(|a| atom_to_index(a, depth)).collect(),
+        },
+        Core::Return { value } => Core::Return {
+            value: atom_to_index(value, depth),
         },
         Core::Loop {
             state,
