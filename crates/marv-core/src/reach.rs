@@ -199,6 +199,7 @@ fn collect_core_syms(c: &Core, out: &mut Vec<Hash>) {
             out.push(*error);
             args.iter().for_each(|a| atom(a, out));
         }
+        Core::Return { value } => atom(value, out),
         Core::Loop { cond, body, .. } => {
             collect_core_syms(cond, out);
             collect_core_syms(body, out);

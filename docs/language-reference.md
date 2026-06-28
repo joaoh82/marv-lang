@@ -189,8 +189,9 @@ pure fn weighted(n: i64) -> i64 {
 
 The next-state tuple is computed per branch and kept in registers/locals — never boxed — so a
 branch-join loop stays **alloc-free** like a straight-line one (`tests/run/loops.mv`, exercised
-across interp/Cranelift/WASM in the differential corpus). The one tail still not lowered is
-**`return`** inside a loop body (early function exit); restructure it as a loop-carried result.
+across interp/Cranelift/WASM in the differential corpus). A loop-body `return` exits the
+enclosing function immediately (MARV-58); paths that do not return continue to thread the
+loop-carried state normally.
 
 ## 5. Effects & capabilities **[impl]**
 

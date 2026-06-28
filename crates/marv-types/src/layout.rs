@@ -231,7 +231,7 @@ pub fn type_of(world: &World, c: &Core, tys: &mut Vec<Option<Type>>) -> Option<T
             Some(Type::Tuple(elems))
         }
 
-        Core::Raise { .. } => None,
+        Core::Raise { .. } | Core::Return { .. } => None,
     }
 }
 

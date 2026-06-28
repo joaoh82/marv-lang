@@ -460,6 +460,10 @@ fn encode_core(e: &mut Encoder, c: &Core) {
             encode_atom(e, index);
             encode_atom(e, value);
         }
+        Core::Return { value } => {
+            e.u8(19);
+            encode_atom(e, value);
+        }
     }
 }
 
