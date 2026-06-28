@@ -736,6 +736,7 @@ dependencies = [
  "marv-core",
  "marv-db",
  "marv-store",
+ "marv-syntax",
  "marv-types",
  "marv-verify",
  "salsa",

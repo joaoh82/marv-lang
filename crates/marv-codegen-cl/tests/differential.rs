@@ -17,6 +17,9 @@ use marv_db::CoreModuleSpec;
 use marv_interp::{Program, RunError, Value};
 use marv_types::{check_def, Code, Severity, World};
 
+type RuntimeDef = (marv_core::Hash, String, Def);
+type RuntimeAlias = (String, marv_core::Hash);
+
 /// Absolute path to a file in the repository-level `tests/run/` corpus.
 fn corpus(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -64,13 +67,7 @@ fn load_source(name: &str) -> (String, Vec<(String, Def)>, World) {
 
 /// Parse/lower a `.mv` file and key all lowered modules by resolved symbol
 /// names, so source-level std functions can execute through the backend corpus.
-fn load_source_hashed(
-    name: &str,
-) -> (
-    Vec<(marv_core::Hash, String, Def)>,
-    Vec<(String, marv_core::Hash)>,
-    World,
-) {
+fn load_source_hashed(name: &str) -> (Vec<RuntimeDef>, Vec<RuntimeAlias>, World) {
     let path = corpus(name);
     let src = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path:?}: {e}"));
     let module = marv_syntax::parse(&src).unwrap_or_else(|e| panic!("parse {name}: {e}"));
@@ -118,8 +115,8 @@ fn load_source_hashed(
 
 /// Interpret `entry(args)` and extract its integer result (the oracle).
 fn interp_i64(
-    defs: Vec<(marv_core::Hash, String, Def)>,
-    aliases: Vec<(String, marv_core::Hash)>,
+    defs: Vec<RuntimeDef>,
+    aliases: Vec<RuntimeAlias>,
     world: World,
     entry: &str,
     args: &[i64],
@@ -169,8 +166,8 @@ fn interp_i64_module(
 
 /// JIT-compile the module and call `entry(args)` natively.
 fn cranelift_i64(
-    defs: &[(marv_core::Hash, String, Def)],
-    aliases: &[(String, marv_core::Hash)],
+    defs: &[RuntimeDef],
+    aliases: &[RuntimeAlias],
     world: &World,
     entry: &str,
     args: &[i64],

@@ -174,11 +174,14 @@ literals + index reads + assignment (`lvalue = e`, `var`), `while`/`for` loops w
 projection, generic parameter lists + type arguments, `interface`/`impl` with
 monomorphization, **capabilities & `perform` from source** (capability method calls →
 `Perform`, `io.fs()` narrowing, inferred-and-checked effect rows), and `requires`/`ensures`
-contracts. The next roadmap wave is MARV-48: project/package/module discovery beyond `std`,
-collection literals, `linear` resource capabilities, bytes/UTF-8, JSON, HTTP/server runtime
-capabilities, structured concurrency, and `unsafeSites`. For anything not yet expressible,
-construct a `*.core.json` snapshot (see [`store.md`](store.md) and the `tests/run/*.core.json`
-fixtures) or check [`roadmap.md`](roadmap.md).
+contracts. Local source imports are discoverable by the CLI, and source-only
+JSON-RPC snapshots can be checked as a module set. The remaining MARV-48
+roadmap wave includes collection literals, `linear` resource capabilities,
+bytes/UTF-8, JSON, HTTP/server runtime capabilities, structured concurrency,
+`unsafeSites`, richer package metadata, and package-aware read queries. For
+anything not yet expressible, construct a `*.core.json` snapshot (see
+[`store.md`](store.md) and the `tests/run/*.core.json` fixtures) or check
+[`roadmap.md`](roadmap.md).
 
 See [`../spec/03-compiler-protocol.md`](../spec/03-compiler-protocol.md) for the full protocol
 method catalog and worked examples.

@@ -331,7 +331,8 @@ projection, and `requires`/`ensures` contracts. That is enough for the
 `mutation`, `loops`, `casts`, `hello`, `read_file`, …), the `std/` prelude (`option`, `result`,
 `ord`, `capabilities`, `collections`, `bytes`), and the M4/M6 gates.
 Everything still marked **[core]**/**[design]** above is tracked in the project
-tracker. The remaining MARV-48 application-language wave covers HTTP/server
-capabilities, richer collections, collection literals, iterators, `linear`
-resource capabilities, structured concurrency, `unsafeSites`, and broader
-verification.
+tracker. Local source imports already lower/check/run/build as module sets; the
+remaining MARV-48 application-language wave covers HTTP/server capabilities,
+richer collections, collection literals, iterators, `linear` resource
+capabilities, structured concurrency, `unsafeSites`, richer package metadata/query
+coverage, and broader verification.

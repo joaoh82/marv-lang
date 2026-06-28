@@ -29,20 +29,28 @@ lowered through the front end) or a `*.core.json` **Core-IR snapshot**
 `io.fs()`) lowers to a `Core::Perform` and its effect row is inferred and checked
 (MARV-6). `.core.json` remains useful for hand-authoring Core directly.
 
-**`import std.*` resolution.** When a source file imports a `std` module
-(e.g. `import std.io (Io)`), the CLI locates the `std/` source directory — the
-`MARV_STD` environment variable if set, else the nearest ancestor of the file that
-contains one — parses the imported modules (transitively), and lowers them
-alongside your file so the imported declarations are in scope: capability
-interfaces, and (MARV-18) **enums** — a single file that constructs or matches an
-imported enum (`Option.Some(x)`, `match res { Result.Ok(x) => … }`) lowers it to
-real constructors with the imported enum's nominal and tags, so
-`marv check std/result.mv` works standalone. If an imported enum's source cannot
-be resolved (the named `std` module has no file, or the import is not `std.*`),
-referencing its constructors is a clear lower error naming the import and its
-module. `build --store` / `run --store` now use the content store for pinned
-hash linking; broader project/package/module source discovery beyond `std` is
-tracked separately as MARV-49.
+**Source import discovery.** When a source file imports another module, the CLI
+lowers the imported source modules alongside the entry file, transitively. `std.*`
+imports are found through `MARV_STD` or the nearest `std/` ancestor. Non-`std`
+imports are found under the nearest ancestor containing `marv.toml`; if there is
+no manifest yet, the entry file's directory is the source root. Files are indexed
+by their declared `mod` path, so file names are not semantic. Missing or
+ambiguous non-`std` module declarations are load errors, not silent soft-skips.
+Missing `std` modules remain opaque so not-yet-surfaced builtins such as
+`std.math` can be imported without forcing a source file.
+
+```text
+pkg/
+  main.mv   # mod app;  import math (double)
+  math.mv   # mod math; pure fn double(...)
+```
+
+`marv check pkg/main.mv`, `marv run pkg/main.mv`, `marv build --run pkg/main.mv`,
+and `marv commit pkg/main.mv` all operate on the discovered module set. Imported
+definitions are frozen under their own qualified names (`math.double`), while the
+entry file keeps normal bare-entry behavior (`main`, or `--entry app.main`).
+`build --store` / `run --store` then use the content store for pinned hash
+linking.
 
 ## `marv fmt`
 
@@ -160,9 +168,10 @@ marv build examples/geometry.mv --entry max --run 3 7   # 7 — `translate` is
 ```
 
 The entry resolves as for `run`: `--entry NAME` (bare or qualified), else
-`main`, else the sole function. When none of those resolves (no `main` among
-several functions), the **whole module** is compiled — and `commit`/audit flows
-always operate on every definition; pruning is a `build` behavior only.
+`main` in the entry file, else the sole function. When none of those resolves
+(no `main` among several functions), the **whole module set** is compiled — and
+`commit`/audit flows always operate on every discovered definition; pruning is a
+`build` behavior only.
 
 - **`--target`** — `native-cranelift` (default) or `wasm-component`. LLVM is a
   later milestone. Unknown targets are rejected.

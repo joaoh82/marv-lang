@@ -226,6 +226,31 @@ fn stdio_ndjson_transport() {
 }
 
 #[test]
+fn source_snapshot_checks_as_a_module_set() {
+    let mut server = Server::new();
+    let app = "mod app\nimport math (double)\n\npure fn main() -> i64 {\n    double(21)\n}\n";
+    let math = "mod math\n\npure fn double(x: i64) -> i64 {\n    (x * 2)\n}\n";
+    let open = call(
+        &mut server,
+        "marv/openSnapshot",
+        json!({
+            "files": [
+                { "path": "app.mv", "text": app },
+                { "path": "math.mv", "text": math }
+            ]
+        }),
+    );
+    let s = open["snapshotId"].as_str().unwrap().to_string();
+
+    let checked = call(&mut server, "marv/check", json!({ "snapshotId": s }));
+    assert_eq!(
+        checked["diagnostics"].as_array().unwrap().len(),
+        0,
+        "two-file package snapshot checks cleanly: {checked:#}"
+    );
+}
+
+#[test]
 fn unknown_method_is_jsonrpc_error() {
     let mut server = Server::new();
     let resp = server.handle_request(json!({

@@ -11,6 +11,9 @@ use marv_interp::{Program, Value};
 use marv_types::{OpSig, World, WorldBuilder};
 use wasmtime::{Engine, Instance, Module, Store, Val};
 
+type RuntimeDef = (Hash, String, Def);
+type RuntimeAlias = (String, Hash);
+
 /// Absolute path into the repository-level `tests/run/` corpus.
 fn corpus(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -57,9 +60,7 @@ fn load_source(name: &str) -> (String, Vec<(String, Def)>, World) {
 
 /// Parse/lower a `.mv` file and key all lowered modules by resolved symbol
 /// names, so source-level std functions can execute through the backend corpus.
-fn load_source_hashed(
-    name: &str,
-) -> (String, Vec<(Hash, String, Def)>, Vec<(String, Hash)>, World) {
+fn load_source_hashed(name: &str) -> (String, Vec<RuntimeDef>, Vec<RuntimeAlias>, World) {
     let src = std::fs::read_to_string(corpus(name)).unwrap_or_else(|e| panic!("read {name}: {e}"));
     let module = marv_syntax::parse(&src).unwrap_or_else(|e| panic!("parse {name}: {e}"));
     let module_path = module.name.join(".");
@@ -105,8 +106,8 @@ fn load_source_hashed(
 }
 
 fn interp_i64(
-    defs: Vec<(Hash, String, Def)>,
-    aliases: Vec<(String, Hash)>,
+    defs: Vec<RuntimeDef>,
+    aliases: Vec<RuntimeAlias>,
     world: World,
     entry: &str,
     args: &[i64],
@@ -151,8 +152,8 @@ fn interp_i64_module(
 /// Compile to wasm, instantiate under wasmtime (no imports), and call `entry`.
 fn wasm_i64(
     module_path: &str,
-    defs: &[(Hash, String, Def)],
-    aliases: &[(String, Hash)],
+    defs: &[RuntimeDef],
+    aliases: &[RuntimeAlias],
     world: &World,
     entry: &str,
     args: &[i64],

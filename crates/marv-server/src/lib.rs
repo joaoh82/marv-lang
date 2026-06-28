@@ -27,11 +27,14 @@
 use std::collections::BTreeMap;
 use std::io::{BufRead, Write};
 
+use marv_core::lower_modules;
 use marv_core::symbol_hash;
 use marv_db::{
-    analyze, repair_core_text, DefInfo, DiagInfo, FileAnalysis, MarvDatabase, SourceFile,
-    SourceKind, SrcSpan,
+    analyze, qualify, repair_core_text, DefInfo, DiagInfo, FileAnalysis, FixInfo, MarvDatabase,
+    SourceFile, SourceKind, SrcSpan,
 };
+use marv_syntax::parse;
+use marv_types::{check_def, World};
 use serde_json::{json, Value};
 
 /// A JSON-RPC error (`spec/03` is silent on codes, so we use the standard
@@ -371,6 +374,11 @@ impl Server {
         let want_def = scope.and_then(|s| s.get("def")).and_then(Value::as_str);
         let want_file = scope.and_then(|s| s.get("file")).and_then(Value::as_str);
 
+        if snap.files.len() > 1 && snap.files.iter().all(|f| f.kind == SourceKind::Source) {
+            let diags = self.check_source_snapshot(&snap, want_def, want_file)?;
+            return Ok(json!({ "diagnostics": diags }));
+        }
+
         let mut diags = Vec::new();
         for f in &snap.files {
             if let Some(wf) = want_file {
@@ -388,6 +396,71 @@ impl Server {
             }
         }
         Ok(json!({ "diagnostics": diags }))
+    }
+
+    fn check_source_snapshot(
+        &mut self,
+        snap: &Snapshot,
+        want_def: Option<&str>,
+        want_file: Option<&str>,
+    ) -> Result<Vec<Value>, RpcError> {
+        let mut modules = Vec::with_capacity(snap.files.len());
+        for f in &snap.files {
+            let module = parse(&f.text)
+                .map_err(|e| RpcError::app(format!("parse error in {}: {e}", f.path)))?;
+            modules.push(module);
+        }
+        let lowered =
+            lower_modules(&modules).map_err(|e| RpcError::app(format!("lower error: {e}")))?;
+        let world = World::from_modules(&lowered);
+
+        let mut diags = Vec::new();
+        for ((f, module), lowered_module) in
+            snap.files.iter().zip(modules.iter()).zip(lowered.iter())
+        {
+            if let Some(wf) = want_file {
+                if f.path != wf {
+                    continue;
+                }
+            }
+            let module_path = module.name.join(".");
+            for entry in &lowered_module.defs {
+                let qualified = qualify(&module_path, &entry.name);
+                if let Some(wd) = want_def {
+                    if wd != entry.name && wd != qualified {
+                        continue;
+                    }
+                }
+                for d in check_def(&world, &entry.def, Some(&entry.name)) {
+                    let info = DiagInfo {
+                        code: d.code.as_str().to_string(),
+                        severity: d.severity.as_str().to_string(),
+                        message: d.message,
+                        def: Some(qualified.clone()),
+                        span: None,
+                        related: d.related.into_iter().map(|r| r.message).collect(),
+                        fixes: d
+                            .fixes
+                            .into_iter()
+                            .map(|fx| FixInfo {
+                                title: fx.title,
+                                edits: fx
+                                    .edits
+                                    .into_iter()
+                                    .map(|e| marv_db::EditInfo {
+                                        span: None,
+                                        new_text: e.new_text,
+                                    })
+                                    .collect(),
+                                confidence: fx.confidence,
+                            })
+                            .collect(),
+                    };
+                    diags.push(diag_to_json(f, &info));
+                }
+            }
+        }
+        Ok(diags)
     }
 
     fn signature(&mut self, params: &Value) -> RpcResult {
