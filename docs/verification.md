@@ -31,7 +31,10 @@ an answer:
   [run-and-codegen.md](run-and-codegen.md)).
 - **Tier 2 — static proof (verified subset).** `marv verify` (`marv-verify`)
   discharges contracts with an SMT solver (z3, over SMT-LIB via `easy-smt`) for a
-  decidable-ish subset, returning a **proof** or a **counterexample**.
+  decidable-ish subset, returning a **proof** or a **counterexample**. The subset
+  is value-level: most effects are out of scope, but Alloc-only list operations
+  are abstracted enough to prove their returned value shape while leaving
+  capacity/allocation behavior to Tier 1.
 
 ## How a function becomes a proof
 
@@ -129,7 +132,8 @@ quantifiers as guarded SMT quantifiers.
 
 ## The verified subset (and honest boundaries)
 
-Tier 2 currently covers **pure** functions over:
+Tier 2 currently covers **pure** functions, plus functions whose only effect is
+the Alloc capability used by built-in list operations, over:
 
 - **Ints and bools** — arithmetic (`+ - *` and truncating `/ %`), comparisons,
   `and`/`or`/`not`, `let`, `if`/`else`, and `while` loops (with or without
@@ -141,9 +145,15 @@ Tier 2 currently covers **pure** functions over:
   so the encoding corrects the quotient by ±1 on inexact negative cases: `-7 / 2`
   proves as `-3`, never `-4`, and `ensures result <= x` for `x / 2` is *refuted*
   (counterexample `x = -1`) rather than falsely proved.
-- **Arrays and slices** of ints/bools — literals, `len`, indexing, element
-  stores, array-valued parameters and loop-carried arrays (a slice parameter's
-  length is an unconstrained non-negative integer).
+- **Arrays, slices, `List[T]`, and strings** over scalar elements — literals,
+  `len`, indexing, element stores, array/list-valued parameters and loop-carried
+  arrays/lists (a slice/list/string parameter's length is an unconstrained
+  non-negative integer). `List[T]` is encoded with the same SMT array + length
+  pair as slices when `T` is an int, bool, or char. `push` stores the new value
+  at the old length and returns length + 1, `pop` returns length - 1 (empty-pop
+  paths trap at runtime), and `set` preserves length. String `len` and indexing
+  use character/codepoint positions; substring slicing and string building are
+  still outside Tier 2.
 - **Structs and enums** — construction, `match` (branches joined per variant),
   struct field access (in bodies and contracts); parameters of nominal type
   are havocked from their declaration: an enum is an arbitrary tag in range
@@ -155,8 +165,14 @@ Outside that subset, `verify` returns `unsupported` with a reason and the
 **fallback** to Tier-1 runtime checks — it never guesses. Notable current
 exclusions and caveats (each honest, never an unsound `proved`):
 
-- **Function calls, floats, casts, references, recursive/generic ADTs** —
-  out-of-subset (`unsupported`).
+- **Function calls, non-Alloc effects, floats, casts, references,
+  recursive/generic ADTs** — out-of-subset (`unsupported`). The exception is the
+  built-in lowering of `std.collections` list operations, whose Alloc capability
+  is ignored for proof because Tier 2 models only the returned value.
+- **List capacity, allocation effects, and aliasing** are not modeled. Contracts
+  can mention the list value (`len(result)`, `result[i]`, quantified contents),
+  but not capacity or heap identity. Unsupported string operations such as
+  slicing/from_chars also fall back honestly to Tier 1.
 - **Fixed-width wrapping is modeled (MARV-38).** Integer terms are SMT `Int`s
   reduced through a two's-complement `wrap64` after each operation (rather than
   switching the sort to `(_ BitVec 64)`, which makes nonlinear `div`/`mul`
