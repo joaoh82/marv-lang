@@ -49,6 +49,12 @@ returns an id (`s1`, `s2`, …). `applyEdits`, `applyFix`, and `format` return a
 *new* snapshot id, reusing the input handles of unchanged files so salsa's
 memoization carries across snapshots. `closeSnapshot` discards one.
 
+For source-only snapshots with multiple files, `marv/check` lowers the files as
+one module set. That lets an agent open `app.mv` plus `math.mv` and check
+`import math (...)` without first committing a store snapshot. Read-only queries
+such as `signature`, `core`, and `typeAt` still use the per-file incremental
+analysis path.
+
 ### Method catalog
 
 | Method | Returns |
@@ -56,7 +62,7 @@ memoization carries across snapshots. `closeSnapshot` discards one.
 | `marv/openSnapshot` | `{ snapshotId }` from a set of `{path, text}` (source) or `{path, core}` (Core IR) files. |
 | `marv/applyEdits` | A new `{ snapshotId }` after whole-file replacements and/or byte-range `edits`. |
 | `marv/closeSnapshot` | `{ closed }`. |
-| `marv/check` | `{ diagnostics }` for the snapshot, optionally scoped to a `def` or `file`. |
+| `marv/check` | `{ diagnostics }` for the snapshot/module set, optionally scoped to a `def` or `file`. |
 | `marv/typeAt` | `{ def, type, effects, span }` for the definition enclosing a byte offset (`span` is the def's real header span over source, `null` over Core). |
 | `marv/signature` | `{ name, params, ret, effects, errorSet, pure, requires, ensures, hash }`. |
 | `marv/effects` | `{ effects }` — the **inferred** capability row. |

@@ -83,7 +83,7 @@ fn resolve_entry(module_path: &str, defs: &[(String, Def)], entry: &str) -> Opti
 }
 
 fn qualify(module_path: &str, name: &str) -> String {
-    if module_path.is_empty() {
+    if module_path.is_empty() || name.contains('.') {
         name.to_string()
     } else {
         format!("{module_path}.{name}")

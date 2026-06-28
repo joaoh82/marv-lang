@@ -94,11 +94,11 @@ cd web && python3 -m http.server 8087   # open http://localhost:8087/
 | Command | What it does |
 |---|---|
 | `marv fmt [--write\|--check] [files…]` | Canonicalize source. The formatter is the parser's inverse — exactly one form per program. |
-| `marv check <file>` | Type / effect / capability / error-set / reference / linearity checks; fix-carrying diagnostics. |
-| `marv run [--grant CAP,…] [--entry NAME] <file> [args…]` | Interpret an entry point (the semantics oracle). Capabilities enter only via `--grant`. |
+| `marv check <file>` | Type / effect / capability / error-set / reference / linearity checks over the discovered source module set; fix-carrying diagnostics. |
+| `marv run [--grant CAP,…] [--entry NAME] <file> [args…]` | Interpret an entry point (the semantics oracle), including discovered source imports. Capabilities enter only via `--grant`. |
 | `marv build [--target native-cranelift\|wasm-component] [--run] [--release] [--store DIR] [--out PATH] [--entry NAME] <file>` | Compile via Cranelift (JIT, `--run` to execute) or to a WebAssembly module. Only definitions reachable from the entry are compiled (MARV-8). With `--store`, imports/deps are fetched from pinned dag hashes. Debug builds (default) carry the Tier-1 bounds check; `--release` omits it. |
 | `marv verify [--def NAME] <file>` | Discharge `requires`/`ensures` contracts via SMT: `proved` / `failed` (with a counterexample) / `unsupported` (→ runtime fallback). |
-| `marv commit [--store DIR] <file>` | Freeze definitions into the content-addressed store; report the lockfile delta (new vs. already-reviewed). |
+| `marv commit [--store DIR] <file>` | Freeze discovered definitions into the content-addressed store; report the lockfile delta (new vs. already-reviewed). |
 | `marv store audit/gc [--store DIR]` | Inspect provenance/reachability or remove blobs unreachable from the lockfile. |
 
 Both `.mv` source and `*.core.json` Core-IR snapshots are accepted. See
@@ -169,14 +169,15 @@ capability parameters), struct literals + indexing + assignment, `char` literals
 explicit-`Alloc` growable operations, `while`/`for` loops,
 `let`/`var`, `if`/`else`, arithmetic/boolean ops, the prefix unary
 operators (`-e`, `not e`, `&e`/`&mut e`), calls/recursion,
-`pure` + `requires`/`ensures` contracts). The next application-language wave is tracked by
-MARV-48: project/package/module discovery beyond the special-cased `std` loader, richer
-collections and literals, bytes/UTF-8, JSON, HTTP/server capabilities, structured concurrency,
-`unsafe`/FFI auditability, and deeper verification. The content store already supports
-lockfile-pinned builds by hash; the remaining module work is the developer-facing source/package
-discovery layer above that store. The full backlog (surface growth → backend breadth →
-verification breadth → application runtime → AOT/LLVM → self-hosting) — with phases, ordering,
-and the dependency graph — is in
+`pure` + `requires`/`ensures` contracts). Local non-`std` source imports now
+lower/check/run/build as module sets, and the content store supports
+lockfile-pinned cross-module builds by hash. The remaining MARV-48
+application-language wave covers richer package metadata/query coverage,
+collections and literals, bytes/UTF-8, JSON, HTTP/server capabilities,
+structured concurrency, `unsafe`/FFI auditability, and deeper verification. The
+full backlog (surface growth → backend breadth → verification breadth →
+application runtime → AOT/LLVM → self-hosting) — with phases, ordering, and the
+dependency graph — is in
 [`docs/roadmap.md`](docs/roadmap.md), mapped to the `MARV-#` tasks in the project tracker.
 
 ## Contributing

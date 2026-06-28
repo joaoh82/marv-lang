@@ -330,7 +330,9 @@ projection, and `requires`/`ensures` contracts. That is enough for the
 [`examples/`](../examples) that run end to end (`factorial`, `arithmetic`, `clamp`, `color`,
 `mutation`, `loops`, `casts`, `hello`, `read_file`, …), the `std/` prelude (`option`, `result`,
 `ord`, `capabilities`, `collections`), and the M4/M6 gates.
-Everything still marked **[core]**/**[design]** above is tracked in the project tracker. The
-MARV-48 application-language wave starts with project/package/module discovery beyond `std`,
-bytes/UTF-8, HTTP/server capabilities, richer collections, collection literals, iterators,
-`linear` resource capabilities, structured concurrency, `unsafeSites`, and broader verification.
+Everything still marked **[core]**/**[design]** above is tracked in the project
+tracker. Local source imports already lower/check/run/build as module sets; the
+remaining MARV-48 application-language wave covers bytes/UTF-8, HTTP/server
+capabilities, richer collections, collection literals, iterators, `linear`
+resource capabilities, structured concurrency, `unsafeSites`, richer package
+metadata/query coverage, and broader verification.

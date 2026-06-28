@@ -35,7 +35,7 @@ where each one sits and what must land first. Each task references back here.
 | **MARV-13** port more compiler passes to marv (self-hosting) | 4 · Self-hosting | Phase-1 surface *(incremental now)* | — | low |
 | ~~**MARV-14** persistent on-disk store + cross-module resolution~~ ✅ done | 4 · Store | — *(std linking wants Phase 1)* | — | low |
 | **MARV-48** full application language surface + runtime epic | 6 · Application language | MARV-40 | 49–60 | medium |
-| **MARV-49** project/package/module discovery beyond `std` | 6 · Application language | MARV-14 | 53, 60 | high |
+| ~~**MARV-49** project/source-module discovery beyond `std`~~ ✅ done | 6 · Application language | MARV-14 | package metadata/query polish, 53, 60 | high |
 | **MARV-50** `Map[K, V]` and `Set[T]` in `std` | 6 · Std collections | MARV-42 | 51, 55 | medium |
 | **MARV-51** collection literals for `List`/`Map`/`Set` | 6 · Surface ergonomics | MARV-42, 50 for map/set forms | — | medium |
 | **MARV-52** real `Iter[T]` protocol | 6 · Surface/stdlib | MARV-42 | 50 | medium |
@@ -132,10 +132,9 @@ function's **declared effect row is the set of its capability parameters**; the 
 its narrowing closure** (holding `Io` authorizes the `Fs`/`Net`/… it can narrow to), so a `pure fn`
 that performs — or any function reaching a capability it never received — is `MissingCapability`
 (E0110) *from source*. The interpreter injects granted caps at the entry boundary and a narrowing
-op returns the narrowed capability value; the CLI resolves `import std.*` to the `std` sources
-(transitively) so the capability interfaces are in scope (`MARV_STD` overrides discovery). The
-general non-`std` project/module discovery layer is MARV-49 on top of the MARV-14 store.
-`std/capabilities.mv` parses/checks; `examples/hello.mv`
+op returns the narrowed capability value; the CLI resolves `import std.*` to the `std/` sources
+(transitively) so the capability interfaces are in scope (`MARV_STD` overrides discovery; MARV-49
+extends the same source-module loading to local non-`std` imports). `std/capabilities.mv` parses/checks; `examples/hello.mv`
 (`io.stdout().write(...)`) and `examples/read_file.mv` (`io.fs()` → `fs.read`) check, infer their
 rows, and run under `marv run --grant Io`. Cranelift n/a (rejects `Perform`); WASM lowers a
 `perform` to a host import but capability *narrowing* on WASM, and `linear` capabilities (a `Conn`
@@ -147,11 +146,11 @@ nominal and declaration-order tags, and checks clean. The checker learned the tw
 rules this needs: a `Ctor` result (which carries no type arguments) satisfies a declared generic
 reference of the same nominal, and an unresolved type parameter (`T` in a generic enum's field, at
 a concrete construction/match site) compares as a wildcard — monomorphized instances still check
-at concrete types. An imported enum whose source can't be resolved (missing `std` module, or a
-non-`std` import — general linking is MARV-14) is now the explicit `UnresolvedImportedEnum` lower
-error instead of a misleading projection error or a silently wrong method-call desugar.
-`examples/optionals.mv` shows the user-code shape and runs. The salsa/protocol path
-(`marv-db`) still analyzes one file at a time — snapshot-level module sets land with MARV-14.
+at concrete types. An imported enum whose source can't be resolved is now an explicit import/load
+error or `UnresolvedImportedEnum` lower error instead of a misleading projection error or a silently
+wrong method-call desugar. `examples/optionals.mv` shows the user-code shape and runs. The
+salsa/protocol path keeps per-file read queries, while `marv/check` can check a source-only snapshot
+as a module set (MARV-49).
 · **MARV-37** unknown variant of a *known* enum errors at lowering: `Option.Sum(x)` (and the
 unapplied `Option.Sum`, and the `match` pattern form) against a known local or resolved-imported
 enum previously fell through to the method-call desugar / projection path and **passed `marv
@@ -284,10 +283,12 @@ they unblock the rest. Then:
 - **Compounds on the surface:** ~~MARV-9 aggregate codegen~~ ✅ → MARV-10; and
   ~~MARV-11 verification expansion~~ ✅.
 - **Application/runtime wave:** MARV-48, starting with MARV-60 docs cleanup,
-  MARV-49 project/package/module discovery, MARV-54 bytes/UTF-8, and MARV-53
+  MARV-49 project/source-module discovery, MARV-54 bytes/UTF-8, and MARV-53
   HTTP/server runtime capability.
 - **Longer horizon:** MARV-13 more self-hosting; MARV-10 AOT/LLVM/component
-  packaging; MARV-27 linear capabilities; MARV-39 trap-freedom verification.
+  packaging; MARV-27 linear capabilities; MARV-39 trap-freedom verification;
+  richer package metadata and package-aware agent queries on top of the MARV-49
+  source-module discovery and MARV-14 pinned store.
 
 **Parallel track (no surface dependency — pick up anytime):** ~~MARV-8 (reachability-pruned
 builds)~~ ✅ and ~~MARV-12 (doc-comments + spans)~~ ✅ are both done — the track is clear.

@@ -207,7 +207,7 @@ pub struct EditInfo {
 
 /// Module-qualify a definition name.
 pub fn qualify(module_path: &str, name: &str) -> String {
-    if module_path.is_empty() {
+    if module_path.is_empty() || name.contains('.') {
         name.to_string()
     } else {
         format!("{module_path}.{name}")
