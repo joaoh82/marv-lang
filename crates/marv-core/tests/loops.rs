@@ -8,21 +8,15 @@
 //! - alpha-equivalent loops lower to identical content hashes (the M1 gate);
 //! - a loop body whose tail is an `if`/`match` threads the carried `var`s through
 //!   the branch join — every branch yields the next-state tuple (MARV-21);
-//! - a loop body ending in `return` (early function exit) is still rejected.
+//! - a loop body ending in `return` lowers to early function exit (MARV-58).
 
 use marv_core::ir::*;
-use marv_core::lower::LowerError;
 use marv_core::{lower_module, DefEntry, LoweredModule};
 use marv_syntax::parse;
 
 fn lower(src: &str) -> LoweredModule {
     let m = parse(src).unwrap_or_else(|e| panic!("parse failed: {e}\n{src}"));
     lower_module(&m).unwrap_or_else(|e| panic!("lower failed: {e}\n{src}"))
-}
-
-fn try_lower(src: &str) -> Result<LoweredModule, LowerError> {
-    let m = parse(src).unwrap_or_else(|e| panic!("parse failed: {e}\n{src}"));
-    lower_module(&m)
 }
 
 fn def<'a>(m: &'a LoweredModule, name: &str) -> &'a DefEntry {
@@ -265,9 +259,25 @@ fn outer_carried_var_shadowed_in_one_branch_is_still_carried() {
 }
 
 #[test]
-fn loop_body_ending_in_return_is_rejected() {
-    // `return` inside a loop body is early function exit — still out of scope
-    // (MARV-21 threads `if`/`match` joins, not `return`).
-    let src = "mod demo\n\npure fn run(n: i64) -> i64 {\n    var i: i64 = n\n    while (i > 0) {\n        i = (i - 1)\n        return i\n    }\n    i\n}\n";
-    assert_eq!(try_lower(src), Err(LowerError::LoopBodyControlFlow));
+fn loop_body_ending_in_return_lowers_to_core_return() {
+    // MARV-58: `return` inside a loop body is early function exit, not the loop's
+    // next carried-state tuple.
+    let src = "mod demo\n\npure fn run(n: i64) -> i64 {\n    var i: i64 = n\n    while (i > 0) {\n        i = (i - 1)\n        if (i == 2) {\n            return i\n        }\n    }\n    0\n}\n";
+    let m = lower(src);
+    let body = fn_body(&m, "run");
+    let lp = find_loop(&body).expect("the early-return `while` lowers to a Core::Loop");
+    let Core::Loop { body: lbody, .. } = lp else {
+        unreachable!()
+    };
+    match innermost(lbody) {
+        Core::Match { branches, .. } => {
+            assert!(
+                branches
+                    .iter()
+                    .any(|br| matches!(innermost(&br.body), Core::Return { .. })),
+                "one loop-body branch should lower to Core::Return"
+            );
+        }
+        other => panic!("loop body terminal should be a branch join, got {other:?}"),
+    }
 }

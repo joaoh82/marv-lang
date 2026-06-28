@@ -13,7 +13,7 @@ marv <command> [args]
 
 | Command | Status | Description |
 |---------|--------|-------------|
-| `fmt`    | **working** (M0, parse-and-reprint + whitespace fallback) | Canonicalize marv source. |
+| `fmt`    | **working** (M0+, parse-and-reprint for the implemented surface) | Canonicalize marv source. |
 | `check`  | **working** (M2) | Type / effect / capability / error-set / reference / linearity checking. |
 | `build`  | **working** (M4 `native-cranelift`, M5 `wasm-component`, MARV-14 pinned store) | Compile a target: Cranelift JIT or a WebAssembly module. |
 | `run`    | **working** (M4, MARV-14 pinned store) | Interpret an entry point with an explicit capability grant set. |
@@ -41,8 +41,8 @@ real constructors with the imported enum's nominal and tags, so
 be resolved (the named `std` module has no file, or the import is not `std.*`),
 referencing its constructors is a clear lower error naming the import and its
 module. `build --store` / `run --store` now use the content store for pinned
-hash linking; the source loader still parses `std/` so the current std surface
-can typecheck while std is being grown.
+hash linking; broader project/package/module source discovery beyond `std` is
+tracked separately as MARV-49.
 
 ## `marv fmt`
 
@@ -77,14 +77,13 @@ marv fmt --check examples/*.mv tests/fmt/*.out.mv
 ### What `fmt` does today
 
 The formatter is the *inverse of the parser* — exactly one textual form per
-program (non-negotiable invariant #1). As of M0 it **parses and reprints** the
-implemented language subset (module headers, imports, `struct`/`fn` decls, the
-type language, `let`/`var`/`return`, block tails, binary operators, `if`/`else`):
-indentation, spacing, full parenthesization, and integer/string normalization are
-all applied. Input outside that subset — or otherwise unparseable — falls back to
-the parser-free **whitespace canonicalizer** (line endings, tabs → 4 spaces,
-trailing-whitespace stripping, blank-line collapsing, single trailing newline).
-Both paths are deterministic and idempotent. See [`formatter.md`](formatter.md).
+program (non-negotiable invariant #1). It parses and reprints the implemented
+language surface, including the current examples and `std/` files, preserving
+`///` doc comments as item metadata outside content identity. Input that is
+otherwise unparseable falls back to the parser-free **whitespace canonicalizer**
+(line endings, tabs → 4 spaces, trailing-whitespace stripping, blank-line
+collapsing, single trailing newline). Both paths are deterministic and
+idempotent. See [`formatter.md`](formatter.md).
 
 ## `marv check`
 

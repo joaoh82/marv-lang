@@ -37,6 +37,31 @@ pure fn count_down(n: i64) -> i64 {
     i
 }
 
+// MARV-58: `return` inside a loop body exits the function immediately instead
+// of producing the loop's next carried-state tuple.
+pure fn first_hit(n: i64, target: i64) -> i64 {
+    var i: i64 = n
+    while (i > 0) {
+        if (i == target) {
+            return i
+        } else {
+            i = (i - 1)
+        }
+    }
+    (0 - 1)
+}
+
+// The same early-exit path through `for` desugaring over an array literal.
+pure fn first_even_for() -> i64 {
+    let xs: [4]i64 = [1, 3, 4, 6]
+    for x in xs {
+        if ((x % 2) == 0) {
+            return x
+        }
+    }
+    0
+}
+
 // MARV-21 regression: an outer carried `x` is reassigned only in the *then*
 // branch; the *else* branch declares a body-local `let x` that shadows it. The
 // outer `x` must still be carried (the shadow is scoped to the else branch

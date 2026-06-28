@@ -472,6 +472,12 @@ pub enum Core {
         error: Hash,
         args: Vec<Atom>,
     },
+    /// Early function exit from a nested control-flow position. Top-level
+    /// `return e` still lowers as the function body's value; this node is for
+    /// non-local exits such as `return e` inside a loop body branch.
+    Return {
+        value: Atom,
+    },
     /// Loop with explicit loop-carried state and a recorded invariant (a proof
     /// obligation); desugars from `while`/`for` (`spec/02` §D).
     ///

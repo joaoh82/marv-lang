@@ -113,6 +113,17 @@ enum Contract {
     Post,
 }
 
+enum EvalError {
+    Run(RunError),
+    Return(Value),
+}
+
+impl From<RunError> for EvalError {
+    fn from(e: RunError) -> Self {
+        EvalError::Run(e)
+    }
+}
+
 impl std::fmt::Display for RunError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -498,7 +509,11 @@ impl Program {
                 .ok_or_else(|| RunError::Unsupported(format!("entry `{entry}` has no body")))?,
         );
         let mut effects = Vec::new();
-        let value = self.eval(body, &mut env, &mut effects)?;
+        let value = match self.eval(body, &mut env, &mut effects) {
+            Ok(value) => value,
+            Err(EvalError::Return(value)) => value,
+            Err(EvalError::Run(e)) => return Err(e),
+        };
 
         // …and every `ensures` after, with `result` bound to the returned value.
         check_contracts(&def.ensures, &params, Some(&value), Contract::Post)?;
@@ -549,9 +564,9 @@ impl Program {
         c: &Core,
         env: &mut Vec<Value>,
         eff: &mut Vec<Effect>,
-    ) -> Result<Value, RunError> {
+    ) -> Result<Value, EvalError> {
         match c {
-            Core::Atom(a) => self.eval_atom(a, env),
+            Core::Atom(a) => Ok(self.eval_atom(a, env)?),
 
             Core::Let { value, body } => {
                 let v = self.eval(value, env, eff)?;
@@ -565,13 +580,13 @@ impl Program {
                 // The front end produces lambdas only as a definition's curried
                 // spine, which `run`/`apply` peel before evaluation ever reaches
                 // here. A first-class lambda value has no surface form yet.
-                Err(RunError::Unsupported("first-class lambda".to_string()))
+                Err(RunError::Unsupported("first-class lambda".to_string()).into())
             }
 
             Core::App { func, arg } => {
                 let f = self.eval_atom(func, env)?;
                 let a = self.eval_atom(arg, env)?;
-                self.apply(f, a, eff)
+                Ok(self.apply(f, a, eff)?)
             }
 
             Core::Ctor { tag, fields, .. } => {
@@ -605,7 +620,8 @@ impl Program {
                         return Err(RunError::Unsupported(format!(
                             "element store index is not an integer: `{}`",
                             other.render()
-                        )))
+                        ))
+                        .into())
                     }
                 };
                 let v = self.eval_atom(value, env)?;
@@ -623,13 +639,15 @@ impl Program {
                             None => Err(RunError::BoundsCheckFailed {
                                 index: i,
                                 len: fields.len() as i64,
-                            }),
+                            }
+                            .into()),
                         }
                     }
                     other => Err(RunError::Unsupported(format!(
                         "element store on non-aggregate `{}`",
                         other.render()
-                    ))),
+                    ))
+                    .into()),
                 }
             }
 
@@ -643,7 +661,8 @@ impl Program {
                         return Err(RunError::Unsupported(format!(
                             "list capacity is not an integer: `{}`",
                             other.render()
-                        )))
+                        ))
+                        .into())
                     }
                 };
                 Ok(Value::List {
@@ -667,21 +686,23 @@ impl Program {
                     other => Err(RunError::Unsupported(format!(
                         "push on non-list `{}`",
                         other.render()
-                    ))),
+                    ))
+                    .into()),
                 }
             }
 
             Core::ListPop { list } => match self.eval_atom(list, env)? {
                 Value::List { mut items, cap } => {
                     if items.pop().is_none() {
-                        return Err(RunError::BoundsCheckFailed { index: 0, len: 0 });
+                        return Err(RunError::BoundsCheckFailed { index: 0, len: 0 }.into());
                     }
                     Ok(Value::List { items, cap })
                 }
                 other => Err(RunError::Unsupported(format!(
                     "pop on non-list `{}`",
                     other.render()
-                ))),
+                ))
+                .into()),
             },
 
             Core::ListSet { list, index, value } => {
@@ -692,7 +713,8 @@ impl Program {
                         return Err(RunError::Unsupported(format!(
                             "list set index is not an integer: `{}`",
                             other.render()
-                        )))
+                        ))
+                        .into())
                     }
                 };
                 let value = self.eval_atom(value, env)?;
@@ -707,13 +729,15 @@ impl Program {
                             None => Err(RunError::BoundsCheckFailed {
                                 index: i,
                                 len: items.len() as i64,
-                            }),
+                            }
+                            .into()),
                         }
                     }
                     other => Err(RunError::Unsupported(format!(
                         "set on non-list `{}`",
                         other.render()
-                    ))),
+                    ))
+                    .into()),
                 }
             }
 
@@ -723,11 +747,13 @@ impl Program {
                     Value::Agg { fields, .. } => fields
                         .into_iter()
                         .nth(*idx as usize)
-                        .ok_or_else(|| RunError::Unsupported("projection out of range".into())),
+                        .ok_or_else(|| RunError::Unsupported("projection out of range".into()))
+                        .map_err(EvalError::from),
                     other => Err(RunError::Unsupported(format!(
                         "projection of non-aggregate `{}`",
                         other.render()
-                    ))),
+                    ))
+                    .into()),
                 }
             }
 
@@ -741,19 +767,19 @@ impl Program {
                     .iter()
                     .map(|a| self.eval_atom(a, env))
                     .collect::<Result<Vec<_>, _>>()?;
-                eval_prim(*op, &args)
+                Ok(eval_prim(*op, &args)?)
             }
 
             Core::Cast { value, to } => {
                 let v = self.eval_atom(value, env)?;
-                eval_cast(&v, to)
+                Ok(eval_cast(&v, to)?)
             }
 
             // `&e` / `&mut e`: mutable value semantics has no cells in Core
             // (`spec/01` §4), and second-class references never outlive their
             // frame, so at runtime a reference *is* its referent's value — pass it
             // through. (True mutation *through* a `&mut` is a separate feature.)
-            Core::Ref { of, .. } => self.eval_atom(of, env),
+            Core::Ref { of, .. } => Ok(self.eval_atom(of, env)?),
 
             Core::Perform { cap, op, args } => {
                 let capv = self.eval_atom(cap, env)?;
@@ -763,7 +789,8 @@ impl Program {
                         return Err(RunError::Unsupported(format!(
                             "perform on non-capability `{}`",
                             other.render()
-                        )))
+                        ))
+                        .into())
                     }
                 };
                 let args = args
@@ -787,7 +814,11 @@ impl Program {
                 }
             }
 
-            Core::Raise { error, .. } => Err(RunError::Uncaught(self.world.error_name(error))),
+            Core::Raise { error, .. } => {
+                Err(RunError::Uncaught(self.world.error_name(error)).into())
+            }
+
+            Core::Return { value } => Err(EvalError::Return(self.eval_atom(value, env)?)),
 
             Core::Loop {
                 state,
@@ -816,7 +847,7 @@ impl Program {
                     if let Some(inv) = invariant {
                         if let Some(false) = self.eval_loop_invariant(inv, env) {
                             let report = self.render_loop_invariant(inv, env);
-                            return Err(RunError::InvariantViolated(report));
+                            return Err(RunError::InvariantViolated(report).into());
                         }
                     }
                     let c = self.eval(cond, env, eff)?;
@@ -826,10 +857,19 @@ impl Program {
                         None => {
                             return Err(RunError::Unsupported(
                                 "loop condition is not a boolean".into(),
-                            ))
+                            )
+                            .into())
                         }
                     }
-                    let next = self.eval(body, env, eff)?;
+                    let next = match self.eval(body, env, eff) {
+                        Ok(next) => next,
+                        Err(EvalError::Return(value)) => {
+                            let base = env.len() - k;
+                            env.truncate(base);
+                            return Err(EvalError::Return(value));
+                        }
+                        Err(e) => return Err(e),
+                    };
                     let new_fields = match next {
                         Value::Agg { fields, .. } => fields,
                         Value::Unit if k == 0 => Vec::new(),
@@ -837,7 +877,8 @@ impl Program {
                             return Err(RunError::Unsupported(format!(
                                 "loop body did not produce its carried state (got `{}`)",
                                 other.render()
-                            )))
+                            ))
+                            .into())
                         }
                     };
                     let base = env.len() - k;
@@ -953,7 +994,7 @@ impl Program {
         branches: &[Branch],
         env: &mut Vec<Value>,
         eff: &mut Vec<Effect>,
-    ) -> Result<Value, RunError> {
+    ) -> Result<Value, EvalError> {
         let s = self.eval_atom(scrutinee, env)?;
         let (tag, fields): (u32, Vec<Value>) = match s {
             // `bool` desugars to a two-variant match: false = tag 0, true = 1
@@ -964,7 +1005,8 @@ impl Program {
                 return Err(RunError::Unsupported(format!(
                     "match on non-matchable `{}`",
                     other.render()
-                )))
+                ))
+                .into())
             }
         };
         let branch = branches
@@ -1010,7 +1052,11 @@ impl Program {
                         let body = entry.def.body.as_ref().ok_or(RunError::UnknownGlobal(*h))?;
                         let mut e = Vec::new();
                         let mut sink = Vec::new();
-                        self.eval(body, &mut e, &mut sink)
+                        match self.eval(body, &mut e, &mut sink) {
+                            Ok(value) => Ok(value),
+                            Err(EvalError::Return(value)) => Ok(value),
+                            Err(EvalError::Run(e)) => Err(e),
+                        }
                     }
                 }
             }
@@ -1044,7 +1090,11 @@ impl Program {
         // levels 0..arity.
         let inner = peel_lams(body);
         let mut env = got;
-        self.eval(inner, &mut env, eff)
+        match self.eval(inner, &mut env, eff) {
+            Ok(value) => Ok(value),
+            Err(EvalError::Return(value)) => Ok(value),
+            Err(EvalError::Run(e)) => Err(e),
+        }
     }
 }
 

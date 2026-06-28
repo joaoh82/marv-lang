@@ -16,12 +16,11 @@ links against once a build references them by content hash (`spec/01` §8).
 
 `option.mv` and `result.mv` are now **real parsed source**, not reference-only:
 they use `enum`, generics, and `match`, all of which the front end accepts. They
-parse, are canonical (`marv fmt` reprints them unchanged), and lower to Core —
-lower the two together (they share the `Option` constructor namespace; `result`
-imports it) via `marv_core::lower_modules`, since single-file lowering resolves
-only the enums declared in that file. Doc comments were dropped to keep them
-canonical (the formatter does not yet preserve `///` — see the roadmap), so each
-declaration's intent is summarized in the table above.
+parse, are canonical (`marv fmt` reprints them unchanged), and lower to Core.
+The CLI resolves `std` imports transitively, so `marv check std/result.mv`
+resolves the imported `Option` constructors from `std/option.mv` in the
+single-file command path. Doc comments are preserved by the canonical formatter
+and remain outside content identity.
 
 `capabilities.mv` is also live parsed source: a non-generic `interface` is a
 capability declaration, and method calls on capability values lower to

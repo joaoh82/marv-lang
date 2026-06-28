@@ -882,6 +882,7 @@ fn collect_globals(c: &Core, out: &mut Vec<Hash>) {
             args.iter().for_each(|a| atom(a, out));
         }
         Core::Raise { args, .. } => args.iter().for_each(|a| atom(a, out)),
+        Core::Return { value } => atom(value, out),
         Core::Loop {
             state, cond, body, ..
         } => {
