@@ -33,7 +33,8 @@ where each one sits and what must land first. Each task references back here.
 | ~~**MARV-38** Tier-2 fixed-width integer wraparound (close the mathematical-integers soundness gap)~~ ✅ done — every `+ - * / %` and unary `-` is reduced through a two's-complement `wrap64` over SMT `Int`s (a bitvector sort was ruled out: nonlinear `div`/`mul` is intractable — the division identity times out as a 64-bit bitvector but discharges in well under a second as wrapped `Int`s), and every havocked int/length is range-constrained to `[i64::MIN, i64::MAX]`; `ensures result > x` for `x + 1` is now refuted at `x = i64::MAX`. Tier 2 is *correctly stricter*: an accumulator claimed `>= 0` whose running sum can overflow (`examples/loops.mv`'s `sum_to`) no longer proves; the bounded `count_down_sum` does | 3 · Verification | ~~MARV-11~~ ✅ | — | medium |
 | ~~**MARV-12** formatter doc-comments + real source spans~~ ✅ done | 5 · Infra/polish | — *(independent)* | — | medium |
 | **MARV-13** port more compiler passes to marv (self-hosting) | 4 · Self-hosting | Phase-1 surface *(incremental now)* | — | low |
-| ~~**MARV-14** persistent on-disk store + cross-module resolution~~ ✅ done | 4 · Store | — *(std linking wants Phase 1)* | — | low |
+| ~~**MARV-14** persistent on-disk store + cross-module resolution~~ ✅ done | 4 · Store | — | — | low |
+| ~~**MARV-49** project/source-module discovery beyond `std`~~ ✅ done | 4 · Store | MARV-14 | package metadata/query polish | high |
 
 Done (Phase 0 · Infra/agent): **MARV-15** repo housekeeping · **MARV-16** CI/CD + release ·
 **MARV-17** agent enablement (AGENTS.md, MCP server, skill).
@@ -119,8 +120,8 @@ its narrowing closure** (holding `Io` authorizes the `Fs`/`Net`/… it can narro
 that performs — or any function reaching a capability it never received — is `MissingCapability`
 (E0110) *from source*. The interpreter injects granted caps at the entry boundary and a narrowing
 op returns the narrowed capability value; the CLI resolves `import std.*` to the `std/` sources
-(transitively) so the capability interfaces are in scope (`MARV_STD` overrides discovery — full
-cross-module linking is MARV-14). `std/capabilities.mv` parses/checks; `examples/hello.mv`
+(transitively) so the capability interfaces are in scope (`MARV_STD` overrides discovery; MARV-49
+extends the same source-module loading to local non-`std` imports). `std/capabilities.mv` parses/checks; `examples/hello.mv`
 (`io.stdout().write(...)`) and `examples/read_file.mv` (`io.fs()` → `fs.read`) check, infer their
 rows, and run under `marv run --grant Io`. Cranelift n/a (rejects `Perform`); WASM lowers a
 `perform` to a host import but capability *narrowing* on WASM, and `linear` capabilities (a `Conn`
@@ -132,11 +133,11 @@ nominal and declaration-order tags, and checks clean. The checker learned the tw
 rules this needs: a `Ctor` result (which carries no type arguments) satisfies a declared generic
 reference of the same nominal, and an unresolved type parameter (`T` in a generic enum's field, at
 a concrete construction/match site) compares as a wildcard — monomorphized instances still check
-at concrete types. An imported enum whose source can't be resolved (missing `std` module, or a
-non-`std` import — general linking is MARV-14) is now the explicit `UnresolvedImportedEnum` lower
-error instead of a misleading projection error or a silently wrong method-call desugar.
-`examples/optionals.mv` shows the user-code shape and runs. The salsa/protocol path
-(`marv-db`) still analyzes one file at a time — snapshot-level module sets land with MARV-14.
+at concrete types. An imported enum whose source can't be resolved is now an explicit import/load
+error or `UnresolvedImportedEnum` lower error instead of a misleading projection error or a silently
+wrong method-call desugar. `examples/optionals.mv` shows the user-code shape and runs. The
+salsa/protocol path keeps per-file read queries, while `marv/check` can check a source-only snapshot
+as a module set (MARV-49).
 · **MARV-37** unknown variant of a *known* enum errors at lowering: `Option.Sum(x)` (and the
 unapplied `Option.Sum`, and the `match` pattern form) against a known local or resolved-imported
 enum previously fell through to the method-call desugar / projection path and **passed `marv
@@ -242,8 +243,8 @@ they unblock the rest. Then:
   (which closed the last big gap between the design and what real `.mv` can express).
 - **Compounds on the surface:** ~~MARV-9 aggregate codegen~~ ✅ → MARV-10; and
   ~~MARV-11 verification expansion~~ ✅.
-- **Longer horizon:** MARV-13 more self-hosting; broader non-`std` source-module discovery
-  on top of the MARV-14 pinned store.
+- **Longer horizon:** MARV-13 more self-hosting; richer package metadata and package-aware
+  agent queries on top of the MARV-49 source-module discovery and MARV-14 pinned store.
 
 **Parallel track (no surface dependency — pick up anytime):** ~~MARV-8 (reachability-pruned
 builds)~~ ✅ and ~~MARV-12 (doc-comments + spans)~~ ✅ are both done — the track is clear.

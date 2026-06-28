@@ -174,9 +174,10 @@ literals + index reads + assignment (`lvalue = e`, `var`), `while`/`for` loops w
 projection, generic parameter lists + type arguments, `interface`/`impl` with
 monomorphization, **capabilities & `perform` from source** (capability method calls →
 `Perform`, `io.fs()` narrowing, inferred-and-checked effect rows), and `requires`/`ensures`
-contracts. Collection literals, `linear` capabilities, and cross-module linking are the
-remaining surface roadmap — for anything not yet expressible, construct a `*.core.json`
-snapshot (see [`store.md`](store.md) and the `tests/run/*.core.json` fixtures) or check
+contracts. Collection literals, `linear` capabilities, richer package metadata, and package-aware
+read queries are the remaining surface roadmap. Local source imports are discoverable by the CLI,
+and source-only JSON-RPC snapshots can be checked as a module set; for anything not yet expressible,
+construct a `*.core.json` snapshot (see [`store.md`](store.md) and the `tests/run/*.core.json` fixtures) or check
 [`roadmap.md`](roadmap.md).
 
 See [`../spec/03-compiler-protocol.md`](../spec/03-compiler-protocol.md) for the full protocol

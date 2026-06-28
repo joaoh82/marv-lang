@@ -1053,7 +1053,7 @@ impl Program {
 /// Module-qualify a definition name (mirrors `marv_db::qualify`, kept here so
 /// the interpreter does not depend on the query database).
 fn qualify(module_path: &str, name: &str) -> String {
-    if module_path.is_empty() {
+    if module_path.is_empty() || name.contains('.') {
         name.to_string()
     } else {
         format!("{module_path}.{name}")

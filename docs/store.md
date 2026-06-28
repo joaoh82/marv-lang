@@ -48,11 +48,13 @@ compatibility/import path, but new writes use one blob per dag hash.
 marv commit [--store DIR] <file>
 ```
 
-Checks the file (refusing to freeze code that does not check), then freezes each
-definition into the store and rebinds its name in the lockfile. It reports the
-delta — what is **new** versus **already in the store / already reviewed** — so
-an agent (or a human auditor) can ask the provenance question "has this exact
-hash been reviewed before?" (`spec/01` §8). Committing is **idempotent**:
+Checks the discovered source module set (refusing to freeze code that does not
+check), then freezes each discovered definition into the store and rebinds its
+qualified name in the lockfile. Imported modules keep their own names
+(`math.double`, not `app.math.double`). It reports the delta — what is **new**
+versus **already in the store / already reviewed** — so an agent (or a human
+auditor) can ask the provenance question "has this exact hash been reviewed
+before?" (`spec/01` §8). Committing is **idempotent**:
 
 ```sh
 $ marv commit --store .marv examples/clamp.mv
@@ -75,17 +77,12 @@ marv build --store .marv --run app.mv --entry main
 marv run --store .marv app.mv
 ```
 
-With `--store`, the CLI resolves the freshly-lowered module against the
+With `--store`, the CLI resolves the freshly-lowered module set against the
 lockfile's `name → dag hash` bindings, rewrites known imports and local edges to
 dag hashes, fetches the full transitive dependency closure through each stored
 blob's `deps`, and hands the interpreter/backend a hash-keyed program. Missing
 dependency blobs are hard errors: a stored build never falls back to whatever
 source happens to be on disk.
-
-The current source loader still parses `std/` modules to typecheck imported
-surface declarations while the Phase-1 std surface settles. Once those modules
-parse completely, committing them pins the first real std dependency in the same
-lockfile/blob machinery.
 
 ## Audit and GC
 

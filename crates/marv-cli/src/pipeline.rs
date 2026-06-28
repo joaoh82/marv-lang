@@ -9,6 +9,7 @@
 //! same triple — module path, definitions, and the [`World`] they resolve
 //! against — which `check`/`build`/`run` then consume identically.
 
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
 use marv_core::ir::Def;
@@ -17,6 +18,8 @@ use marv_db::{qualify, CoreModuleSpec};
 use marv_store::{DefMeta, StoredOpSig, StoredVariant};
 use marv_syntax::{parse, Module};
 use marv_types::{check_bounds, check_def, Diagnostic, Severity, World};
+
+type ModuleIndex = HashMap<Vec<String>, Vec<(PathBuf, Module)>>;
 
 /// A loaded program: everything `check`/`build`/`run` need, independent of
 /// whether it came from source or a Core snapshot.
@@ -84,31 +87,39 @@ fn load_source(src: &str, path: &Path) -> Result<Loaded, LoadError> {
     let module = parse(src).map_err(|e| LoadError::Front(format!("parse error: {e}")))?;
     let module_path = module.name.join(".");
 
-    // Resolve `import std.*` to its source modules so capability interfaces (and
-    // any other std declarations) are in scope, and lower the whole set together
-    // (`lower_modules` shares one constructor/interface/cap registry across it).
-    // This is the minimal cross-module resolution MARV-6 needs; the persistent
-    // on-disk store and general module graph are MARV-14.
-    let std_modules = resolve_std_imports(&module, path)?;
-    let mut all: Vec<Module> = Vec::with_capacity(1 + std_modules.len());
+    // Resolve source imports into a deterministic module set and lower the
+    // package together (`lower_modules` shares one constructor/interface/cap
+    // registry across it). The first module is always the user's entry file;
+    // imported definitions are flattened below under their fully-qualified
+    // names so run/build/commit can reach their bodies too.
+    let imported_modules = resolve_source_imports(&module, path)?;
+    let mut all: Vec<Module> = Vec::with_capacity(1 + imported_modules.len());
     all.push(module.clone());
-    all.extend(std_modules);
+    all.extend(imported_modules);
 
     let lowered = lower_modules(&all).map_err(|e| LoadError::Front(format!("lower error: {e}")))?;
     let world = World::from_modules(&lowered);
     // Interface-bound and coherence checks over the whole set's generics metadata.
     let bound_diags = check_bounds(&lowered);
 
-    // The user's file is module 0; `check`/`run` operate on its definitions
-    // (the std modules are resolved-but-trusted library code).
-    let store_meta = store_meta_for_module(lowered.first().expect("main module was lowered"));
-    let main = lowered.into_iter().next().expect("main module was lowered");
-    let param_names = main
-        .defs
-        .iter()
-        .map(|e| fn_param_names(&module, &e.name))
-        .collect();
-    let defs = main.defs.into_iter().map(|e| (e.name, e.def)).collect();
+    let mut defs = Vec::new();
+    let mut store_meta = Vec::new();
+    let mut param_names = Vec::new();
+    for (idx, lowered_module) in lowered.into_iter().enumerate() {
+        let ast_module = &all[idx];
+        let prefix = ast_module.name.join(".");
+        let metas = store_meta_for_module(&lowered_module);
+        for (entry, meta) in lowered_module.defs.into_iter().zip(metas.into_iter()) {
+            let name = if idx == 0 {
+                entry.name.clone()
+            } else {
+                qualify(&prefix, &entry.name)
+            };
+            param_names.push(fn_param_names(ast_module, &entry.name));
+            store_meta.push(meta);
+            defs.push((name, entry.def));
+        }
+    }
     Ok(Loaded {
         module_path,
         defs,
@@ -119,35 +130,127 @@ fn load_source(src: &str, path: &Path) -> Result<Loaded, LoadError> {
     })
 }
 
-/// Resolve every `import std.*` in `main` to its parsed source module, following
-/// std→std imports transitively. Returns the std modules to lower alongside the
-/// user's file. A non-`std` import is left unresolved (general cross-module
-/// linking is MARV-14). Errors if the program imports std but no `std/` directory
-/// can be found, or a named std module is missing.
-fn resolve_std_imports(main: &Module, path: &Path) -> Result<Vec<Module>, LoadError> {
-    let wanted: Vec<Vec<String>> = main
-        .imports
-        .iter()
-        .map(|i| i.path.clone())
-        .filter(|p| p.first().map(|s| s == "std").unwrap_or(false))
-        .collect();
-    if wanted.is_empty() {
+/// Resolve every source import in `main` to parsed modules, following imports
+/// transitively. `std.*` is discovered from `MARV_STD` or the nearest `std/`
+/// directory as before; non-`std` modules are discovered from the nearest
+/// ancestor with `marv.toml`, falling back to the entry file's directory. The
+/// index keys on each file's declared `mod` path, so file names remain an
+/// implementation detail and duplicate module declarations are reported
+/// explicitly.
+fn resolve_source_imports(main: &Module, path: &Path) -> Result<Vec<Module>, LoadError> {
+    if main.imports.is_empty() {
         return Ok(Vec::new());
     }
 
-    let std_dir = find_std_dir(path).ok_or_else(|| {
-        LoadError::Front(
-            "program imports `std`, but no `std/` directory was found (set MARV_STD)".to_string(),
-        )
-    })?;
+    let project_root = find_project_root(path);
+    let project_index = module_index(&project_root, true, Some("std"))?;
+    let std_index = find_std_dir(path)
+        .map(|std_dir| module_index(&std_dir, false, None))
+        .transpose()?;
 
-    // Parse every std source file once, indexing by its declared module path.
-    let mut by_path: std::collections::HashMap<Vec<String>, Module> =
-        std::collections::HashMap::new();
-    let entries = std::fs::read_dir(&std_dir)
-        .map_err(|e| LoadError::Io(format!("{}: {e}", std_dir.display())))?;
-    for entry in entries.flatten() {
+    let mut selected: Vec<Module> = Vec::new();
+    let mut seen: HashSet<Vec<String>> = HashSet::new();
+    seen.insert(main.name.clone());
+    let mut queue: VecDeque<Vec<String>> = main.imports.iter().map(|i| i.path.clone()).collect();
+    while let Some(mp) = queue.pop_front() {
+        if !seen.insert(mp.clone()) {
+            continue;
+        }
+        let m = if mp.first().map(|s| s == "std").unwrap_or(false) {
+            let Some(idx) = std_index.as_ref() else {
+                continue;
+            };
+            let Ok(module) = resolve_indexed_module(idx, &mp, Path::new("std"), "std") else {
+                continue;
+            };
+            module
+        } else {
+            resolve_indexed_module(
+                &project_index,
+                &mp,
+                &project_root,
+                &format!("the source root {}", project_root.display()),
+            )?
+        };
+        for imp in &m.imports {
+            queue.push_back(imp.path.clone());
+        }
+        selected.push(m.clone());
+    }
+    Ok(selected)
+}
+
+fn find_project_root(path: &Path) -> PathBuf {
+    let start = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let mut dir = start.parent();
+    while let Some(d) = dir {
+        if d.join("marv.toml").is_file() {
+            return d.to_path_buf();
+        }
+        dir = d.parent();
+    }
+    start.parent().unwrap_or(Path::new(".")).to_path_buf()
+}
+
+fn module_index(
+    root: &Path,
+    recursive: bool,
+    skip_dir: Option<&str>,
+) -> Result<ModuleIndex, LoadError> {
+    let mut index = HashMap::new();
+    collect_modules(root, recursive, skip_dir, &mut index)?;
+    Ok(index)
+}
+
+fn resolve_indexed_module<'a>(
+    index: &'a ModuleIndex,
+    mp: &[String],
+    root: &Path,
+    label: &str,
+) -> Result<&'a Module, LoadError> {
+    match index.get(mp).map(|v| v.as_slice()) {
+        Some([(_, module)]) => Ok(module),
+        Some(candidates) => Err(LoadError::Front(format!(
+            "ambiguous import `{}` under {}: {} source files declare that `mod` path ({})",
+            mp.join("."),
+            root.display(),
+            candidates.len(),
+            candidates
+                .iter()
+                .map(|(path, _)| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))),
+        None => Err(LoadError::Front(format!(
+            "cannot resolve import `{}`: no source module with that `mod` path was found in {label}",
+            mp.join(".")
+        ))),
+    }
+}
+
+fn collect_modules(
+    dir: &Path,
+    recursive: bool,
+    skip_dir: Option<&str>,
+    out: &mut ModuleIndex,
+) -> Result<(), LoadError> {
+    let entries =
+        std::fs::read_dir(dir).map_err(|e| LoadError::Io(format!("{}: {e}", dir.display())))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| LoadError::Io(format!("{}: {e}", dir.display())))?;
         let p = entry.path();
+        if p.is_dir() {
+            if recursive {
+                if skip_dir
+                    .and_then(|s| p.file_name().and_then(|n| n.to_str()).map(|n| n == s))
+                    .unwrap_or(false)
+                {
+                    continue;
+                }
+                collect_modules(&p, recursive, skip_dir, out)?;
+            }
+            continue;
+        }
         if p.extension().and_then(|s| s.to_str()) != Some("mv") {
             continue;
         }
@@ -155,31 +258,9 @@ fn resolve_std_imports(main: &Module, path: &Path) -> Result<Vec<Module>, LoadEr
             .map_err(|e| LoadError::Io(format!("{}: {e}", p.display())))?;
         let m = parse(&src)
             .map_err(|e| LoadError::Front(format!("parse error in {}: {e}", p.display())))?;
-        by_path.insert(m.name.clone(), m);
+        out.entry(m.name.clone()).or_default().push((p, m));
     }
-
-    // Transitively select the imported std modules (BFS over std→std imports). An
-    // imported std module with no source file is *skipped*, not an error: general
-    // cross-module resolution is MARV-14, so an unresolved name stays opaque to the
-    // checker exactly as it did before std linking (e.g. `import std.collections`).
-    let mut selected: Vec<Module> = Vec::new();
-    let mut seen: std::collections::HashSet<Vec<String>> = std::collections::HashSet::new();
-    let mut queue = wanted;
-    while let Some(mp) = queue.pop() {
-        if !seen.insert(mp.clone()) {
-            continue;
-        }
-        let Some(m) = by_path.get(&mp) else {
-            continue;
-        };
-        for imp in &m.imports {
-            if imp.path.first().map(|s| s == "std").unwrap_or(false) {
-                queue.push(imp.path.clone());
-            }
-        }
-        selected.push(m.clone());
-    }
-    Ok(selected)
+    Ok(())
 }
 
 /// Locate the `std/` source directory: the `MARV_STD` environment variable if
@@ -434,6 +515,15 @@ mod tests {
                 main: main_path,
             }
         }
+
+        fn write(&self, rel: &str, src: &str) -> PathBuf {
+            let path = self.dir.join(rel);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).expect("create parent dir");
+            }
+            std::fs::write(&path, src).expect("write package file");
+            path
+        }
     }
 
     impl Drop for Workspace {
@@ -509,8 +599,82 @@ enum Color {
         assert_eq!(jit.run_i64("max", &[3, 7]).expect("run max"), 7);
     }
 
+    #[test]
+    fn local_source_imports_are_runnable_buildable_and_committable() {
+        let ws = Workspace::new(
+            "pkg",
+            &[],
+            "mod app\nimport math (double)\n\npure fn main() -> i64 {\n    double(21)\n}\n",
+        );
+        ws.write(
+            "math.mv",
+            "mod math\n\npure fn double(x: i64) -> i64 {\n    (x * 2)\n}\n",
+        );
+
+        let loaded = load(ws.main.to_str().unwrap()).unwrap_or_else(|e| panic!("load: {e}"));
+        assert!(!any_errors(&loaded.check()), "package should check cleanly");
+        assert!(
+            loaded.defs.iter().any(|(name, _)| name == "math.double"),
+            "imported bodies are part of the loaded definition set"
+        );
+
+        let program = marv_interp::Program::new(
+            &loaded.module_path,
+            loaded.defs.clone(),
+            loaded.world.clone(),
+        );
+        assert_eq!(
+            program
+                .run("", &[], &[])
+                .expect("run package main")
+                .value
+                .render(),
+            "42"
+        );
+
+        let opts = marv_codegen_cl::Options::default();
+        let jit = marv_codegen_cl::compile_reachable(
+            &loaded.module_path,
+            &loaded.defs,
+            &loaded.world,
+            &opts,
+            "",
+        )
+        .unwrap_or_else(|e| panic!("compile package: {e}"));
+        assert_eq!(jit.run_i64("", &[]).expect("jit package main"), 42);
+
+        let mut store = marv_store::Store::new();
+        let mut lock = marv_store::Lockfile::new();
+        let report = marv_store::commit_with_meta(
+            &mut store,
+            &mut lock,
+            &loaded.module_path,
+            &loaded.store_entries(),
+        );
+        assert_eq!(report.added(), 2);
+        assert!(lock.bindings.contains_key("app.main"));
+        assert!(lock.bindings.contains_key("math.double"));
+    }
+
+    #[test]
+    fn missing_local_import_is_a_clear_load_error() {
+        let ws = Workspace::new(
+            "missing",
+            &[],
+            "mod app\nimport math (double)\n\npure fn main() -> i64 {\n    double(21)\n}\n",
+        );
+        let err = match load(ws.main.to_str().unwrap()) {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("load should fail when a local import is missing"),
+        };
+        assert!(
+            err.contains("cannot resolve import `math`"),
+            "error names the missing import: {err}"
+        );
+    }
+
     /// When the imported enum's source cannot be resolved (the module is not in
-    /// `std/`), loading fails with the explicit unresolved-import error — not a
+    /// `std/`), loading fails with an explicit import-resolution error — not a
     /// misleading projection error or a silently wrong lowering.
     #[test]
     fn unresolvable_imported_enum_is_a_clear_error() {
