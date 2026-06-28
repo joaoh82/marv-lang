@@ -1,0 +1,30 @@
+mod app_router
+import std.io (Alloc)
+import std.collections (List, with_capacity, push, get)
+
+fn digit_value(c: char) -> i64 {
+    ((c as i64) - ('0' as i64))
+}
+
+fn route(alloc: Alloc, path: str) -> i64 {
+    var routes: List[str] = with_capacity(alloc, 3)
+    routes = push(alloc, routes, "/")
+    routes = push(alloc, routes, "/users/")
+    routes = push(alloc, routes, "/posts/")
+    let home: str = get(routes, 0)
+    let users: str = get(routes, 1)
+    let posts: str = get(routes, 2)
+    if ((len(path) == len(home)) and (path[0] == '/')) {
+        1
+    } else if (((path[1] == 'u') and (path[2] == 's')) and (path[3] == 'e')) {
+        (200 + digit_value(path[len(users)]))
+    } else if (((path[1] == 'p') and (path[2] == 'o')) and (path[3] == 's')) {
+        (300 + digit_value(path[len(posts)]))
+    } else {
+        0
+    }
+}
+
+fn main(alloc: Alloc) -> i64 {
+    (((route(alloc, "/") + route(alloc, "/users/42")) + route(alloc, "/posts/7")) + route(alloc, "/assets/app"))
+}
