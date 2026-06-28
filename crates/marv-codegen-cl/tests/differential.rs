@@ -12,10 +12,13 @@
 use std::path::PathBuf;
 
 use marv_core::ir::Def;
-use marv_core::{lower_module, lower_modules};
+use marv_core::{lower_module, lower_modules, symbol_hash};
 use marv_db::CoreModuleSpec;
 use marv_interp::{Program, RunError, Value};
 use marv_types::{check_def, Code, Severity, World};
+
+type RuntimeDef = (marv_core::Hash, String, Def);
+type RuntimeAlias = (String, marv_core::Hash);
 
 /// Absolute path to a file in the repository-level `tests/run/` corpus.
 fn corpus(name: &str) -> PathBuf {
@@ -62,10 +65,58 @@ fn load_source(name: &str) -> (String, Vec<(String, Def)>, World) {
     (module_path, defs, world)
 }
 
+/// Parse/lower a `.mv` file and key all lowered modules by resolved symbol
+/// names, so source-level std functions can execute through the backend corpus.
+fn load_source_hashed(name: &str) -> (Vec<RuntimeDef>, Vec<RuntimeAlias>, World) {
+    let path = corpus(name);
+    let src = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path:?}: {e}"));
+    let module = marv_syntax::parse(&src).unwrap_or_else(|e| panic!("parse {name}: {e}"));
+    let module_path = module.name.join(".");
+    let lowered = if module
+        .imports
+        .iter()
+        .any(|i| i.path.first().map(|s| s == "std").unwrap_or(false))
+    {
+        let std_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../std");
+        let mut modules = Vec::new();
+        for entry in std::fs::read_dir(&std_dir).expect("read std/") {
+            let path = entry.expect("std entry").path();
+            if path.extension().and_then(|s| s.to_str()) == Some("mv") {
+                let src = std::fs::read_to_string(&path).expect("read std module");
+                modules.push(marv_syntax::parse(&src).expect("parse std module"));
+            }
+        }
+        modules.push(module);
+        lower_modules(&modules).unwrap_or_else(|e| panic!("lower {name} with std: {e}"))
+    } else {
+        vec![lower_module(&module).unwrap_or_else(|e| panic!("lower {name}: {e}"))]
+    };
+    let world = World::from_modules(&lowered);
+    let mut defs = Vec::new();
+    let mut aliases = Vec::new();
+    for lowered_module in &lowered {
+        let lowered_module_path = lowered_module.module.join(".");
+        for entry in &lowered_module.defs {
+            let qualified = if lowered_module_path.is_empty() {
+                entry.name.clone()
+            } else {
+                format!("{}.{}", lowered_module_path, entry.name)
+            };
+            let h = symbol_hash(&qualified);
+            defs.push((h, qualified.clone(), entry.def.clone()));
+            if lowered_module_path == module_path {
+                aliases.push((qualified, h));
+                aliases.push((entry.name.clone(), h));
+            }
+        }
+    }
+    (defs, aliases, world)
+}
+
 /// Interpret `entry(args)` and extract its integer result (the oracle).
 fn interp_i64(
-    module_path: &str,
-    defs: Vec<(String, Def)>,
+    defs: Vec<RuntimeDef>,
+    aliases: Vec<RuntimeAlias>,
     world: World,
     entry: &str,
     args: &[i64],
@@ -74,13 +125,18 @@ fn interp_i64(
     let arg_strs: Vec<String> = args.iter().map(|a| a.to_string()).collect();
     let grant: Vec<String> = if matches!(
         file,
-        "list.mv" | "strings.mv" | "app_tokenizer.mv" | "app_router.mv" | "app_invoice_summary.mv"
+        "list.mv"
+            | "strings.mv"
+            | "bytes_utf8.mv"
+            | "app_tokenizer.mv"
+            | "app_router.mv"
+            | "app_invoice_summary.mv"
     ) {
         vec!["Alloc".to_string()]
     } else {
         Vec::new()
     };
-    let program = Program::new(module_path, defs, world);
+    let program = Program::new_hashed(defs, aliases, world);
     let outcome = program
         .run(entry, &grant, &arg_strs)
         .unwrap_or_else(|e| panic!("interp {entry}: {e}"));
@@ -90,16 +146,40 @@ fn interp_i64(
     }
 }
 
+fn interp_i64_module(
+    module_path: &str,
+    defs: Vec<(String, Def)>,
+    world: World,
+    entry: &str,
+    args: &[i64],
+) -> i64 {
+    let arg_strs: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+    let program = Program::new(module_path, defs, world);
+    let outcome = program
+        .run(entry, &[], &arg_strs)
+        .unwrap_or_else(|e| panic!("interp {entry}: {e}"));
+    match outcome.value {
+        Value::Int(n) => n,
+        other => panic!("interp {entry}: expected an integer, got {other:?}"),
+    }
+}
+
 /// JIT-compile the module and call `entry(args)` natively.
 fn cranelift_i64(
-    module_path: &str,
-    defs: &[(String, Def)],
+    defs: &[RuntimeDef],
+    aliases: &[RuntimeAlias],
     world: &World,
     entry: &str,
     args: &[i64],
 ) -> i64 {
-    let jit = marv_codegen_cl::compile(module_path, defs, world)
-        .unwrap_or_else(|e| panic!("cranelift compile: {e}"));
+    let jit = marv_codegen_cl::compile_hashed_reachable(
+        defs,
+        aliases,
+        world,
+        &marv_codegen_cl::Options::default(),
+        entry,
+    )
+    .unwrap_or_else(|e| panic!("cranelift compile: {e}"));
     jit.run_i64(entry, args)
         .unwrap_or_else(|e| panic!("cranelift run {entry}: {e}"))
 }
@@ -291,6 +371,11 @@ fn corpus_cases() -> Vec<(&'static str, &'static str, Vec<i64>, i64)> {
         // Strings: literal concat, slice, char access, `for c in s`, and
         // explicit-Alloc building from `List[char]`.
         ("strings.mv", "exercise", vec![], 324),
+        // Bytes + UTF-8 backend-safe paths: source-level byte equality and
+        // UTF-8 encoding over List[u8]. Decoding has typed error raises, so it
+        // stays interpreter/check covered until result-value codegen lands.
+        ("bytes_utf8.mv", "encode_multibyte", vec![], 435),
+        ("bytes_utf8.mv", "compare_bytes", vec![], 3),
         // MARV-40 app examples: app-shaped string/list programs with explicit
         // Alloc, pinned across interpreter, Cranelift, and WASM.
         ("app_tokenizer.mv", "main", vec![], 310),
@@ -302,16 +387,16 @@ fn corpus_cases() -> Vec<(&'static str, &'static str, Vec<i64>, i64)> {
 #[test]
 fn interpreter_and_cranelift_agree() {
     for (file, entry, args, expected) in corpus_cases() {
-        let (module_path, defs, world) = load_source(file);
+        let (defs, aliases, world) = load_source_hashed(file);
         let interp = interp_i64(
-            &module_path,
             defs.clone(),
+            aliases.clone(),
             world.clone(),
             entry,
             &args,
             file,
         );
-        let native = cranelift_i64(&module_path, &defs, &world, entry, &args);
+        let native = cranelift_i64(&defs, &aliases, &world, entry, &args);
 
         assert_eq!(
             interp, native,
@@ -469,14 +554,7 @@ fn reachability_pruned_compile_skips_unsupported_sibling() {
     let jit = marv_codegen_cl::compile_reachable(&module_path, &defs, &world, &opts, "double")
         .unwrap_or_else(|e| panic!("pruned cranelift compile: {e}"));
     let got = jit.run_i64("double", &[21]).expect("run pruned entry");
-    let want = interp_i64(
-        &module_path,
-        defs,
-        world,
-        "double",
-        &[21],
-        "pruned_sibling.mv",
-    );
+    let want = interp_i64_module(&module_path, defs, world, "double", &[21]);
     assert_eq!(got, 42);
     assert_eq!(got, want, "pruned build agrees with the oracle");
 }

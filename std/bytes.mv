@@ -1,0 +1,141 @@
+mod std.bytes
+import std.io (Alloc)
+import std.collections (List, with_capacity, push, len)
+import std.str (from_chars)
+
+/// A typed UTF-8 decoding failure. Invalid bytes are explicit data-flow errors,
+/// never replacement characters or panics.
+error Utf8Error { Invalid }
+
+pure fn byte_len(bytes: []u8) -> usize {
+    len(bytes)
+}
+
+pure fn at(bytes: []u8, index: usize) -> u8 {
+    bytes[index]
+}
+
+fn append(alloc: Alloc, bytes: List[u8], byte: u8) -> List[u8] {
+    push(alloc, bytes, byte)
+}
+
+pure fn equal(left: []u8, right: []u8) -> bool {
+    if (len(left) != len(right)) {
+        false
+    } else {
+        var i: usize = 0
+        var same: bool = true
+        while ((i < len(left)) and same) {
+            same = (left[i] == right[i])
+            i = (i + 1)
+        }
+        same
+    }
+}
+
+fn decode_utf8(alloc: Alloc, bytes: []u8) -> !str {
+    var chars: List[char] = with_capacity(alloc, len(bytes))
+    var i: usize = 0
+    while (i < len(bytes)) {
+        let b0: u8 = bytes[i]
+        if (b0 < 128) {
+            chars = push(alloc, chars, (b0 as char))
+            i = (i + 1)
+        } else if ((b0 >= 194) and (b0 <= 223)) {
+            if ((i + 1) >= len(bytes)) {
+                Utf8Error.Invalid
+            } else {
+                let byte1: u8 = bytes[(i + 1)]
+                if ((byte1 < 128) or (byte1 > 191)) {
+                    Utf8Error.Invalid
+                } else {
+                    let b1: i64 = ((byte1 as i64) - 128)
+                    let cp: i64 = ((((b0 as i64) - 192) * 64) + b1)
+                    chars = push(alloc, chars, (cp as char))
+                    i = (i + 2)
+                }
+            }
+        } else if ((b0 >= 224) and (b0 <= 239)) {
+            if ((i + 2) >= len(bytes)) {
+                Utf8Error.Invalid
+            } else {
+                let byte1: u8 = bytes[(i + 1)]
+                let byte2: u8 = bytes[(i + 2)]
+                if (((byte1 < 128) or (byte1 > 191)) or ((byte2 < 128) or (byte2 > 191))) {
+                    Utf8Error.Invalid
+                } else {
+                    let b1: i64 = ((byte1 as i64) - 128)
+                    let b2: i64 = ((byte2 as i64) - 128)
+                    let cp: i64 = (((((b0 as i64) - 224) * 4096) + (b1 * 64)) + b2)
+                    if (cp < 2048) {
+                        Utf8Error.Invalid
+                    } else if ((cp >= 55296) and (cp <= 57343)) {
+                        Utf8Error.Invalid
+                    } else {
+                        chars = push(alloc, chars, (cp as char))
+                        i = (i + 3)
+                    }
+                }
+            }
+        } else if ((b0 >= 240) and (b0 <= 244)) {
+            if ((i + 3) >= len(bytes)) {
+                Utf8Error.Invalid
+            } else {
+                let byte1: u8 = bytes[(i + 1)]
+                let byte2: u8 = bytes[(i + 2)]
+                let byte3: u8 = bytes[(i + 3)]
+                if ((((byte1 < 128) or (byte1 > 191)) or ((byte2 < 128) or (byte2 > 191))) or ((byte3 < 128) or (byte3 > 191))) {
+                    Utf8Error.Invalid
+                } else {
+                    let b1: i64 = ((byte1 as i64) - 128)
+                    let b2: i64 = ((byte2 as i64) - 128)
+                    let b3: i64 = ((byte3 as i64) - 128)
+                    let cp: i64 = ((((((b0 as i64) - 240) * 262144) + (b1 * 4096)) + (b2 * 64)) + b3)
+                    if (cp < 65536) {
+                        Utf8Error.Invalid
+                    } else if (cp > 1114111) {
+                        Utf8Error.Invalid
+                    } else {
+                        chars = push(alloc, chars, (cp as char))
+                        i = (i + 4)
+                    }
+                }
+            }
+        } else {
+            Utf8Error.Invalid
+        }
+    }
+    from_chars(alloc, chars)
+}
+
+fn encode_utf8(alloc: Alloc, text: str) -> List[u8] {
+    var out: List[u8] = with_capacity(alloc, len(text))
+    for ch in text {
+        let cp: i64 = (ch as i64)
+        if (cp < 128) {
+            out = push(alloc, out, (cp as u8))
+        } else if (cp < 2048) {
+            let a: u8 = (((cp / 64) + 192) as u8)
+            let b: u8 = (((cp % 64) + 128) as u8)
+            out = push(alloc, out, a)
+            out = push(alloc, out, b)
+        } else if (cp < 65536) {
+            let a: u8 = (((cp / 4096) + 224) as u8)
+            let b: u8 = ((((cp / 64) % 64) + 128) as u8)
+            let c: u8 = (((cp % 64) + 128) as u8)
+            out = push(alloc, out, a)
+            out = push(alloc, out, b)
+            out = push(alloc, out, c)
+        } else {
+            let a: u8 = (((cp / 262144) + 240) as u8)
+            let b: u8 = ((((cp / 4096) % 64) + 128) as u8)
+            let c: u8 = ((((cp / 64) % 64) + 128) as u8)
+            let d: u8 = (((cp % 64) + 128) as u8)
+            out = push(alloc, out, a)
+            out = push(alloc, out, b)
+            out = push(alloc, out, c)
+            out = push(alloc, out, d)
+        }
+    }
+    out
+}

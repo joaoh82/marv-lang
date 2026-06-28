@@ -27,6 +27,7 @@ fixture source for the test suite. As of M4 the integer/boolean subset is
 | [`app_tokenizer.mv`](app_tokenizer.mv) | **Application example (MARV-40 / MARV-45):** scans a string, splits on separators, pushes token slices into a growable `List[str]` through explicit `Alloc`, and returns a deterministic token summary. Pinned in the three-way differential corpus as [`tests/run/app_tokenizer.mv`](../tests/run/app_tokenizer.mv). |
 | [`app_router.mv`](app_router.mv) | **Application example (MARV-40 / MARV-46):** a tiny route classifier that builds a list of route prefixes, checks path prefixes with string indexing, and returns stable route codes. Pinned in the three-way differential corpus as [`tests/run/app_router.mv`](../tests/run/app_router.mv). |
 | [`app_invoice_summary.mv`](app_invoice_summary.mv) | **Application example (MARV-40 / MARV-47):** parses a delimited invoice-like record, pushes signed amounts into `List[i64]`, and folds the list into a summary score. Pinned in the three-way differential corpus as [`tests/run/app_invoice_summary.mv`](../tests/run/app_invoice_summary.mv). |
+| [`bytes_utf8.mv`](bytes_utf8.mv) | **Std example (MARV-54):** decodes a `[]u8` payload with `std.bytes.decode_utf8`, appends text, and encodes it back to `List[u8]` with explicit `Alloc`. The companion corpus checks decode on the interpreter and pins backend-safe encode/equality paths three-way in [`tests/run/bytes_utf8.mv`](../tests/run/bytes_utf8.mv). |
 
 Every example now parses, formats, and checks through the **real** front end — the
 `examples_are_canonical` test reprints each from the AST (the formatter's whitespace
@@ -36,7 +37,8 @@ when capabilities & `perform` from source landed (MARV-6); `clamp.mv` joined in 
 contract arithmetic, and `old(e)`); `color.mv` when `enum`/`match` landed; `generics.mv` when
 `interface`/`impl` + generic bounds landed (MARV-5); `arrays.mv` when array codegen landed
 (MARV-30); `slices.mv` when runtime-length slices landed (MARV-33 + MARV-20);
-`optionals.mv` when single-file lowering of imported enums landed (MARV-18).
+`optionals.mv` when single-file lowering of imported enums landed (MARV-18);
+`bytes_utf8.mv` when the source-level `std.bytes` UTF-8 helpers landed (MARV-54).
 `factorial.mv`, `arithmetic.mv`, `color.mv`, `mutation.mv`, `loops.mv`,
 `generics.mv`, `arrays.mv`, `slices.mv`, and `optionals.mv` additionally lie inside the
 *executable* subset, so the interpreter runs them (`marv run`); the integer ones

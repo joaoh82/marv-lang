@@ -85,6 +85,23 @@ fn from_chars(alloc: Alloc, chars: List[char]) -> str
 The lowerer rewrites `from_chars` call sites to a Core primitive; the source body is only the
 std declaration shape.
 
+### `std/bytes.mv` — bytes and UTF-8
+Byte buffers use the existing runtime-length slice/list surfaces: borrowed data is `[]u8`,
+growable output is `List[u8]`, and construction takes an explicit `Alloc`. `decode_utf8`
+turns a byte slice into a `str` with typed `Utf8Error.Invalid` failures for malformed input;
+`encode_utf8` turns a `str` into a growable byte list. The helpers are plain marv source, so
+they exercise the same `u8`, `char`, `str`, `List[T]`, `?`, and loop paths as user code.
+
+```marv
+error Utf8Error { Invalid }
+pure fn byte_len(bytes: []u8) -> usize
+pure fn at(bytes: []u8, index: usize) -> u8
+fn append(alloc: Alloc, bytes: List[u8], byte: u8) -> List[u8]
+pure fn equal(left: []u8, right: []u8) -> bool
+fn decode_utf8(alloc: Alloc, bytes: []u8) -> !str
+fn encode_utf8(alloc: Alloc, text: str) -> List[u8]
+```
+
 ## Capabilities
 
 `std/capabilities.mv` declares the standard capability types as interfaces — the operations a
@@ -104,7 +121,7 @@ supplies the implementations the process/page chooses to grant.
 | `Alloc` | Allocator | `alloc(bytes: usize) -> ![]u8` |
 
 `Alloc` is the auditable entry point for user-visible growable allocation: a list
-or string builder must receive `Alloc`, and the checker rejects an allocation
+or string/byte builder must receive `Alloc`, and the checker rejects an allocation
 `perform` outside the function's capability row. Compiler-managed boxes for
 fixed-shape structs/enums/arrays are still an implementation detail and do not
 add an `Alloc` parameter to user signatures; the runtimes allocate those boxes

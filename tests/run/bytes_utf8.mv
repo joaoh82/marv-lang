@@ -1,0 +1,44 @@
+mod bytes_utf8
+import std.io (Alloc)
+import std.collections (List, get, len)
+import std.bytes (decode_utf8, encode_utf8, equal, byte_len)
+
+fn decode_ascii(alloc: Alloc) -> !i64 {
+    let h: u8 = (104 as u8)
+    let i: u8 = (105 as u8)
+    let bang: u8 = (33 as u8)
+    let raw: []u8 = [h, i, bang]
+    let text: str = decode_utf8(alloc, raw)?
+    let encoded: List[u8] = encode_utf8(alloc, text)
+    (((get(encoded, 0) as i64) + (get(encoded, 1) as i64)) + (len(encoded) as i64))
+}
+
+fn decode_multibyte(alloc: Alloc) -> !i64 {
+    let e0: u8 = (226 as u8)
+    let e1: u8 = (130 as u8)
+    let e2: u8 = (172 as u8)
+    let raw: []u8 = [e0, e1, e2]
+    let text: str = decode_utf8(alloc, raw)?
+    let encoded: List[u8] = encode_utf8(alloc, text)
+    (((get(encoded, 0) as i64) + (get(encoded, 1) as i64)) + (get(encoded, 2) as i64))
+}
+
+fn encode_multibyte(alloc: Alloc) -> i64 {
+    let bytes: List[u8] = encode_utf8(alloc, "Aé€")
+    ((((get(bytes, 0) as i64) + (get(bytes, 1) as i64)) + (get(bytes, 2) as i64)) + (len(bytes) as i64))
+}
+
+fn compare_bytes() -> i64 {
+    let one: u8 = (1 as u8)
+    let two: u8 = (2 as u8)
+    let three: u8 = (3 as u8)
+    let four: u8 = (4 as u8)
+    let left: []u8 = [one, two, three]
+    let right: []u8 = [one, two, three]
+    let other: []u8 = [one, two, four]
+    if (equal(left, right) and not equal(left, other)) {
+        (byte_len(left) as i64)
+    } else {
+        0
+    }
+}
