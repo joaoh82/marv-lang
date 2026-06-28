@@ -65,6 +65,11 @@ layout is `[len, cap, e0, …]`; growable allocation is explicit through `Alloc`
 `std.str.from_chars(alloc, chars: List[char])` share a `[len, codepoint…]` runtime block in
 Cranelift and WASM. The builder path keeps growable construction explicit through `Alloc`,
 and `tests/run/strings.mv` differentially checks interpreter == Cranelift == WASM.
+· **MARV-54** bytes and UTF-8 stdlib: `std.bytes` adds byte-slice length/index/equality,
+`List[u8]` append, typed `Utf8Error.Invalid`, and source-level UTF-8 encode/decode between
+`[]u8`, `List[u8]`, and `str`; `tests/run/bytes_utf8.mv` pins backend-safe encode/equality
+paths across the interpreter, Cranelift, and WASM, while decode's typed-error path is
+interpreter/check covered until `raise`/`Result` codegen lands.
 · **MARV-3** error handling (`error E { … }` decls, `!T`/bare-`!` error unions → `Result[T,
 error-union]`, `E.Variant` → `Core::Raise`, postfix `?`; **full cross-call error-set inference**
 via a fixpoint over the call graph in `marv-db`, surfaced through `marv/errorSet`; exhaustive

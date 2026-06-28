@@ -896,9 +896,9 @@ fn build_native(inv: &Invocation, file: &str, loaded: &Loaded) -> ExitCode {
     // Compile only what the entry reaches (MARV-8): a sibling definition the
     // backend cannot lower yet must not block a build that never calls it.
     // Whole-module compilation remains the audit path (`compile_with`).
-    let jit = match codegen::compile_reachable(
-        &loaded.module_path,
-        &loaded.defs,
+    let jit = match codegen::compile_hashed_reachable(
+        &loaded.runtime_defs,
+        &loaded.runtime_aliases,
         &loaded.world,
         &opts,
         &inv.entry,
@@ -950,9 +950,9 @@ fn build_wasm(inv: &Invocation, file: &str, loaded: &Loaded) -> ExitCode {
     };
     // Same reachability pruning as the native path (MARV-8): only the entry's
     // closure is compiled and exported.
-    let artifact = match wasm::compile_reachable(
-        &loaded.module_path,
-        &loaded.defs,
+    let artifact = match wasm::compile_hashed_reachable(
+        &loaded.runtime_defs,
+        &loaded.runtime_aliases,
         &loaded.world,
         &opts,
         &inv.entry,
@@ -1057,12 +1057,12 @@ fn cmd_run(args: &[String]) -> ExitCode {
         Program::new_hashed(pinned.defs_for_backend(), pinned.aliases, pinned.world)
     } else {
         let Loaded {
-            module_path,
-            defs,
+            runtime_defs,
+            runtime_aliases,
             world,
             ..
         } = loaded;
-        Program::new(&module_path, defs, world)
+        Program::new_hashed(runtime_defs, runtime_aliases, world)
     };
     match program.run(&inv.entry, &inv.grant, &inv.args) {
         Ok(outcome) => {

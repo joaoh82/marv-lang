@@ -11,8 +11,8 @@
 
 use std::path::{Path, PathBuf};
 
-use marv_core::ir::Def;
-use marv_core::lower_modules;
+use marv_core::ir::{Def, Hash};
+use marv_core::{lower_modules, symbol_hash};
 use marv_db::{qualify, CoreModuleSpec};
 use marv_store::{DefMeta, StoredOpSig, StoredVariant};
 use marv_syntax::{parse, Module};
@@ -23,6 +23,8 @@ use marv_types::{check_bounds, check_def, Diagnostic, Severity, World};
 pub struct Loaded {
     pub module_path: String,
     pub defs: Vec<(String, Def)>,
+    pub runtime_defs: Vec<(Hash, String, Def)>,
+    pub runtime_aliases: Vec<(String, Hash)>,
     /// Declaration metadata aligned with `defs`, persisted into `marv-store`
     /// so fetched blobs can rebuild a hash-keyed declaration world.
     pub store_meta: Vec<DefMeta>,
@@ -99,8 +101,11 @@ fn load_source(src: &str, path: &Path) -> Result<Loaded, LoadError> {
     // Interface-bound and coherence checks over the whole set's generics metadata.
     let bound_diags = check_bounds(&lowered);
 
-    // The user's file is module 0; `check`/`run` operate on its definitions
-    // (the std modules are resolved-but-trusted library code).
+    let (runtime_defs, runtime_aliases) = runtime_defs_for_modules(&lowered, &module_path);
+
+    // The user's file is module 0; `check` operates on its definitions (the std
+    // modules are resolved-but-trusted library code). `run`/`build` retain the
+    // resolved std bodies above for source-level std helpers.
     let store_meta = store_meta_for_module(lowered.first().expect("main module was lowered"));
     let main = lowered.into_iter().next().expect("main module was lowered");
     let param_names = main
@@ -112,6 +117,8 @@ fn load_source(src: &str, path: &Path) -> Result<Loaded, LoadError> {
     Ok(Loaded {
         module_path,
         defs,
+        runtime_defs,
+        runtime_aliases,
         store_meta,
         param_names,
         world,
@@ -232,16 +239,56 @@ fn load_core(src: &str) -> Result<Loaded, LoadError> {
     let world = spec.world.build();
     let module_path = spec.module.clone();
     let param_names: Vec<Vec<String>> = spec.defs.iter().map(|d| d.params.clone()).collect();
-    let defs = spec.defs.into_iter().map(|d| (d.name, d.def)).collect();
+    let defs: Vec<(String, Def)> = spec.defs.into_iter().map(|d| (d.name, d.def)).collect();
+    let (runtime_defs, runtime_aliases) = runtime_defs_for_defs(&module_path, &defs);
     let store_meta = vec![DefMeta::default(); param_names.len()];
     Ok(Loaded {
         module_path,
         defs,
+        runtime_defs,
+        runtime_aliases,
         store_meta,
         param_names,
         world,
         bound_diags: Vec::new(),
     })
+}
+
+fn runtime_defs_for_modules(
+    modules: &[marv_core::LoweredModule],
+    main_module_path: &str,
+) -> (Vec<(Hash, String, Def)>, Vec<(String, Hash)>) {
+    let mut defs = Vec::new();
+    let mut aliases = Vec::new();
+    for module in modules {
+        let module_path = module.module.join(".");
+        for entry in &module.defs {
+            let qualified = qualify(&module_path, &entry.name);
+            let h = symbol_hash(&qualified);
+            defs.push((h, qualified.clone(), entry.def.clone()));
+            if module_path == main_module_path {
+                aliases.push((qualified, h));
+                aliases.push((entry.name.clone(), h));
+            }
+        }
+    }
+    (defs, aliases)
+}
+
+fn runtime_defs_for_defs(
+    module_path: &str,
+    defs: &[(String, Def)],
+) -> (Vec<(Hash, String, Def)>, Vec<(String, Hash)>) {
+    let mut runtime_defs = Vec::new();
+    let mut aliases = Vec::new();
+    for (name, def) in defs {
+        let qualified = qualify(module_path, name);
+        let h = symbol_hash(&qualified);
+        runtime_defs.push((h, qualified.clone(), def.clone()));
+        aliases.push((qualified, h));
+        aliases.push((name.clone(), h));
+    }
+    (runtime_defs, aliases)
 }
 
 fn store_meta_for_module(m: &marv_core::LoweredModule) -> Vec<DefMeta> {

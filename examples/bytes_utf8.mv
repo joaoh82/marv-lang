@@ -1,0 +1,15 @@
+mod bytes_utf8
+import std.io (Alloc)
+import std.collections (List, len)
+import std.bytes (decode_utf8, encode_utf8)
+
+fn roundtrip_payload(alloc: Alloc) -> !i64 {
+    let h: u8 = (104 as u8)
+    let e: u8 = (101 as u8)
+    let l: u8 = (108 as u8)
+    let o: u8 = (111 as u8)
+    let raw: []u8 = [h, e, l, l, o]
+    let text: str = decode_utf8(alloc, raw)?
+    let encoded: List[u8] = encode_utf8(alloc, (text + "!"))
+    (len(encoded) as i64)
+}
