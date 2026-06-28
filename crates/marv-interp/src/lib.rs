@@ -301,6 +301,7 @@ fn eval_cnode(n: &CNode, eval: &mut dyn FnMut(&CExpr) -> Option<Value>) -> Optio
         CNode::Neg(inner) => Some(Value::Int(as_int(eval(inner)?)?.wrapping_neg())),
         CNode::Len(inner) => match eval(inner)? {
             Value::Agg { fields, .. } => Some(Value::Int(fields.len() as i64)),
+            Value::List { items, .. } => Some(Value::Int(items.len() as i64)),
             Value::Str(s) => Some(Value::Int(s.chars().count() as i64)),
             _ => None,
         },
@@ -309,6 +310,9 @@ fn eval_cnode(n: &CNode, eval: &mut dyn FnMut(&CExpr) -> Option<Value>) -> Optio
             match eval(base)? {
                 Value::Agg { fields, .. } => {
                     usize::try_from(i).ok().and_then(|u| fields.get(u).cloned())
+                }
+                Value::List { items, .. } => {
+                    usize::try_from(i).ok().and_then(|u| items.get(u).cloned())
                 }
                 Value::Str(s) => usize::try_from(i)
                     .ok()

@@ -7,7 +7,7 @@
 //! the test skips rather than fails — so a solver-less CI stays green while a
 //! solver-equipped run exercises the real prover.
 
-use marv_core::{ir::Def, lower_module};
+use marv_core::{ir::Def, lower_module, lower_modules};
 use marv_types::World;
 use marv_verify::{verify_def, VerifyOutcome};
 
@@ -29,6 +29,51 @@ fn lower_one(src: &str) -> (Def, Vec<String>, World) {
     let lowered = lower_module(&module).expect("lower");
     let world = World::from_module(&lowered);
     let def = lowered
+        .defs
+        .iter()
+        .find(|e| e.name == fn_name)
+        .expect("lowered fn")
+        .def
+        .clone();
+    (def, names, world)
+}
+
+/// Lower a source module together with the minimal std modules needed by the
+/// List/string tests. This mirrors the CLI's std import resolution without
+/// making `marv-verify` depend on `marv-cli`.
+fn lower_one_with_std(src: &str) -> (Def, Vec<String>, World) {
+    let module = marv_syntax::parse(src).expect("parse");
+    let f = module
+        .items
+        .iter()
+        .find_map(|i| match i {
+            marv_syntax::Item::Fn(f) => Some(f),
+            _ => None,
+        })
+        .expect("expected a function");
+    let names: Vec<String> = f.params.iter().map(|p| p.name.clone()).collect();
+    let fn_name = f.name.clone();
+
+    let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .expect("repo root")
+        .to_path_buf();
+    let std_src = |file: &str| -> marv_syntax::Module {
+        let path = repo.join("std").join(file);
+        let src = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path:?}: {e}"));
+        marv_syntax::parse(&src).expect("parse std module")
+    };
+
+    let modules = vec![
+        module,
+        std_src("capabilities.mv"),
+        std_src("collections.mv"),
+        std_src("str.mv"),
+    ];
+    let lowered = lower_modules(&modules).expect("lower with std");
+    let world = World::from_modules(&lowered);
+    let def = lowered[0]
         .defs
         .iter()
         .find(|e| e.name == fn_name)
@@ -137,6 +182,183 @@ fn counterexample_for_buggy_clamp() {
             );
         }
         other => panic!("buggy clamp should fail with a counterexample, got {other:?}"),
+    }
+}
+
+const LIST_PUSH_LEN: &str = "\
+mod lists
+import std.io (Alloc)
+import std.collections (List, push)
+
+fn append_one(alloc: Alloc, xs: List[i64], v: i64) -> List[i64]
+    ensures len(result) == (len(xs) + 1)
+{
+    push(alloc, xs, v)
+}
+";
+
+#[test]
+fn proves_list_push_increments_len() {
+    let (def, names, world) = lower_one_with_std(LIST_PUSH_LEN);
+    let outcome = verify_def(&def, &names, &world);
+    if skip_if_no_solver(&outcome) {
+        return;
+    }
+    assert_eq!(
+        outcome,
+        VerifyOutcome::Proved,
+        "push should prove len(result) == len(xs) + 1, got {outcome:?}"
+    );
+}
+
+const LIST_GET_AFTER_PUSH: &str = "\
+mod lists
+import std.io (Alloc)
+import std.collections (List, push, get)
+
+fn pushed_value(alloc: Alloc, xs: List[i64], v: i64) -> i64
+    ensures result == v
+{
+    let ys: List[i64] = push(alloc, xs, v)
+    get(ys, len(xs))
+}
+";
+
+#[test]
+fn proves_get_after_push_returns_pushed_value() {
+    let (def, names, world) = lower_one_with_std(LIST_GET_AFTER_PUSH);
+    let outcome = verify_def(&def, &names, &world);
+    if skip_if_no_solver(&outcome) {
+        return;
+    }
+    assert_eq!(
+        outcome,
+        VerifyOutcome::Proved,
+        "get(push(xs, v), len(xs)) should prove equal to v, got {outcome:?}"
+    );
+}
+
+const LIST_PUSH_FALSE_LEN: &str = "\
+mod lists
+import std.io (Alloc)
+import std.collections (List, push)
+
+fn append_one(alloc: Alloc, xs: List[i64], v: i64) -> List[i64]
+    ensures len(result) == len(xs)
+{
+    push(alloc, xs, v)
+}
+";
+
+#[test]
+fn counterexample_for_false_list_length_claim() {
+    let (def, names, world) = lower_one_with_std(LIST_PUSH_FALSE_LEN);
+    let outcome = verify_def(&def, &names, &world);
+    if skip_if_no_solver(&outcome) {
+        return;
+    }
+    match outcome {
+        VerifyOutcome::Failed {
+            obligation,
+            counterexample,
+            ..
+        } => {
+            let val = |k: &str| -> i64 {
+                counterexample
+                    .iter()
+                    .find(|(n, _)| n == k)
+                    .and_then(|(_, v)| v.parse::<i64>().ok())
+                    .unwrap_or_else(|| panic!("missing/non-int {k} in {counterexample:?}"))
+            };
+            assert_eq!(
+                val("len(result)"),
+                val("len(xs)") + 1,
+                "counterexample should reflect the push length effect: {counterexample:?}"
+            );
+            assert!(
+                obligation.contains("len(result)") && obligation.contains("len(xs)"),
+                "obligation should mention the false length claim: {obligation}"
+            );
+        }
+        other => panic!("false push length claim should fail, got {other:?}"),
+    }
+}
+
+const STRING_LEN_INDEX: &str = "\
+mod strings
+
+pure fn first_preserves(s: str) -> char
+    requires len(s) >= 1
+    ensures result == s[0]
+{
+    s[0]
+}
+";
+
+#[test]
+fn proves_string_index_contract() {
+    let (def, names, world) = lower_one(STRING_LEN_INDEX);
+    let outcome = verify_def(&def, &names, &world);
+    if skip_if_no_solver(&outcome) {
+        return;
+    }
+    assert_eq!(
+        outcome,
+        VerifyOutcome::Proved,
+        "string indexing in body and contract should prove, got {outcome:?}"
+    );
+}
+
+const STRING_LEN_BODY: &str = "\
+mod strings
+
+pure fn count(s: str) -> usize
+    ensures result == len(s)
+{
+    len(s)
+}
+";
+
+#[test]
+fn proves_string_len_contract() {
+    let (def, names, world) = lower_one(STRING_LEN_BODY);
+    let outcome = verify_def(&def, &names, &world);
+    if skip_if_no_solver(&outcome) {
+        return;
+    }
+    assert_eq!(
+        outcome,
+        VerifyOutcome::Proved,
+        "string len in body and contract should prove, got {outcome:?}"
+    );
+}
+
+const STRING_SLICE_UNSUPPORTED: &str = "\
+mod strings
+
+pure fn head_slice(s: str) -> str
+    requires len(s) >= 1
+    ensures len(result) == 1
+{
+    s[0..1]
+}
+";
+
+#[test]
+fn unsupported_string_slice_reports_honest_fallback() {
+    let (def, names, world) = lower_one(STRING_SLICE_UNSUPPORTED);
+    let outcome = verify_def(&def, &names, &world);
+    if skip_if_no_solver(&outcome) {
+        return;
+    }
+    match outcome {
+        VerifyOutcome::Unsupported { reason } => {
+            assert!(
+                reason.contains("string operations") || reason.contains("slice"),
+                "unsupported reason should name the out-of-subset op, got {reason}"
+            );
+        }
+        other => panic!("string slicing should stay unsupported, got {other:?}"),
     }
 }
 

@@ -53,11 +53,14 @@
 //!   runtime (Tier 1); Tier 2 treats it as an unspecified integer, which is
 //!   sound for partial correctness — a trapping execution never reaches the
 //!   postcondition (a counterexample whose divisor is 0 may thus be spurious).
-//! - **Arrays and slices** of ints/bools, as SMT arrays paired with a length
-//!   term (`[N]T` has a literal length; a slice's is an unconstrained
-//!   non-negative constant). `len`, indexing, array literals, and slice element
-//!   stores all encode; out-of-bounds reads are unspecified values (the runtime
-//!   traps — same partial-correctness argument as division).
+//! - **Arrays, slices, `List[T]`, and strings** over scalar elements, as SMT
+//!   arrays paired with a length term (`[N]T` has a literal length; slice/list/
+//!   string parameters have unconstrained non-negative lengths). `len`,
+//!   indexing, array literals, slice/list element stores, `push`, and `pop`
+//!   encode; out-of-bounds reads and empty pops trap at runtime, so Tier 2 keeps
+//!   the usual partial-correctness stance. List capacity, heap allocation
+//!   effects, aliasing, string slicing, and string building remain honestly
+//!   unsupported.
 //! - **Structs and enums**, encoded *unpacked*: a value is an integer tag plus
 //!   per-variant field terms (no SMT datatypes needed). Construction, `match`
 //!   (branch-joined with `ite`), and struct projection encode; parameters of
@@ -108,7 +111,7 @@
 use easy_smt::{Context, ContextBuilder, Response, SExpr};
 
 use marv_core::ir::*;
-use marv_core::{render_pred_with, PredVars};
+use marv_core::{render_pred_with, symbol_hash, PredVars};
 use marv_types::World;
 
 /// Soft per-query solver timeout (milliseconds). Quantifiers and nonlinear
@@ -174,7 +177,10 @@ fn core_has_invariant(c: &Core) -> bool {
 /// they can be havocked — pass an empty [`World`] when no declarations are
 /// available, at the cost of ADT-typed parameters reporting `unsupported`.
 pub fn verify_def(def: &Def, param_names: &[String], world: &World) -> VerifyOutcome {
-    // Only pure functions with a body are in the verified subset.
+    // Only value-level functions with a body are in the verified subset. List
+    // construction/growth carries an explicit Alloc capability at the surface,
+    // but Tier 2 abstracts away capacity/allocation and reasons only about the
+    // returned value shape.
     if def.kind != DefKind::Fn {
         return unsupported("only functions carry verifiable contracts");
     }
@@ -183,8 +189,10 @@ pub fn verify_def(def: &Def, param_names: &[String], world: &World) -> VerifyOut
     };
 
     let (param_tys, _ret_ty, eff) = peel_arrow(&def.ty);
-    if !eff.is_empty() {
-        return unsupported("Tier-2 verification covers only `pure` functions");
+    if !tier2_effects_supported(&eff, world) {
+        return unsupported(
+            "Tier-2 verification covers only `pure` functions and Alloc-only list operations",
+        );
     }
     // Nothing to discharge ⇒ trivially proved. A loop `invariant` is an
     // obligation of its own, so its presence forces the full discharge even
@@ -245,6 +253,13 @@ fn unsupported(reason: &str) -> VerifyOutcome {
     VerifyOutcome::Unsupported {
         reason: reason.to_string(),
     }
+}
+
+fn tier2_effects_supported(eff: &EffectRow, world: &World) -> bool {
+    if !eff.errors.is_empty() {
+        return false;
+    }
+    eff.caps.iter().all(|cap| world.cap_name(cap) == "Alloc")
 }
 
 /// Build the SMT problem and check each postcondition.
@@ -589,10 +604,66 @@ impl Encoder<'_, '_> {
                 })
             }
 
-            Core::ListNew { .. }
-            | Core::ListPush { .. }
-            | Core::ListPop { .. }
-            | Core::ListSet { .. } => Err(stop("growable lists are outside the verified subset")),
+            Core::ListNew { elem, capacity, .. } => {
+                let Some(elem_kind) = smt_sort_kind(elem) else {
+                    return Err(stop(
+                        "list element type is outside the verified subset (ints/bools/chars)",
+                    ));
+                };
+                let cap = self.atom(capacity, env)?;
+                let _ = self.scalar(cap, "list capacity")?;
+                let name = self.fresh_name("list");
+                let sort = self.array_sort(elem_kind);
+                Ok(Sym::Array {
+                    arr: self.ctx.declare_const(name, sort)?,
+                    len: self.ctx.numeral(0),
+                    elem: elem_kind,
+                })
+            }
+
+            Core::ListPush { list, value, .. } => {
+                let xs = self.atom(list, env)?;
+                let Sym::Array { arr, len, elem } = xs else {
+                    return Err(stop("list push on a non-list value"));
+                };
+                let v = self.atom(value, env)?;
+                let (v, _) = self.scalar(v, "pushed element")?;
+                let one = self.ctx.numeral(1);
+                Ok(Sym::Array {
+                    arr: self.ctx.store(arr, len, v),
+                    len: smt_arith(self.ctx, ArithOp::Add, len, one),
+                    elem,
+                })
+            }
+
+            Core::ListPop { list } => {
+                let xs = self.atom(list, env)?;
+                let Sym::Array { arr, len, elem } = xs else {
+                    return Err(stop("list pop on a non-list value"));
+                };
+                let one = self.ctx.numeral(1);
+                Ok(Sym::Array {
+                    arr,
+                    len: self.ctx.sub(len, one),
+                    elem,
+                })
+            }
+
+            Core::ListSet { list, index, value } => {
+                let xs = self.atom(list, env)?;
+                let Sym::Array { arr, len, elem } = xs else {
+                    return Err(stop("list set on a non-list value"));
+                };
+                let i = self.atom(index, env)?;
+                let (i, _) = self.scalar(i, "list set index")?;
+                let v = self.atom(value, env)?;
+                let (v, _) = self.scalar(v, "stored list element")?;
+                Ok(Sym::Array {
+                    arr: self.ctx.store(arr, i, v),
+                    len,
+                    elem,
+                })
+            }
 
             Core::Loop {
                 state,
@@ -1038,7 +1109,7 @@ impl Encoder<'_, '_> {
 
     /// Resolve an atom against `env` (de Bruijn index from the innermost slot,
     /// as the interpreter does).
-    fn atom(&self, a: &Atom, env: &[Sym]) -> Result<Sym, Stop> {
+    fn atom(&mut self, a: &Atom, env: &[Sym]) -> Result<Sym, Stop> {
         match a {
             Atom::Var(idx) => {
                 let d = env.len();
@@ -1049,6 +1120,10 @@ impl Encoder<'_, '_> {
                 Ok(env[d - i].clone())
             }
             Atom::Lit(Literal::Int(n)) => Ok(Sym::Scalar(self.ctx.numeral(*n), SortKind::Int)),
+            Atom::Lit(Literal::Char(c)) => {
+                Ok(Sym::Scalar(self.ctx.numeral(*c as i64), SortKind::Int))
+            }
+            Atom::Lit(Literal::Str(s)) => self.string_literal(s),
             Atom::Lit(Literal::Bool(b)) => Ok(Sym::Scalar(
                 if *b {
                     self.ctx.true_()
@@ -1058,7 +1133,9 @@ impl Encoder<'_, '_> {
                 SortKind::Bool,
             )),
             Atom::Lit(Literal::Unit) => Ok(Sym::Unit),
-            Atom::Lit(_) => Err(stop("non-scalar literal is outside the verified subset")),
+            Atom::Lit(Literal::Float(_)) => {
+                Err(stop("float literal is outside the verified subset"))
+            }
             Atom::Global(_) => Err(stop("global reference is outside the verified subset")),
         }
     }
@@ -1082,6 +1159,25 @@ impl Encoder<'_, '_> {
     fn array_sort(&self, elem: SortKind) -> SExpr {
         let int = self.ctx.int_sort();
         self.ctx.array_sort(int, self.sort(elem))
+    }
+
+    fn string_literal(&mut self, s: &str) -> Result<Sym, Stop> {
+        let name = self.fresh_name("str");
+        let mut arr = self
+            .ctx
+            .declare_const(name, self.array_sort(SortKind::Int))?;
+        let mut len = 0_i64;
+        for (i, c) in s.chars().enumerate() {
+            let idx = self.ctx.numeral(i as i64);
+            let cp = self.ctx.numeral(c as i64);
+            arr = self.ctx.store(arr, idx, cp);
+            len += 1;
+        }
+        Ok(Sym::Array {
+            arr,
+            len: self.ctx.numeral(len),
+            elem: SortKind::Int,
+        })
     }
 
     /// Constrain a havocked integer term to the runtime's value range
@@ -1135,10 +1231,28 @@ impl Encoder<'_, '_> {
                 self.assert_int_range(c)?;
                 Ok(Sym::Scalar(c, SortKind::Int))
             }
+            Type::Char => {
+                let c = self.ctx.declare_const(name, self.ctx.int_sort())?;
+                self.assert_int_range(c)?;
+                Ok(Sym::Scalar(c, SortKind::Int))
+            }
+            Type::Str => {
+                let sort = self.array_sort(SortKind::Int);
+                let arr = self.ctx.declare_const(name, sort)?;
+                let len = self
+                    .ctx
+                    .declare_const(format!("{name}_len"), self.ctx.int_sort())?;
+                self.assert_len_range(len)?;
+                Ok(Sym::Array {
+                    arr,
+                    len,
+                    elem: SortKind::Int,
+                })
+            }
             Type::Array(elem, n) => {
                 let Some(elem_kind) = smt_sort_kind(elem) else {
                     return Err(stop(
-                        "array element type is outside the verified subset (ints/bools)",
+                        "array element type is outside the verified subset (ints/bools/chars)",
                     ));
                 };
                 let sort = self.array_sort(elem_kind);
@@ -1152,7 +1266,7 @@ impl Encoder<'_, '_> {
             Type::Slice(elem) => {
                 let Some(elem_kind) = smt_sort_kind(elem) else {
                     return Err(stop(
-                        "slice element type is outside the verified subset (ints/bools)",
+                        "slice element type is outside the verified subset (ints/bools/chars)",
                     ));
                 };
                 let sort = self.array_sort(elem_kind);
@@ -1169,6 +1283,27 @@ impl Encoder<'_, '_> {
             }
             Type::Linear(inner) => self.havoc_type(inner, name, visiting),
             Type::Nominal { def, args } => {
+                if self.world.is_cap(def) {
+                    return Ok(Sym::Unit);
+                }
+                if *def == symbol_hash("std.collections.List") && args.len() == 1 {
+                    let Some(elem_kind) = smt_sort_kind(&args[0]) else {
+                        return Err(stop(
+                            "list element type is outside the verified subset (ints/bools/chars)",
+                        ));
+                    };
+                    let sort = self.array_sort(elem_kind);
+                    let arr = self.ctx.declare_const(name, sort)?;
+                    let len = self
+                        .ctx
+                        .declare_const(format!("{name}_len"), self.ctx.int_sort())?;
+                    self.assert_len_range(len)?;
+                    return Ok(Sym::Array {
+                        arr,
+                        len,
+                        elem: elem_kind,
+                    });
+                }
                 if !args.is_empty() {
                     return Err(stop("generic ADTs are outside the verified subset"));
                 }
@@ -1564,6 +1699,7 @@ fn encode_flat_cexpr(
                 }
             }
             Atom::Lit(Literal::Int(n)) => Ok(Sym::Scalar(ctx.numeral(*n), SortKind::Int)),
+            Atom::Lit(Literal::Char(c)) => Ok(Sym::Scalar(ctx.numeral(*c as i64), SortKind::Int)),
             Atom::Lit(Literal::Bool(b)) => Ok(Sym::Scalar(
                 if *b { ctx.true_() } else { ctx.false_() },
                 SortKind::Bool,
@@ -1631,7 +1767,7 @@ fn adt_field(b: &Sym, idx: u32) -> Result<Sym, String> {
 /// Which scalar SMT sort a type maps to (`None` ⇒ not a scalar).
 fn smt_sort_kind(t: &Type) -> Option<SortKind> {
     match t {
-        Type::Int(_) => Some(SortKind::Int),
+        Type::Int(_) | Type::Char => Some(SortKind::Int),
         Type::Bool => Some(SortKind::Bool),
         _ => None,
     }

@@ -1,0 +1,27 @@
+mod list_string_contracts
+import std.io (Alloc)
+import std.collections (List, push, get)
+
+/// Tier 2 abstracts the allocation/capacity side of `push`, but proves the
+/// value-level length effect.
+fn append_one(alloc: Alloc, xs: List[i64], v: i64) -> List[i64]
+    ensures (len(result) == (len(xs) + 1))
+{
+    push(alloc, xs, v)
+}
+
+/// Array-theory `store`/`select` proves that reading at the old length returns
+/// the value just pushed.
+fn pushed_value(alloc: Alloc, xs: List[i64], v: i64) -> i64
+    ensures (result == v)
+{
+    let ys: List[i64] = push(alloc, xs, v)
+    get(ys, len(xs))
+}
+
+pure fn first_char(s: str) -> char
+    requires (len(s) >= 1)
+    ensures (result == s[0])
+{
+    s[0]
+}
