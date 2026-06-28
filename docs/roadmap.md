@@ -34,6 +34,19 @@ where each one sits and what must land first. Each task references back here.
 | ~~**MARV-12** formatter doc-comments + real source spans~~ ✅ done | 5 · Infra/polish | — *(independent)* | — | medium |
 | **MARV-13** port more compiler passes to marv (self-hosting) | 4 · Self-hosting | Phase-1 surface *(incremental now)* | — | low |
 | ~~**MARV-14** persistent on-disk store + cross-module resolution~~ ✅ done | 4 · Store | — *(std linking wants Phase 1)* | — | low |
+| **MARV-48** full application language surface + runtime epic | 6 · Application language | MARV-40 | 49–60 | medium |
+| **MARV-49** project/package/module discovery beyond `std` | 6 · Application language | MARV-14 | 53, 60 | high |
+| **MARV-50** `Map[K, V]` and `Set[T]` in `std` | 6 · Std collections | MARV-42 | 51, 55 | medium |
+| **MARV-51** collection literals for `List`/`Map`/`Set` | 6 · Surface ergonomics | MARV-42, 50 for map/set forms | — | medium |
+| **MARV-52** real `Iter[T]` protocol | 6 · Surface/stdlib | MARV-42 | 50 | medium |
+| **MARV-53** HTTP/server runtime capability + host ABI | 6 · Runtime/capabilities | 49, 54, MARV-27 *(for linear resource safety)* | — | high |
+| **MARV-54** bytes + UTF-8 stdlib utilities | 6 · Std/runtime | MARV-42, MARV-43 | 53, 55 | high |
+| **MARV-55** JSON + serialization stdlib | 6 · Std/app data | 54, 50 *(or list-of-pairs first)* | 53 | medium |
+| **MARV-56** capability-gated structured concurrency (`Spawn`) | 6 · Runtime/capabilities | MARV-27 *(if task/channel handles become linear)* | — | medium |
+| **MARV-57** `unsafe`/FFI surface + `unsafeSites` audit query | 6 · Audit/escape hatch | MARV-12 | — | medium |
+| **MARV-58** early `return` inside loop bodies | 6 · Surface/control flow | MARV-21 | — | low |
+| **MARV-59** Tier-2 recursive/generic ADTs | 6 · Verification | MARV-11, MARV-38 | 13 | medium |
+| **MARV-60** roadmap/docs cleanup for MARV-48 | 5 · Infra/polish | MARV-48 | 49–59 | low |
 
 Done (Phase 0 · Infra/agent): **MARV-15** repo housekeeping · **MARV-16** CI/CD + release ·
 **MARV-17** agent enablement (AGENTS.md, MCP server, skill).
@@ -71,8 +84,8 @@ error-union]`, `E.Variant` → `Core::Raise`, postfix `?`; **full cross-call err
 via a fixpoint over the call graph in `marv-db`, surfaced through `marv/errorSet`; exhaustive
 `match` over a caught error value; `examples/errors.mv` checks clean). `?` is a success-value
 pass-through (errors propagate by unwinding, so error programs run on the interpreter);
-capability-op error sets are MARV-6, cross-*module* propagation is MARV-14, and `Result`-value
-codegen is MARV-9.
+capability-op error sets are MARV-6, the pinned store/linking layer is MARV-14, and
+project/package source discovery beyond `std` is MARV-49. `Result`-value codegen is MARV-9.
 · **MARV-7** scalars & collections (`char` literals `'a'`/`'\n'`; `as` casts → a new
 `Core::Cast { value, to }` node carrying the target type — scalar↔scalar legality checked
 (`E0104`), constant-narrowing rejected statically, integer width truncation/wrapping run
@@ -119,9 +132,10 @@ function's **declared effect row is the set of its capability parameters**; the 
 its narrowing closure** (holding `Io` authorizes the `Fs`/`Net`/… it can narrow to), so a `pure fn`
 that performs — or any function reaching a capability it never received — is `MissingCapability`
 (E0110) *from source*. The interpreter injects granted caps at the entry boundary and a narrowing
-op returns the narrowed capability value; the CLI resolves `import std.*` to the `std/` sources
-(transitively) so the capability interfaces are in scope (`MARV_STD` overrides discovery — full
-cross-module linking is MARV-14). `std/capabilities.mv` parses/checks; `examples/hello.mv`
+op returns the narrowed capability value; the CLI resolves `import std.*` to the `std` sources
+(transitively) so the capability interfaces are in scope (`MARV_STD` overrides discovery). The
+general non-`std` project/module discovery layer is MARV-49 on top of the MARV-14 store.
+`std/capabilities.mv` parses/checks; `examples/hello.mv`
 (`io.stdout().write(...)`) and `examples/read_file.mv` (`io.fs()` → `fs.read`) check, infer their
 rows, and run under `marv run --grant Io`. Cranelift n/a (rejects `Perform`); WASM lowers a
 `perform` to a host import but capability *narrowing* on WASM, and `linear` capabilities (a `Conn`
@@ -228,6 +242,32 @@ whole-module `compile`/`compile_with` remains the API for `commit`/audit flows a
 differential corpus, and the checker still checks every definition — pruning is codegen-only.
 `tests/run/pruned_sibling.mv` pins the behavior in both backend harnesses.
 
+## Full application language wave (MARV-48)
+
+**MARV-48** is the next umbrella after MARV-40. MARV-40 made dynamic,
+heap-backed application logic possible by landing `Alloc`, `List[T]`, string
+manipulation, List/string verification, and three app-shaped examples. MARV-48
+tracks the remaining pieces needed for ordinary application boundaries: package
+discovery, richer std collections, bytes/UTF-8, JSON, server/network runtime
+capabilities, structured concurrency, `unsafe`/FFI auditability, and deeper
+verification.
+
+The first implementation wave should keep scope narrow:
+
+1. **MARV-60** — keep this roadmap and status docs aligned with the tracker.
+2. **MARV-49** — make non-`std` project/package/module discovery real. MARV-14
+   already delivered the pinned content-addressed store; MARV-49 is the
+   developer-facing source/project layer above it.
+3. **MARV-54** — add practical bytes + UTF-8 utilities, because file/network/HTTP
+   boundaries need byte payloads before JSON or HTTP can be honest.
+4. **MARV-53** — add the HTTP/server capability and host ABI story, coordinating
+   with **MARV-27** for linear connection/listener lifecycle.
+
+The rest can proceed in parallel where dependencies allow: **MARV-50** maps/sets,
+**MARV-51** collection literals, **MARV-52** iterators, **MARV-55** JSON,
+**MARV-56** `Spawn`, **MARV-57** `unsafeSites`, **MARV-58** loop early return,
+and **MARV-59** recursive/generic ADT verification.
+
 ## Recommended order
 
 **The spine** — the critical path to "you can write non-trivial programs in marv," in order:
@@ -243,8 +283,11 @@ they unblock the rest. Then:
   (which closed the last big gap between the design and what real `.mv` can express).
 - **Compounds on the surface:** ~~MARV-9 aggregate codegen~~ ✅ → MARV-10; and
   ~~MARV-11 verification expansion~~ ✅.
-- **Longer horizon:** MARV-13 more self-hosting; broader non-`std` source-module discovery
-  on top of the MARV-14 pinned store.
+- **Application/runtime wave:** MARV-48, starting with MARV-60 docs cleanup,
+  MARV-49 project/package/module discovery, MARV-54 bytes/UTF-8, and MARV-53
+  HTTP/server runtime capability.
+- **Longer horizon:** MARV-13 more self-hosting; MARV-10 AOT/LLVM/component
+  packaging; MARV-27 linear capabilities; MARV-39 trap-freedom verification.
 
 **Parallel track (no surface dependency — pick up anytime):** ~~MARV-8 (reachability-pruned
 builds)~~ ✅ and ~~MARV-12 (doc-comments + spans)~~ ✅ are both done — the track is clear.
@@ -266,11 +309,17 @@ builds)~~ ✅ and ~~MARV-12 (doc-comments + spans)~~ ✅ are both done — the t
   quantifiers, sound integer division) and loop invariants (Tier 1 + Tier 2), keeping every
   gap an honest `unsupported`.
 - **Phase 4 · Self-hosting & store.** Port compiler passes to marv (Stage-1, differential vs
-  the Rust Stage-0 oracle) as the surface allows; mature the content store into a real
-  cross-module package system.
+  the Rust Stage-0 oracle) as the surface allows. The pinned content store is done (MARV-14);
+  the remaining developer-facing project/package discovery work is tracked in Phase 6 as
+  MARV-49.
 - **Phase 5 · Infra/polish.** Doc-comment preservation and real (definition-granular) source
   spans through to diagnostics/`typeAt`/`verify` are **done** (MARV-12). (Phase 0 —
   repo/CI/agent enablement — is also done.)
+- **Phase 6 · Full application language.** MARV-48 tracks the next practical layer:
+  project/package discovery beyond the special-cased `std` loader, `Map`/`Set`, collection
+  literals, a real `Iter[T]` protocol, bytes/UTF-8, JSON/serialization, HTTP/server
+  capabilities and host ABI, structured concurrency, `unsafe`/FFI auditability, loop early
+  returns, and broader Tier-2 ADT verification.
 
 ## How a task is meant to be picked up
 

@@ -174,10 +174,11 @@ literals + index reads + assignment (`lvalue = e`, `var`), `while`/`for` loops w
 projection, generic parameter lists + type arguments, `interface`/`impl` with
 monomorphization, **capabilities & `perform` from source** (capability method calls →
 `Perform`, `io.fs()` narrowing, inferred-and-checked effect rows), and `requires`/`ensures`
-contracts. Collection literals, `linear` capabilities, and cross-module linking are the
-remaining surface roadmap — for anything not yet expressible, construct a `*.core.json`
-snapshot (see [`store.md`](store.md) and the `tests/run/*.core.json` fixtures) or check
-[`roadmap.md`](roadmap.md).
+contracts. The next roadmap wave is MARV-48: project/package/module discovery beyond `std`,
+collection literals, `linear` resource capabilities, bytes/UTF-8, JSON, HTTP/server runtime
+capabilities, structured concurrency, and `unsafeSites`. For anything not yet expressible,
+construct a `*.core.json` snapshot (see [`store.md`](store.md) and the `tests/run/*.core.json`
+fixtures) or check [`roadmap.md`](roadmap.md).
 
 See [`../spec/03-compiler-protocol.md`](../spec/03-compiler-protocol.md) for the full protocol
 method catalog and worked examples.

@@ -82,10 +82,10 @@ blob's `deps`, and hands the interpreter/backend a hash-keyed program. Missing
 dependency blobs are hard errors: a stored build never falls back to whatever
 source happens to be on disk.
 
-The current source loader still parses `std/` modules to typecheck imported
-surface declarations while the Phase-1 std surface settles. Once those modules
-parse completely, committing them pins the first real std dependency in the same
-lockfile/blob machinery.
+The source loader still resolves `std/` modules from source so imported std
+declarations are available to the checker and lowerer. Pinned builds use the
+store for hash linking; broader project/package/module source discovery beyond
+the special-cased `std` loader is tracked separately as MARV-49.
 
 ## Audit and GC
 
