@@ -127,6 +127,7 @@ fn interp_i64(
         file,
         "list.mv"
             | "strings.mv"
+            | "map_set.mv"
             | "bytes_utf8.mv"
             | "app_tokenizer.mv"
             | "app_router.mv"
@@ -368,6 +369,10 @@ fn corpus_cases() -> Vec<(&'static str, &'static str, Vec<i64>, i64)> {
         // Growable lists: explicit Alloc construction/growth, get/set/pop, and
         // `for x in xs` over the list's len/index surface.
         ("list.mv", "exercise", vec![6], 53),
+        // Map/Set first slice (MARV-50): string-keyed/value-semantics std
+        // collections built from `List`, including content equality for
+        // dynamically-built string keys.
+        ("map_set.mv", "exercise", vec![], 361),
         // Strings: literal concat, slice, char access, `for c in s`, and
         // explicit-Alloc building from `List[char]`.
         ("strings.mv", "exercise", vec![], 324),

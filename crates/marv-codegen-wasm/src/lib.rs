@@ -1545,6 +1545,77 @@ impl Trans<'_> {
         self.emit(Instruction::End);
     }
 
+    fn eval_string_eq(
+        &mut self,
+        left: &Atom,
+        right: &Atom,
+        invert: bool,
+    ) -> Result<Out, WasmError> {
+        let left = self.atom_to_word_local(left)?;
+        let right = self.atom_to_word_local(right)?;
+        let llen = self.load_word_local(left, 0);
+        let rlen = self.load_word_local(right, 0);
+        let result = self.alloc_local();
+        self.emit(Instruction::I64Const(1));
+        self.emit(Instruction::LocalSet(result));
+
+        self.emit(Instruction::LocalGet(llen));
+        self.emit(Instruction::LocalGet(rlen));
+        self.emit(Instruction::I64Ne);
+        self.emit(Instruction::If(BlockType::Empty));
+        self.emit(Instruction::I64Const(0));
+        self.emit(Instruction::LocalSet(result));
+        self.emit(Instruction::Else);
+
+        let k = self.alloc_local();
+        self.emit(Instruction::I64Const(0));
+        self.emit(Instruction::LocalSet(k));
+        self.emit(Instruction::Block(BlockType::Empty));
+        self.emit(Instruction::Loop(BlockType::Empty));
+        self.emit(Instruction::LocalGet(k));
+        self.emit(Instruction::LocalGet(llen));
+        self.emit(Instruction::I64LtU);
+        self.emit(Instruction::I32Eqz);
+        self.emit(Instruction::BrIf(1));
+
+        self.emit_string_char(left, k);
+        self.emit_string_char(right, k);
+        self.emit(Instruction::I64Ne);
+        self.emit(Instruction::If(BlockType::Empty));
+        self.emit(Instruction::I64Const(0));
+        self.emit(Instruction::LocalSet(result));
+        self.emit(Instruction::Br(2));
+        self.emit(Instruction::End);
+
+        self.emit(Instruction::LocalGet(k));
+        self.emit(Instruction::I64Const(1));
+        self.emit(Instruction::I64Add);
+        self.emit(Instruction::LocalSet(k));
+        self.emit(Instruction::Br(0));
+        self.emit(Instruction::End);
+        self.emit(Instruction::End);
+        self.emit(Instruction::End);
+
+        self.emit(Instruction::LocalGet(result));
+        if invert {
+            self.emit(Instruction::I64Const(1));
+            self.emit(Instruction::I64Xor);
+        }
+        Ok(Out::Stack)
+    }
+
+    fn emit_string_char(&mut self, ptr: u32, index: u32) {
+        self.emit(Instruction::LocalGet(ptr));
+        self.emit(Instruction::LocalGet(index));
+        self.emit(Instruction::I64Const(1));
+        self.emit(Instruction::I64Add);
+        self.emit(Instruction::I64Const(SLOT as i64));
+        self.emit(Instruction::I64Mul);
+        self.emit(Instruction::I64Add);
+        self.emit(Instruction::I32WrapI64);
+        self.emit(Instruction::I64Load(memarg(0)));
+    }
+
     fn load_word_local(&mut self, base: u32, offset: u64) -> u32 {
         let out = self.alloc_local();
         self.emit(Instruction::LocalGet(base));
@@ -1574,10 +1645,11 @@ impl Trans<'_> {
         self.emit(Instruction::I64Add);
     }
 
-    fn atom_is_list(&self, a: &Atom) -> bool {
+    fn atom_uses_list_layout(&self, a: &Atom) -> bool {
         layout::atom_type(self.world, a, &self.tys)
             .as_ref()
-            .is_some_and(is_list_type)
+            // `[0]T` is the std `List.raw` marker, backed by `[len, cap, ...]`.
+            .is_some_and(|t| is_list_type(t) || matches!(t, Type::Array(_, 0)))
     }
 
     fn atom_is_str(&self, a: &Atom) -> bool {
@@ -1682,6 +1754,16 @@ impl Trans<'_> {
                     Ok(self.slot_to_out(field))
                 }
                 Slot::Local(l) => {
+                    // `std.collections.List` is a runtime list block; its surface
+                    // `raw: [0]T` field is only a type-level marker.
+                    if idx == 0
+                        && layout::atom_type(self.world, base, &self.tys)
+                            .as_ref()
+                            .is_some_and(is_list_type)
+                    {
+                        self.emit(Instruction::LocalGet(l));
+                        return Ok(Out::Stack);
+                    }
                     // A boxed-aggregate pointer in a local: load `[idx + 1]`.
                     self.emit(Instruction::LocalGet(l));
                     self.emit(Instruction::I32WrapI64);
@@ -1867,6 +1949,12 @@ impl Trans<'_> {
         if op == Add && args.first().is_some_and(|a| self.atom_is_str(a)) {
             return self.eval_string_concat(&args[0], &args[1]);
         }
+        if op == Eq && args.first().is_some_and(|a| self.atom_is_str(a)) {
+            return self.eval_string_eq(&args[0], &args[1], false);
+        }
+        if op == Ne && args.first().is_some_and(|a| self.atom_is_str(a)) {
+            return self.eval_string_eq(&args[0], &args[1], true);
+        }
         if op == Slice {
             return self.eval_string_slice(&args[0], &args[1], &args[2]);
         }
@@ -1916,7 +2004,7 @@ impl Trans<'_> {
                 self.emit(Instruction::I64Load(memarg(0)));
             }
             Index => {
-                let header_words = if args.first().is_some_and(|a| self.atom_is_list(a)) {
+                let header_words = if args.first().is_some_and(|a| self.atom_uses_list_layout(a)) {
                     2
                 } else {
                     1

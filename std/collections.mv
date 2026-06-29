@@ -5,6 +5,18 @@ import std.io (Alloc)
 /// mutating operations return the updated list value for rebinding.
 struct List[T] { raw: [0]T }
 
+/// A string-keyed map. This first `Map[K, V]` slice stores entries in insertion
+/// order on top of `List`, so it has value semantics and backend parity today;
+/// `K` is present in the type while the public operations are currently
+/// constrained to `str` keys until `Hash`/`Eq` interfaces land.
+struct Map[K, V] { entries: List[StrEntry[V]] }
+
+/// A set value. The public operations are currently constrained to `str`
+/// elements and preserve insertion order.
+struct Set[T] { items: List[str] }
+
+struct StrEntry[V] { key: str, value: V }
+
 fn new[T](alloc: Alloc) -> List[T] {
     List { raw: [] }
 }
@@ -31,4 +43,127 @@ fn set[T](list: List[T], index: usize, value: T) -> List[T] {
 
 pure fn len[T](list: List[T]) -> usize {
     len(list.raw)
+}
+
+fn map_new[V](alloc: Alloc) -> Map[str, V] {
+    var entries: List[StrEntry[V]] = new(alloc)
+    Map { entries: entries }
+}
+
+fn map_with_capacity[V](alloc: Alloc, capacity: usize) -> Map[str, V] {
+    var entries: List[StrEntry[V]] = with_capacity(alloc, capacity)
+    Map { entries: entries }
+}
+
+pure fn map_len[V](map: Map[str, V]) -> usize {
+    len(map.entries)
+}
+
+fn map_contains[V](map: Map[str, V], key: str) -> bool {
+    var i: usize = 0
+    var found: bool = false
+    while ((i < len(map.entries)) and not found) {
+        let entry: StrEntry[V] = map.entries[i]
+        found = (entry.key == key)
+        i = (i + 1)
+    }
+    found
+}
+
+fn map_get_or[V](map: Map[str, V], key: str, fallback: V) -> V {
+    var i: usize = 0
+    var out: V = fallback
+    var found: bool = false
+    while ((i < len(map.entries)) and not found) {
+        let entry: StrEntry[V] = map.entries[i]
+        if (entry.key == key) {
+            out = entry.value
+            found = true
+        } else {
+            i = (i + 1)
+        }
+    }
+    out
+}
+
+fn map_insert[V](alloc: Alloc, map: Map[str, V], key: str, value: V) -> Map[str, V] {
+    var entries: List[StrEntry[V]] = map.entries
+    var i: usize = 0
+    var found: bool = false
+    while ((i < len(entries)) and not found) {
+        let entry: StrEntry[V] = entries[i]
+        if (entry.key == key) {
+            entries = set(entries, i, StrEntry { key: key, value: value })
+            found = true
+        } else {
+            i = (i + 1)
+        }
+    }
+    if found {
+        Map { entries: entries }
+    } else {
+        Map { entries: push(alloc, entries, StrEntry { key: key, value: value }) }
+    }
+}
+
+fn map_remove[V](alloc: Alloc, map: Map[str, V], key: str) -> Map[str, V] {
+    var entries: List[StrEntry[V]] = with_capacity(alloc, len(map.entries))
+    var i: usize = 0
+    while (i < len(map.entries)) {
+        let entry: StrEntry[V] = map.entries[i]
+        if (entry.key == key) {
+            i = (i + 1)
+        } else {
+            entries = push(alloc, entries, StrEntry { key: entry.key, value: entry.value })
+            i = (i + 1)
+        }
+    }
+    Map { entries: entries }
+}
+
+fn set_new(alloc: Alloc) -> Set[str] {
+    var items: List[str] = new(alloc)
+    Set { items: items }
+}
+
+fn set_with_capacity(alloc: Alloc, capacity: usize) -> Set[str] {
+    var items: List[str] = with_capacity(alloc, capacity)
+    Set { items: items }
+}
+
+pure fn set_len(set: Set[str]) -> usize {
+    len(set.items)
+}
+
+fn set_contains(set: Set[str], value: str) -> bool {
+    var i: usize = 0
+    var found: bool = false
+    while ((i < len(set.items)) and not found) {
+        found = (get(set.items, i) == value)
+        i = (i + 1)
+    }
+    found
+}
+
+fn set_insert(alloc: Alloc, set: Set[str], value: str) -> Set[str] {
+    if set_contains(set, value) {
+        set
+    } else {
+        Set { items: push(alloc, set.items, value) }
+    }
+}
+
+fn set_remove(alloc: Alloc, set: Set[str], value: str) -> Set[str] {
+    var items: List[str] = with_capacity(alloc, len(set.items))
+    var i: usize = 0
+    while (i < len(set.items)) {
+        let item: str = set.items[i]
+        if (item == value) {
+            i = (i + 1)
+        } else {
+            items = push(alloc, items, item)
+            i = (i + 1)
+        }
+    }
+    Set { items: items }
 }

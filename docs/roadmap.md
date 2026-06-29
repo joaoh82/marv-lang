@@ -36,7 +36,7 @@ where each one sits and what must land first. Each task references back here.
 | ~~**MARV-14** persistent on-disk store + cross-module resolution~~ ✅ done | 4 · Store | — *(std linking wants Phase 1)* | — | low |
 | **MARV-48** full application language surface + runtime epic | 6 · Application language | MARV-40 | 49–60 | medium |
 | ~~**MARV-49** project/source-module discovery beyond `std`~~ ✅ done | 6 · Application language | MARV-14 | package metadata/query polish, 53, 60 | high |
-| **MARV-50** `Map[K, V]` and `Set[T]` in `std` | 6 · Std collections | MARV-42 | 51, 55 | medium |
+| **MARV-50** `Map[K, V]` and `Set[T]` in `std` — first slice landed as string-keyed/string-set, list-backed value-semantic std collections with explicit `Alloc` and interpreter/Cranelift/WASM parity; remaining work is true hash-backed general keys through `Hash`/`Eq` interfaces | 6 · Std collections | MARV-42 | 51, 55 | medium |
 | **MARV-51** collection literals for `List`/`Map`/`Set` | 6 · Surface ergonomics | MARV-42, 50 for map/set forms | — | medium |
 | **MARV-52** real `Iter[T]` protocol | 6 · Surface/stdlib | MARV-42 | 50 | medium |
 | ~~**MARV-53** HTTP/server runtime capability + host ABI~~ ✅ done — adds an explicit `Http` request capability, `std.http` `Request`/`Response` helpers, a deterministic interpreter request host (`POST /echo`, body `marv-http-echo`), a `http_echo` example, and core-WASM capability imports that can return string handles. Honest residue: production listener/accept loops, streaming/raw bodies, and exact close-once lifecycle safety remain tied to MARV-27/MARV-10 and later std work. | 6 · Runtime/capabilities | ~~MARV-49~~ ✅, ~~MARV-54~~ ✅, MARV-27 *(for linear resource safety)* | MARV-10, MARV-27, 55 | high |

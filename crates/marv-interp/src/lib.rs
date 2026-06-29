@@ -749,6 +749,11 @@ impl Program {
                         .nth(*idx as usize)
                         .ok_or_else(|| RunError::Unsupported("projection out of range".into()))
                         .map_err(EvalError::from),
+                    // Single-field nominal wrappers can be represented by their
+                    // payload once they cross an ABI boundary. The checker has
+                    // already proven the projection is well-typed, so `field 0`
+                    // is the value itself in that representation.
+                    other if *idx == 0 => Ok(other),
                     other => Err(RunError::Unsupported(format!(
                         "projection of non-aggregate `{}`",
                         other.render()

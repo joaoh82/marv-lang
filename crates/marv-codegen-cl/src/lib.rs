@@ -910,6 +910,7 @@ impl Trans<'_, '_> {
     /// is the tag (MARV-9).
     fn eval_proj(&mut self, base: &Atom, idx: u32) -> Result<Slot, CodegenError> {
         let b = self.eval_atom(base)?;
+        let base_ty = layout::atom_type(self.world, base, &self.tys);
         match b {
             Slot::Tuple { mut fields, .. } => {
                 let i = idx as usize;
@@ -920,6 +921,11 @@ impl Trans<'_, '_> {
                 }
             }
             Slot::Val(ptr) => {
+                // `std.collections.List` is a runtime list block; its surface
+                // `raw: [0]T` field is only a type-level marker.
+                if idx == 0 && base_ty.as_ref().is_some_and(is_list_type) {
+                    return Ok(Slot::Val(ptr));
+                }
                 let off = (idx as i32 + 1) * SLOT;
                 let v = self.builder.ins().load(WORD, MemFlags::trusted(), ptr, off);
                 Ok(Slot::Val(v))
@@ -1483,6 +1489,13 @@ impl Trans<'_, '_> {
             Add if args.first().is_some_and(|a| self.atom_is_str(a)) => {
                 return Ok(Slot::Val(self.eval_string_concat(v(0), v(1))));
             }
+            Eq if args.first().is_some_and(|a| self.atom_is_str(a)) => {
+                return Ok(Slot::Val(self.eval_string_eq(v(0), v(1))));
+            }
+            Ne if args.first().is_some_and(|a| self.atom_is_str(a)) => {
+                let eq = self.eval_string_eq(v(0), v(1));
+                return Ok(Slot::Val(self.builder.ins().bxor_imm(eq, 1)));
+            }
             Add => self.builder.ins().iadd(v(0), v(1)),
             Sub => self.builder.ins().isub(v(0), v(1)),
             Mul => self.builder.ins().imul(v(0), v(1)),
@@ -1509,7 +1522,7 @@ impl Trans<'_, '_> {
                 self.emit_bounds_check(v(0), v(1));
                 // Arrays/slices use `[len, e0, …]`; lists use
                 // `[len, cap, e0, …]`.
-                let header_words = if args.first().is_some_and(|a| self.atom_is_list(a)) {
+                let header_words = if args.first().is_some_and(|a| self.atom_uses_list_layout(a)) {
                     2
                 } else {
                     1
@@ -1537,6 +1550,49 @@ impl Trans<'_, '_> {
         let dst_start = self.builder.ins().iadd_imm(llen, 1);
         self.copy_word_range(right, one, out, dst_start, rlen);
         out
+    }
+
+    fn eval_string_eq(&mut self, left: Value, right: Value) -> Value {
+        let done = self.builder.create_block();
+        self.builder.append_block_param(done, WORD);
+        let header = self.builder.create_block();
+        self.builder.append_block_param(header, WORD);
+        let body = self.builder.create_block();
+
+        let llen = self.builder.ins().load(WORD, MemFlags::trusted(), left, 0);
+        let rlen = self.builder.ins().load(WORD, MemFlags::trusted(), right, 0);
+        let same_len = self.builder.ins().icmp(IntCC::Equal, llen, rlen);
+        let zero = self.builder.ins().iconst(WORD, 0);
+        self.builder
+            .ins()
+            .brif(same_len, header, &[zero.into()], done, &[zero.into()]);
+
+        self.builder.switch_to_block(header);
+        let k = self.builder.block_params(header)[0];
+        let more = self.builder.ins().icmp(IntCC::UnsignedLessThan, k, llen);
+        let one = self.builder.ins().iconst(WORD, 1);
+        self.builder
+            .ins()
+            .brif(more, body, &[], done, &[one.into()]);
+
+        self.builder.switch_to_block(body);
+        self.builder.seal_block(body);
+        let slot = self.builder.ins().iadd_imm(k, 1);
+        let off = self.builder.ins().imul_imm(slot, SLOT as i64);
+        let laddr = self.builder.ins().iadd(left, off);
+        let raddr = self.builder.ins().iadd(right, off);
+        let lc = self.builder.ins().load(WORD, MemFlags::trusted(), laddr, 0);
+        let rc = self.builder.ins().load(WORD, MemFlags::trusted(), raddr, 0);
+        let same_char = self.builder.ins().icmp(IntCC::Equal, lc, rc);
+        let k1 = self.builder.ins().iadd_imm(k, 1);
+        self.builder
+            .ins()
+            .brif(same_char, header, &[k1.into()], done, &[zero.into()]);
+        self.builder.seal_block(header);
+
+        self.builder.switch_to_block(done);
+        self.builder.seal_block(done);
+        self.builder.block_params(done)[0]
     }
 
     fn eval_string_slice(&mut self, ptr: Value, lo: Value, hi: Value) -> Value {
@@ -1893,10 +1949,11 @@ impl Trans<'_, '_> {
         self.builder.inst_results(call)[0]
     }
 
-    fn atom_is_list(&self, a: &Atom) -> bool {
+    fn atom_uses_list_layout(&self, a: &Atom) -> bool {
         layout::atom_type(self.world, a, &self.tys)
             .as_ref()
-            .is_some_and(is_list_type)
+            // `[0]T` is the std `List.raw` marker, backed by `[len, cap, ...]`.
+            .is_some_and(|t| is_list_type(t) || matches!(t, Type::Array(_, 0)))
     }
 
     fn atom_is_str(&self, a: &Atom) -> bool {

@@ -13,8 +13,11 @@ the capability interfaces every program links against (`spec/01` §§3, 5, 6).
 > `Option.Some(x)` / `Option.None` it builds to the imported enum's constructors;
 > `examples/optionals.mv` does the same from user code). The persistent content store and
 > pinned hash linking are done (MARV-14); the remaining module work is broader project/package
-> source discovery beyond `std` (MARV-49). `std.http` now exposes host-provided
-> request/response structs over an explicit `Http` capability (MARV-53). Still pending:
+> source discovery beyond `std` (MARV-49). `std.collections` now includes `Map[K, V]`
+> and `Set[T]` types with a first string-keyed/string-set operation slice over explicit
+> `Alloc` (MARV-50); true hash-backed general keys are tracked separately. `std.http`
+> now exposes host-provided request/response structs over an explicit `Http` capability
+> (MARV-53). Still pending:
 > `linear` capabilities, so a `Conn`/listener/request lifecycle must be `close`d or
 > completed exactly once (MARV-27). The capability *model* is also exercised over the
 > Core IR and on WebAssembly (host imports).
@@ -56,13 +59,19 @@ fn max[T: Ord](a: T, b: T) -> T
 fn min[T: Ord](a: T, b: T) -> T
 ```
 
-### `std/collections.mv` — `List[T]`
-A growable list. Construction and `push` take an explicit `Alloc` capability; `push`, `pop`,
-and `set` return the updated list value, so callers rebind a `var`.
-`len(list)`, `list[i]`, `get`, `set`, and `for x in list` run on the interpreter, Cranelift,
-and WASM backends. The runtime layout is `[len, cap, e0, …]`; `len` is a header load and index
-loads skip the two-word header. Backends update the backing block in place when capacity allows
-and allocate-copy only on growth.
+### `std/collections.mv` — `List[T]`, `Map[K, V]`, `Set[T]`
+`List[T]` is a growable list. Construction and `push` take an explicit `Alloc`
+capability; `push`, `pop`, and `set` return the updated list value, so callers rebind a
+`var`. `len(list)`, `list[i]`, `get`, `set`, and `for x in list` run on the interpreter,
+Cranelift, and WASM backends. The runtime layout is `[len, cap, e0, …]`; `len` is a
+header load and index loads skip the two-word header. Backends update the backing block in
+place when capacity allows and allocate-copy only on growth.
+
+`Map[K, V]` and `Set[T]` are present as std collection types. The first runnable slice is
+constrained to `str` keys/elements and is list-backed/insertion-ordered, which keeps value
+semantics and backend parity today while reserving the generic type shape for the later
+hash-backed `Hash`/`Eq` design. Allocation remains explicit: operations that can grow or
+rebuild storage take `Alloc`.
 
 ```marv
 struct List[T] { … }
@@ -73,6 +82,23 @@ fn pop[T](list: List[T]) -> List[T]
 fn get[T](list: List[T], index: usize) -> T
 fn set[T](list: List[T], index: usize, value: T) -> List[T]
 pure fn len[T](list: List[T]) -> usize
+
+struct Map[K, V] { … }
+fn map_new[V](alloc: Alloc) -> Map[str, V]
+fn map_with_capacity[V](alloc: Alloc, capacity: usize) -> Map[str, V]
+fn map_insert[V](alloc: Alloc, map: Map[str, V], key: str, value: V) -> Map[str, V]
+fn map_get_or[V](map: Map[str, V], key: str, fallback: V) -> V
+fn map_contains[V](map: Map[str, V], key: str) -> bool
+fn map_remove[V](alloc: Alloc, map: Map[str, V], key: str) -> Map[str, V]
+pure fn map_len[V](map: Map[str, V]) -> usize
+
+struct Set[T] { … }
+fn set_new(alloc: Alloc) -> Set[str]
+fn set_with_capacity(alloc: Alloc, capacity: usize) -> Set[str]
+fn set_insert(alloc: Alloc, set: Set[str], value: str) -> Set[str]
+fn set_contains(set: Set[str], value: str) -> bool
+fn set_remove(alloc: Alloc, set: Set[str], value: str) -> Set[str]
+pure fn set_len(set: Set[str]) -> usize
 ```
 
 ### `std/str.mv` — string building

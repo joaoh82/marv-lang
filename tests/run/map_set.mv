@@ -1,0 +1,42 @@
+mod map_set
+import std.io (Alloc)
+import std.collections (Map, Set, map_new, map_insert, map_remove, map_contains, map_get_or, map_len, set_new, set_insert, set_remove, set_contains, set_len)
+
+fn choose(cond: bool, yes: i64, no: i64) -> i64 {
+    if cond {
+        yes
+    } else {
+        no
+    }
+}
+
+fn exercise(alloc: Alloc) -> i64 {
+    let alpha: str = ("al" + "pha")
+    var scores: Map[str, i64] = map_new(alloc)
+    scores = map_insert(alloc, scores, alpha, 10)
+    scores = map_insert(alloc, scores, "beta", 20)
+    scores = map_insert(alloc, scores, ("be" + "ta"), 25)
+    var total: i64 = 0
+    let alpha_score: i64 = choose(map_contains(scores, "alpha"), 100, 1)
+    total = (total + alpha_score)
+    total = (total + map_get_or(scores, "beta", 0))
+    total = (total + ((map_len(scores) as i64) * 10))
+    scores = map_remove(alloc, scores, "alpha")
+    let removed_alpha_score: i64 = choose(map_contains(scores, alpha), 1000, 3)
+    total = (total + removed_alpha_score)
+    total = (total + (map_len(scores) as i64))
+    var seen: Set[str] = set_new(alloc)
+    seen = set_insert(alloc, seen, "red")
+    seen = set_insert(alloc, seen, ("re" + "d"))
+    let seen_score: i64 = choose(set_contains(seen, "red"), 200, 2)
+    total = (total + seen_score)
+    total = (total + ((set_len(seen) as i64) * 5))
+    seen = set_remove(alloc, seen, ("r" + "ed"))
+    let removed_seen_score: i64 = choose(set_contains(seen, "red"), 700, 7)
+    total = (total + removed_seen_score)
+    total
+}
+
+fn main(alloc: Alloc) -> i64 {
+    exercise(alloc)
+}
