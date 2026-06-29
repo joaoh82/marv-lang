@@ -167,6 +167,7 @@ handling, `interface`/`impl` + generics, **capabilities & `perform` from source*
 capability parameters), struct literals + indexing + assignment, `char` literals + `as` casts +
 `len`, string concat/slice/index/iteration/building, `std.collections.List[T]` with
 explicit-`Alloc` growable operations, `std.bytes` byte-slice and UTF-8 helpers,
+the first `std.http` request/response helper layer over explicit `Http` authority,
 `while`/`for` loops,
 `let`/`var`, `if`/`else`, arithmetic/boolean ops, the prefix unary
 operators (`-e`, `not e`, `&e`/`&mut e`), calls/recursion,
@@ -174,7 +175,7 @@ operators (`-e`, `not e`, `&e`/`&mut e`), calls/recursion,
 lower/check/run/build as module sets, and the content store supports
 lockfile-pinned cross-module builds by hash. The remaining MARV-48
 application-language wave covers richer package metadata/query coverage,
-collections and literals, bytes/UTF-8, JSON, HTTP/server capabilities,
+collections and literals, JSON, production HTTP/server resource lifecycles,
 structured concurrency, `unsafe`/FFI auditability, and deeper verification. The
 full backlog (surface growth → backend breadth → verification breadth →
 application runtime → AOT/LLVM → self-hosting) — with phases, ordering, and the

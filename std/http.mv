@@ -1,0 +1,30 @@
+mod std.http
+import std.io (Http)
+
+/// Host-provided request data for one HTTP exchange.
+struct Request { method: str, path: str, body: str }
+
+/// Response data sent through the request capability.
+struct Response { status: u16, body: str }
+
+pure fn request_body(request: Request) -> str {
+    request.body
+}
+
+pure fn response(status: u16, body: str) -> Response {
+    Response { status: status, body: body }
+}
+
+/// Read the scalar/string request pieces from the host. The low-level ABI stays
+/// string/word-shaped while user code gets a normal struct.
+fn receive(http: Http) -> !Request {
+    let method = http.method()?
+    let path = http.path()?
+    let body = http.body_text()?
+    Request { method: method, path: path, body: body }
+}
+
+fn send(http: Http, response: Response) -> ! {
+    let sent = http.respond(response.status, response.body)?
+    ()
+}

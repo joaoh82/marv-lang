@@ -591,6 +591,58 @@ fn a_capability_using_module_imports_that_capability() {
     assert_eq!(imports, vec![("Net".to_string(), "op0".to_string())]);
 }
 
+#[test]
+fn capability_imports_can_return_string_handles() {
+    let http = symbol_hash("Http");
+    let http_ty = Type::Nominal {
+        def: http,
+        args: Vec::new(),
+    };
+    let row = EffectRow {
+        caps: vec![http],
+        errors: Vec::new(),
+    };
+    let def = Def {
+        kind: DefKind::Fn,
+        ty: Type::Arrow {
+            param: Box::new(http_ty.clone()),
+            ret: Box::new(Type::Str),
+            effects: row.clone(),
+        },
+        requires: Vec::new(),
+        ensures: Vec::new(),
+        body: Some(Core::Lam {
+            param: http_ty,
+            effects: row,
+            body: Box::new(Core::Perform {
+                cap: Atom::Var(0),
+                op: OpId(0),
+                args: Vec::new(),
+            }),
+        }),
+    };
+    let world = WorldBuilder::new()
+        .cap(
+            "Http",
+            vec![OpSig {
+                params: Vec::new(),
+                ret: Type::Str,
+                errors: Vec::new(),
+            }],
+        )
+        .build();
+
+    let artifact =
+        marv_codegen_wasm::compile("sandbox", &[("method".to_string(), def)], &world).unwrap();
+    assert_eq!(artifact.imports.len(), 1);
+    assert_eq!(artifact.imports[0].cap, "Http");
+    assert_eq!(artifact.imports[0].op, 0);
+    assert!(artifact.imports[0].returns_value);
+
+    let engine = Engine::default();
+    Module::new(&engine, &artifact.bytes).expect("string-returning import module validates");
+}
+
 /// MARV-8: a module whose entry uses only the supported subset builds even when
 /// a sibling definition uses a construct this backend cannot lower (here a
 /// method call that lowers to an application of a non-function). The pruned

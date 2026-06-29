@@ -624,7 +624,7 @@ fn collect_imports(fns: &[(Hash, &str, &Def)], world: &World) -> Result<Vec<CapI
                 }
                 let returns_value = match &sig.ret {
                     Type::Unit => false,
-                    Type::Int(_) | Type::Bool => true,
+                    Type::Int(_) | Type::Bool | Type::Str => true,
                     other => {
                         return Err(WasmError::Unsupported(format!(
                             "capability result type `{}`",

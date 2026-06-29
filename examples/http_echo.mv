@@ -1,0 +1,15 @@
+mod http_echo
+import std.io (Http)
+import std.http (Request, Response, receive, request_body, response, send)
+
+fn echo(http: Http) -> !str {
+    let req: Request = receive(http)?
+    let body = request_body(req)
+    let res: Response = response((200 as u16), body)
+    let sent = send(http, res)?
+    body
+}
+
+fn main(http: Http) -> !str {
+    echo(http)
+}

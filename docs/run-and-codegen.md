@@ -270,22 +270,27 @@ lowers to a **call to an imported function** — one import per
 
 - A **pure** module performs nothing, so it **imports nothing**. There is no slot
   through which any host could hand it authority — it can only compute.
-- A module that wants the network imports `Net::op0`. The host decides whether to
-  satisfy that import. Withhold it and the module **cannot be instantiated**, let
-  alone open a socket. The import list is the capability manifest, statically
-  inspectable (`WebAssembly.Module.imports` / the `marv build` output).
+- A module that wants the network or request/response authority imports `Net::opN`
+  or `Http::opN`. The host decides whether to satisfy that import. Withhold it
+  and the module **cannot be instantiated**, let alone open a socket or read a
+  request. The import list is the capability manifest, statically inspectable
+  (`WebAssembly.Module.imports` / the `marv build` output).
 - A capability parameter carries **no ABI slot** — authority is the import, not a
   value threaded through the call. `demo.fetch(net)` exports as a zero-argument
   wasm function; the `Net` it needs shows up as an *import*, not a parameter.
 - String operands to an import are passed as the normal `str` ABI word: a pointer
   to the module's `[len, codepoint…]` linear-memory block.
+- String results from an import use the same one-word handle shape. The core-WASM
+  backend can model this today for `Http.method/path/body_text`; component/WIT
+  packaging remains the place where those handles become named host-level string
+  types.
 
 ### The differential gate and the browser demo
 
 `crates/marv-codegen-wasm/tests/differential.rs` runs the same `tests/run/*.mv`
 corpus through **wasmtime** and asserts it matches the interpreter, and checks
-that a pure module imports nothing while a `Net`-performing module imports exactly
-`Net`.
+that a pure module imports nothing, a `Net`-performing module imports exactly
+`Net`, and a string-returning `Http` operation validates as a host import.
 
 [`../web/`](../web) is a dependency-free browser demo (serve it with any static
 server) proving the sandbox live:

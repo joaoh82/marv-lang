@@ -29,6 +29,10 @@ interface Stream {
     fn write(s: &Stream, text: str) -> !
 }
 
+interface Http {
+    fn respond(http: &Http, status: u16, body: str) -> !
+}
+
 fn use_fs(fs: Fs, path: str) -> ![]u8 {
     fs.read(path)
 }
@@ -40,6 +44,14 @@ fn narrow(io: Io, path: str) -> ![]u8 {
 
 pure fn leak(fs: Fs, path: str) -> ![]u8 {
     fs.read(path)
+}
+
+fn use_http(http: Http) -> ! {
+    http.respond((200 as u16), \"ok\")
+}
+
+pure fn leak_http(http: Http) -> ! {
+    http.respond((200 as u16), \"ok\")
 }
 ";
 
@@ -82,7 +94,7 @@ fn error_codes(world: &World, m: &LoweredModule, name: &str) -> Vec<Code> {
 #[test]
 fn non_generic_interface_is_a_capability() {
     let m = lower(SRC);
-    for name in ["Io", "Fs", "Stream"] {
+    for name in ["Io", "Fs", "Stream", "Http"] {
         let iface = m.interfaces.iter().find(|i| i.name == name).unwrap();
         assert!(iface.is_capability, "{name} should be a capability");
     }
@@ -124,6 +136,17 @@ fn pure_fn_that_performs_is_missing_capability() {
     // `pure fn leak` asserts the empty row but performs `Fs` → E0110.
     assert_eq!(
         error_codes(&world, &m, "leak"),
+        vec![Code::MissingCapability]
+    );
+}
+
+#[test]
+fn http_response_requires_http_capability() {
+    let m = lower(SRC);
+    let world = World::from_module(&m);
+    assert!(error_codes(&world, &m, "use_http").is_empty());
+    assert_eq!(
+        error_codes(&world, &m, "leak_http"),
         vec![Code::MissingCapability]
     );
 }
