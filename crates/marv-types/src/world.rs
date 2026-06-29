@@ -258,7 +258,7 @@ impl World {
     /// the declared capabilities themselves plus everything reachable from them by
     /// **narrowing** (`spec/01` §5 — attenuation). An operation whose result type
     /// is itself a capability (`io.fs() -> Fs`) is a narrowing edge, so holding
-    /// `Io` authorizes the `Fs`/`Net`/… it can narrow to (transitively). Used by
+    /// `Io` authorizes the `Fs`/`Net`/`Http`/… it can narrow to (transitively). Used by
     /// the effect-row subsumption check so a body that narrows a held capability
     /// is not flagged for a capability it never received ambiently.
     pub fn authorized_caps(&self, declared: &[Hash]) -> std::collections::HashSet<Hash> {

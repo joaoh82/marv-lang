@@ -141,12 +141,13 @@ capability-scoped execution.
 ## Capabilities — the rule you must respect
 
 There is **no ambient authority**. A function can only do what its parameters let it: power
-enters through **capability** parameters (`Io`, `Fs`, `Net`, `Clock`, `Rand`, `Alloc`) and its
+enters through **capability** parameters (`Io`, `Fs`, `Net`, `Http`, `Clock`, `Rand`, `Alloc`) and its
 effect row records them. When you write or run code:
 
 - Pass a function only the capabilities it needs. A function with no `Net` parameter provably
-  cannot reach the network; with no `Alloc`, it cannot perform user-visible growable allocation
-  (compiler-managed fixed-shape boxing is a runtime representation detail).
+  cannot reach the network; with no `Http`, it cannot read an HTTP request or send a response;
+  with no `Alloc`, it cannot perform user-visible growable allocation (compiler-managed
+  fixed-shape boxing is a runtime representation detail).
 - `marv run --grant …` injects exactly the listed capabilities — nothing else exists at
   runtime. On WebAssembly, capabilities are host imports the embedder chooses to supply.
 - You cannot construct a capability; you receive one and may narrow it (`io.fs()`).
@@ -175,9 +176,10 @@ projection, generic parameter lists + type arguments, `interface`/`impl` with
 monomorphization, **capabilities & `perform` from source** (capability method calls →
 `Perform`, `io.fs()` narrowing, inferred-and-checked effect rows), and `requires`/`ensures`
 contracts. Local source imports are discoverable by the CLI, and source-only
-JSON-RPC snapshots can be checked as a module set. The remaining MARV-48
-roadmap wave includes collection literals, `linear` resource capabilities,
-bytes/UTF-8, JSON, HTTP/server runtime capabilities, structured concurrency,
+JSON-RPC snapshots can be checked as a module set. `std.bytes` provides UTF-8
+helpers, and `std.http` exposes the first host-provided request/response capability.
+The remaining MARV-48 roadmap wave includes collection literals, `linear` resource
+capabilities, JSON, production listener/resource lifecycle safety, structured concurrency,
 `unsafeSites`, richer package metadata, and package-aware read queries. For
 anything not yet expressible, construct a `*.core.json` snapshot (see
 [`store.md`](store.md) and the `tests/run/*.core.json` fixtures) or check

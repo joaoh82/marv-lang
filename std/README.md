@@ -7,7 +7,8 @@ links against once a build references them by content hash (`spec/01` §8).
 |------|----------|
 | [`option.mv`](option.mv) | `Option[T]` — the only way to express absence (`?T` sugar). |
 | [`result.mv`](result.mv) | `Result[T, E]` — success/typed-failure (`!T` sugar, `?` propagation). |
-| [`capabilities.mv`](capabilities.mv) | The capability types `Io`/`Fs`/`Net`/`Clock`/`Rand`/`Alloc` (plus `Stream`/`Conn`) as declared interfaces — power enters only through these (`spec/01` §5). |
+| [`capabilities.mv`](capabilities.mv) | The capability types `Io`/`Fs`/`Net`/`Http`/`Clock`/`Rand`/`Alloc` (plus `Stream`/`Conn`) as declared interfaces — power enters only through these (`spec/01` §5). |
+| [`http.mv`](http.mv) | `Request`/`Response` structs plus helpers over the host-provided `Http` request capability. |
 | [`collections.mv`](collections.mv) | `List[T]` — growable lists allocated through explicit `Alloc`; core ops run on interpreter, Cranelift, and WASM. |
 | [`str.mv`](str.mv) | `from_chars(alloc, chars)` — explicit-`Alloc` string building from `List[char]`; lowered to a Core string primitive. |
 | [`bytes.mv`](bytes.mv) | Byte-slice helpers plus source-level UTF-8 encode/decode between `[]u8`, `List[u8]`, and `str`. |
@@ -24,8 +25,9 @@ and remain outside content identity.
 
 `capabilities.mv` is also live parsed source: a non-generic `interface` is a
 capability declaration, and method calls on capability values lower to
-`perform`/narrowing. `Alloc` is declared there alongside `Io`/`Fs`/`Net` as the
-auditable entry point for user-visible growable allocation.
+`perform`/narrowing. `Alloc` is declared there alongside `Io`/`Fs`/`Net`/`Http`
+as the auditable entry point for user-visible growable allocation and
+host-provided request handling.
 
 `collections.mv` is live parsed source too. The public `List[T]` operations are normal std
 functions at the surface, while the compiler lowers their call sites to list Core ops with a
@@ -42,3 +44,9 @@ explicit in signatures.
 typed errors. It provides byte length/index/equality helpers, `List[u8]` append, UTF-8
 decode from `[]u8` to `str`, and UTF-8 encode from `str` to `List[u8]`; allocation remains
 explicit through `Alloc`.
+
+`http.mv` is the first server-runtime std layer. A host grants one `Http`
+capability per request; low-level operations read the method/path/body text and
+send a response, while user code can work with normal `Request` and `Response`
+structs through helper functions. Listener loops, raw byte streaming, and exact
+close-once lifecycle safety stay tied to follow-up linear-resource work.

@@ -209,13 +209,14 @@ of such a type lowers to `Core::Perform`: `io.fs()` **narrows** the root to an `
 may narrow, never construct — capabilities are **unforgeable**), and `fs.read(path)` /
 `out.write(text)` **perform** an operation. The effect row is inferred from those sites and
 checked against the function's capability parameters, where a held capability authorizes its
-**narrowing closure** (holding `Io` authorizes `Fs`/`Net`/… ). A `pure fn` — or a function that
+**narrowing closure** (holding `Io` authorizes `Fs`/`Net`/`Http`/… ). A `pure fn` — or a function that
 reaches a capability it never received — that performs is `MissingCapability` (E0110). Standard
-capabilities: `Io` (root) and narrower `Fs`, `Net`, `Clock`, `Rand`, `Alloc` (see
-[`std/`](../std)). On WebAssembly a capability is a host import the page chooses to provide —
-see [platform support](platform-support.md). (Generic interfaces like `Ord[T]` are bounded
-polymorphism, not capabilities; `linear` capabilities and server/runtime resource safety are
-roadmap.)
+capabilities: `Io` (root) and narrower `Fs`, `Net`, `Http`, `Clock`, `Rand`, `Alloc` (see
+[`std/`](../std)). `Http` represents one host-provided server request/response exchange;
+without it a handler cannot read request data or send a response. On WebAssembly a capability
+is a host import the page chooses to provide — see [platform support](platform-support.md).
+(Generic interfaces like `Ord[T]` are bounded polymorphism, not capabilities; `linear`
+capabilities and production listener/resource lifecycle safety are roadmap.)
 
 ## 6. Errors: inferred sets **[impl]**
 
@@ -328,11 +329,11 @@ operators (`+ - * / % == != < <= > >= and or`), the prefix unary operators
 function calls and recursion, field
 projection, and `requires`/`ensures` contracts. That is enough for the
 [`examples/`](../examples) that run end to end (`factorial`, `arithmetic`, `clamp`, `color`,
-`mutation`, `loops`, `casts`, `hello`, `read_file`, …), the `std/` prelude (`option`, `result`,
-`ord`, `capabilities`, `collections`, `bytes`), and the M4/M6 gates.
+`mutation`, `loops`, `casts`, `hello`, `read_file`, `http_echo`, …), the `std/` prelude
+(`option`, `result`, `ord`, `capabilities`, `collections`, `bytes`, `http`), and the M4/M6 gates.
 Everything still marked **[core]**/**[design]** above is tracked in the project
 tracker. Local source imports already lower/check/run/build as module sets; the
-remaining MARV-48 application-language wave covers HTTP/server capabilities,
-richer collections, collection literals, iterators, `linear` resource
-capabilities, structured concurrency, `unsafeSites`, richer package metadata/query
-coverage, and broader verification.
+remaining MARV-48 application-language wave covers richer collections, collection
+literals, iterators, JSON/serialization, production listener/resource lifecycle
+safety, `linear` resource capabilities, structured concurrency, `unsafeSites`,
+richer package metadata/query coverage, and broader verification.

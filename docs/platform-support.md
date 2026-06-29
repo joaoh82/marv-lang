@@ -9,7 +9,7 @@ property (`spec/01` §9).
 
 | Backend | Crate | Form | Status |
 |---------|-------|------|--------|
-| Tree-walking interpreter | `marv-interp` | in-process; the oracle | **working** — full Core IR (arithmetic, `if`/`match`, recursion, currying, aggregates, `perform`/effects, contracts/Tier-1) |
+| Tree-walking interpreter | `marv-interp` | in-process; the oracle | **working** — full Core IR (arithmetic, `if`/`match`, recursion, currying, aggregates, `perform`/effects, contracts/Tier-1) plus a deterministic `Http` request/response test host |
 | Cranelift (native) | `marv-codegen-cl` | **JIT** (in-process) | **working** for the integer/boolean subset + heap-boxed aggregates/enums (MARV-9) + `List[T]` growable storage (MARV-42) + string manipulation (MARV-43) + arena reclamation for scalar-carried loop temporaries; AOT object/executable emission is roadmap |
 | WebAssembly | `marv-codegen-wasm` | core `.wasm` module | **working** for the integer/boolean subset + growable linear-memory aggregates/enums (MARV-9) + `List[T]` growable storage (MARV-42) + string manipulation (MARV-43) + arena reclamation for scalar-carried loop temporaries + capabilities-as-host-imports; component/WIT packaging is roadmap |
 | LLVM (release) | `marv-codegen-llvm` | — | **stub** (roadmap — optimized release builds via `inkwell`) |
@@ -33,11 +33,15 @@ module can mix supported and not-yet-supported functions. The WASM backend addit
 
 - **Interpreter** (`marv run --grant CAP,…`): the host's grant set is injected at the entry
   point; each `perform` is recorded as an effect; an ungranted capability is refused at the
-  boundary (defense-in-depth behind the static effect-row guarantee).
+  boundary (defense-in-depth behind the static effect-row guarantee). For `Http`, the
+  interpreter includes a deterministic test host (`POST /echo`, body `marv-http-echo`) so
+  request/response app logic can run before a production listener runtime exists.
 - **WebAssembly**: each capability operation is a module **import**. A pure module imports
   nothing (no slot through which authority could be handed to it); a module that wants the
-  network imports `Net` and **cannot be instantiated** unless the host supplies it. The
-  import list is the capability manifest, statically inspectable
+  network or HTTP request access imports `Net`/`Http` and **cannot be instantiated** unless
+  the host supplies it. Scalar, boolean, and string values cross the current core-WASM ABI as
+  one-word slots; component/WIT packaging will make those names/types explicit. The import list
+  is the capability manifest, statically inspectable
   (`WebAssembly.Module.imports` / the `marv build` output). See [`web/`](../web).
 
 ## Hosts & targets

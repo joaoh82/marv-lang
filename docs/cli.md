@@ -141,6 +141,7 @@ logged to stderr as `effect: <cap> op#<n> [<args>]`.
 marv run examples/factorial.mv --entry factorial 6     # prints 720
 marv run examples/arithmetic.mv                         # entry defaults to main → 42
 marv run --grant Io examples/hello.mv                   # logs: effect: Io op#5 / Stream op#0 ["hello, marv\n"]
+marv run --grant Http examples/http_echo.mv             # prints marv-http-echo and logs Http request/response effects
 marv run examples/hello.mv                              # refused: capability `Io` not granted
 ```
 

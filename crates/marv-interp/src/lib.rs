@@ -799,10 +799,12 @@ impl Program {
                     .collect::<Result<Vec<_>, _>>()?;
                 // A narrowing op (`io.fs()`) yields the narrowed capability value,
                 // so a later `fs.read(..)` performs against it (`spec/01` §5);
-                // every op is still recorded as an effect. Any other modeled host
-                // op returns unit — richer host behavior (real I/O) is layered in
-                // as the capability surface grows.
+                // every op is still recorded as an effect. A small deterministic
+                // host model covers app-facing HTTP request/response operations
+                // for interpreter smoke tests; other unmodeled host ops return
+                // unit until their runtimes land.
                 let narrowed = self.world.cap_op_narrows(&name, op.0);
+                let modeled = modeled_host_perform(&name, op.0);
                 eff.push(Effect {
                     cap: name,
                     op: op.0,
@@ -810,7 +812,7 @@ impl Program {
                 });
                 match narrowed {
                     Some(n) => Ok(Value::Cap(n)),
-                    None => Ok(Value::Unit),
+                    None => Ok(modeled.unwrap_or(Value::Unit)),
                 }
             }
 
@@ -1150,6 +1152,16 @@ fn lit_value(l: &Literal) -> Value {
         // int-only backends compute, which keeps the differential oracle honest
         // (`spec/01` §3.1). `c as i64` is then the identity its code point.
         Literal::Char(c) => Value::Int(*c as i64),
+    }
+}
+
+fn modeled_host_perform(cap: &str, op: u32) -> Option<Value> {
+    match (cap, op) {
+        ("Http", 0) => Some(Value::Str("POST".to_string())),
+        ("Http", 1) => Some(Value::Str("/echo".to_string())),
+        ("Http", 2) => Some(Value::Str("marv-http-echo".to_string())),
+        ("Http", 3) => Some(Value::Unit),
+        _ => None,
     }
 }
 

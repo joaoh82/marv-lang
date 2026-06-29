@@ -346,6 +346,40 @@ fn main(io: Io, path: str) -> ![]u8 {
     );
 }
 
+#[test]
+fn http_request_response_ops_use_the_interpreter_test_host() {
+    let src = "\
+mod demo
+
+interface Http {
+    fn method(http: &Http) -> !str
+    fn path(http: &Http) -> !str
+    fn body_text(http: &Http) -> !str
+    fn respond(http: &Http, status: u16, body: str) -> !
+}
+
+fn main(http: Http) -> !str {
+    let body = http.body_text()?
+    let sent = http.respond((200 as u16), body)?
+    body
+}
+";
+    let prog = program_from_source(src);
+    let out = prog
+        .run("main", &["Http".to_string()], &[])
+        .expect("run with Http granted");
+    assert_eq!(out.value, Value::Str("marv-http-echo".to_string()));
+    assert_eq!(out.effects.len(), 2);
+    assert_eq!(out.effects[0].cap, "Http");
+    assert_eq!(out.effects[0].op, 2);
+    assert_eq!(out.effects[1].cap, "Http");
+    assert_eq!(out.effects[1].op, 3);
+    assert_eq!(
+        out.effects[1].args,
+        vec![Value::Int(200), Value::Str("marv-http-echo".to_string())]
+    );
+}
+
 /// Granting only the narrowed capability (not the root it is narrowed *from*)
 /// cannot satisfy an entry that receives the root: the value is never created.
 #[test]

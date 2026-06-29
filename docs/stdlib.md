@@ -13,8 +13,10 @@ the capability interfaces every program links against (`spec/01` §§3, 5, 6).
 > `Option.Some(x)` / `Option.None` it builds to the imported enum's constructors;
 > `examples/optionals.mv` does the same from user code). The persistent content store and
 > pinned hash linking are done (MARV-14); the remaining module work is broader project/package
-> source discovery beyond `std` (MARV-49). Still pending: `linear` capabilities, so a `Conn`
-> must be `close`d exactly once (MARV-27). The capability *model* is also exercised over the
+> source discovery beyond `std` (MARV-49). `std.http` now exposes host-provided
+> request/response structs over an explicit `Http` capability (MARV-53). Still pending:
+> `linear` capabilities, so a `Conn`/listener/request lifecycle must be `close`d or
+> completed exactly once (MARV-27). The capability *model* is also exercised over the
 > Core IR and on WebAssembly (host imports).
 
 ## Data types
@@ -102,6 +104,23 @@ fn decode_utf8(alloc: Alloc, bytes: []u8) -> !str
 fn encode_utf8(alloc: Alloc, text: str) -> List[u8]
 ```
 
+### `std/http.mv` — request/response
+`Http` is declared in `std/capabilities.mv`; `std.http` layers normal app-level
+types over it. A host hands a function an `Http` capability for one request.
+The current ABI exposes UTF-8 request pieces (`method`, `path`, `body`) and a
+single `respond(status, body)` operation. Raw bytes, streaming bodies, listener
+accept loops, and exact once-only lifecycle safety are intentionally left to the
+bytes/JSON and linear-capability follow-ups.
+
+```marv
+struct Request { method: str, path: str, body: str }
+struct Response { status: u16, body: str }
+pure fn request_body(request: Request) -> str
+pure fn response(status: u16, body: str) -> Response
+fn receive(http: Http) -> !Request
+fn send(http: Http, response: Response) -> !
+```
+
 ## Capabilities
 
 `std/capabilities.mv` declares the standard capability types as interfaces — the operations a
@@ -111,10 +130,11 @@ supplies the implementations the process/page chooses to grant.
 
 | Capability | Role | Representative operations |
 |------------|------|---------------------------|
-| `Io` | Root capability; everything narrows from it | `fs() -> Fs`, `net() -> Net`, `clock() -> Clock`, `rand() -> Rand`, `alloc() -> Alloc`, `stdout() -> Stream` |
+| `Io` | Root capability; everything narrows from it | `fs() -> Fs`, `net() -> Net`, `clock() -> Clock`, `rand() -> Rand`, `alloc() -> Alloc`, `stdout() -> Stream`, `http() -> Http` |
 | `Stream` | A text/byte output stream | `write(text: str) -> !` |
 | `Fs` | Filesystem | `read(path: str) -> ![]u8`, `write(path, bytes) -> !` |
 | `Net` | Network | `get(url) -> ![]u8`, `connect(host, port) -> !Conn` |
+| `Http` | One server request/response exchange | `method()`, `path()`, `body_text()`, `respond(status, body)` |
 | `Conn` | Open connection | `send`, `recv`, `close` |
 | `Clock` | Monotonic time | `now() -> i64` |
 | `Rand` | Randomness | `next_u64() -> u64` |
@@ -131,9 +151,10 @@ from the same reclaiming heap infrastructure.
 
 A human auditor verifies "this transform cannot exfiltrate data" by reading one line of a
 signature — no `Net` parameter. And it *is* the sandbox: hand a function only the
-capabilities you want it to have. On WebAssembly each capability becomes a host import the
-embedding decides to satisfy; a pure module imports nothing and a `Net`-using module cannot
-even instantiate without a `Net` import (see the [`web/`](../web) demo and
+capabilities you want it to have. A server handler without `Http` cannot read a
+request or send a response. On WebAssembly each capability becomes a host import the
+embedding decides to satisfy; a pure module imports nothing and a `Net`/`Http`-using module cannot
+even instantiate without the matching import (see the [`web/`](../web) demo and
 [platform-support.md](platform-support.md)).
 
 Narrowing (attenuation): `let fs = io.fs()` turns an `Io` into an `Fs`, so downstream code is

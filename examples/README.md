@@ -10,6 +10,7 @@ fixture source for the test suite. As of M4 the integer/boolean subset is
 |------|-------|
 | [`hello.mv`](hello.mv) | **Runnable (MARV-6):** capabilities & `perform` from source — `io.stdout()` narrows `Io` to a `Stream`, `out.write(...)` performs. `marv run --grant Io examples/hello.mv` logs the `Io`/`Stream` effects; without `--grant Io` it is refused. |
 | [`read_file.mv`](read_file.mv) | **Runnable (MARV-6):** capability **narrowing** — `io.fs()` attenuates `Io` to `Fs`, then `fs.read(path)` performs. `marv run --grant Io examples/read_file.mv /etc/hosts` records the `Io`→`Fs` narrowing and the read; the signature alone proves it touches only the filesystem. |
+| [`http_echo.mv`](http_echo.mv) | **Runnable (MARV-53):** request/response app logic over an explicit `Http` capability. `std.http.receive` reads the host-provided method/path/body, `send` responds, and `marv run --grant Http examples/http_echo.mv` returns the deterministic interpreter test-host body. |
 | [`clamp.mv`](clamp.mv) | **Verifiable (M6):** a `pure` function with `requires`/`ensures` contracts. `marv verify examples/clamp.mv` proves it (Tier 2); `marv run` enforces it at runtime (Tier 1). |
 | [`report.mv`](report.mv) | **Checks (MARV-6):** `struct`/`error` decls, second-class `&` references, a loop `invariant`, an inferred error set, and a real capability `perform` — `load_and_total(fs: Fs, …)` does `fs.read(path)?`. |
 | [`geometry.mv`](geometry.mv) | The **M0 parsed subset** end to end: `struct`/`linear struct`, `pure fn`, `&`/`&mut` params, `if`/`else`, fully-parenthesized binary operators. Round-trips through the real parser. |
@@ -38,15 +39,16 @@ contract arithmetic, and `old(e)`); `color.mv` when `enum`/`match` landed; `gene
 `interface`/`impl` + generic bounds landed (MARV-5); `arrays.mv` when array codegen landed
 (MARV-30); `slices.mv` when runtime-length slices landed (MARV-33 + MARV-20);
 `optionals.mv` when single-file lowering of imported enums landed (MARV-18);
-`bytes_utf8.mv` when the source-level `std.bytes` UTF-8 helpers landed (MARV-54).
+`bytes_utf8.mv` when the source-level `std.bytes` UTF-8 helpers landed (MARV-54);
+`http_echo.mv` when the first host-provided HTTP request capability landed (MARV-53).
 `factorial.mv`, `arithmetic.mv`, `color.mv`, `mutation.mv`, `loops.mv`,
 `generics.mv`, `arrays.mv`, `slices.mv`, and `optionals.mv` additionally lie inside the
 *executable* subset, so the interpreter runs them (`marv run`); the integer ones
 (`factorial`, `arithmetic`, `loops`, `arrays`, `slices`) also run on the Cranelift JIT (`marv build --run`)
 and WebAssembly (`marv build --target wasm-component`, then via wasmtime or the browser
 demo in [`../web/`](../web)). `hello`/`read_file` run on the interpreter under
-`marv run --grant Io` (capability ops are interpreter-modeled; Cranelift rejects
-`perform`). `generics.mv` constructs an `enum` (`Ordering`); now that aggregate codegen
+`marv run --grant Io`, and `http_echo` runs under `marv run --grant Http`
+(capability ops are interpreter-modeled; Cranelift rejects `perform`). `generics.mv` constructs an `enum` (`Ordering`); now that aggregate codegen
 has landed (MARV-9), the monomorphized generic runs identically on the interpreter,
 Cranelift, and WASM — exercised in the differential corpus by
 [`tests/run/generics.mv`](../tests/run/generics.mv) (MARV-26). `arrays.mv` exercises array
