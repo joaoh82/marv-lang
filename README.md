@@ -166,7 +166,8 @@ handling, `interface`/`impl` + generics, **capabilities & `perform` from source*
 (`io.fs()` narrowing, `out.write(...)` → `Perform`, inferred effect rows checked against the
 capability parameters), struct literals + indexing + assignment, `char` literals + `as` casts +
 `len`, string concat/slice/index/iteration/building, `std.collections.List[T]` with
-explicit-`Alloc` growable operations, `std.bytes` byte-slice and UTF-8 helpers,
+explicit-`Alloc` growable operations, a first string-keyed/string-set
+`std.collections.Map[K, V]` / `Set[T]` slice, `std.bytes` byte-slice and UTF-8 helpers,
 the first `std.http` request/response helper layer over explicit `Http` authority,
 `while`/`for` loops,
 `let`/`var`, `if`/`else`, arithmetic/boolean ops, the prefix unary

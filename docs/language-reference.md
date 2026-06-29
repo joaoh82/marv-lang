@@ -54,7 +54,8 @@ up only at the cast boundary; per-width **arithmetic** wrapping remains roadmap.
 character indexing `s[i] -> char`, substring slicing `s[a..b] -> str`, `for c in s`, and
 explicit-`Alloc` building via `std.str.from_chars(alloc, chars: List[char])`. Runtime strings
 use a `[len, codepoint0, …]` block in Cranelift and WASM; `len(s)` is the character count.
-`tests/run/strings.mv` differentially tests interpreter, Cranelift, and WASM agreement.
+`str == str` and `str != str` compare content, not runtime handles. `tests/run/strings.mv`
+and `tests/run/map_set.mv` differentially test interpreter, Cranelift, and WASM agreement.
 
 ### Aggregates
 - **struct** (product): `struct Point { x: f64, y: f64 }`. Value semantics. Declarations,
@@ -85,6 +86,15 @@ use a `[len, codepoint0, …]` block in Cranelift and WASM; `len(s)` is the char
   in-bounds index is elidable in principle). See the Tier-1 bounds-check section of
   `docs/run-and-codegen.md` for the per-backend mechanism and the one documented gap (a
   fixed-length-array store with a runtime index is a memory-safe no-op, not a trap).
+- **List/Map/Set**. `std.collections.List[T]` is growable and value-semantic:
+  `new`/`with_capacity` allocate through explicit `Alloc`, while `push`/`pop`/`set` return
+  the updated list value for rebinding. `std.collections.Map[K, V]` and `Set[T]` now exist
+  as std types with a first runnable string slice: `map_new`, `map_with_capacity`,
+  `map_insert`, `map_get_or`, `map_contains`, `map_remove`, `map_len`, and the matching
+  `set_*` operations for `Set[str]`. This slice is list-backed and insertion-ordered so it
+  runs on the interpreter, Cranelift, and WASM today; general hash-backed keys await
+  `Hash`/`Eq` interfaces. Differential-tested in `tests/run/list.mv` and
+  `tests/run/map_set.mv`.
 - **optional** `?T` = `Option[T]` — the only way to express absence. `Option`/`Result` are
   written in marv (`std/`) and parse + lower **[impl]**; the `?T`/`!T` *sugar* and the postfix
   `?` propagation operator now parse and lower too **[impl]** (`!T` → `Result[T, error-union]`;

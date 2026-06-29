@@ -9,7 +9,7 @@ links against once a build references them by content hash (`spec/01` §8).
 | [`result.mv`](result.mv) | `Result[T, E]` — success/typed-failure (`!T` sugar, `?` propagation). |
 | [`capabilities.mv`](capabilities.mv) | The capability types `Io`/`Fs`/`Net`/`Http`/`Clock`/`Rand`/`Alloc` (plus `Stream`/`Conn`) as declared interfaces — power enters only through these (`spec/01` §5). |
 | [`http.mv`](http.mv) | `Request`/`Response` structs plus helpers over the host-provided `Http` request capability. |
-| [`collections.mv`](collections.mv) | `List[T]` — growable lists allocated through explicit `Alloc`; core ops run on interpreter, Cranelift, and WASM. |
+| [`collections.mv`](collections.mv) | `List[T]`, `Map[K, V]`, and `Set[T]` — growable collections allocated through explicit `Alloc`; core/list-backed ops run on interpreter, Cranelift, and WASM. |
 | [`str.mv`](str.mv) | `from_chars(alloc, chars)` — explicit-`Alloc` string building from `List[char]`; lowered to a Core string primitive. |
 | [`bytes.mv`](bytes.mv) | Byte-slice helpers plus source-level UTF-8 encode/decode between `[]u8`, `List[u8]`, and `str`. |
 
@@ -34,6 +34,14 @@ functions at the surface, while the compiler lowers their call sites to list Cor
 runtime `[len, cap, e0, …]` layout. `push`, `pop`, and `set` return the updated list value,
 so surface code normally rebinds the `var` that holds the list. Backends update the backing
 block directly when no growth is needed.
+
+`Map[K, V]` and `Set[T]` are present as std types, with the first runnable operation slice
+constrained to string keys/elements: `map_new`, `map_with_capacity`, `map_insert`,
+`map_get_or`, `map_contains`, `map_remove`, `map_len`, plus the parallel `set_*`
+operations. These are currently list-backed and insertion-ordered, not hash-backed; the
+explicit `K`/`T` type parameters reserve the shape for the later `Hash`/`Eq` general-key
+runtime. Allocation remains visible through `Alloc`, and `tests/run/map_set.mv` pins
+interpreter/Cranelift/WASM parity.
 
 `str.mv` is live parsed source as well. Its `from_chars` body is a placeholder in source form:
 the lowerer rewrites calls imported from `std.str` to a Core primitive that copies a

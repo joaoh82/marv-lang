@@ -54,15 +54,25 @@ pub fn variant_fields(world: &World, ty: &Type, tag: u32) -> Option<Vec<Type>> {
     match ty {
         Type::Linear(inner) => variant_fields(world, inner, tag),
         Type::Tuple(elems) if tag == 0 => Some(elems.clone()),
-        Type::Nominal { def, .. } => {
+        Type::Nominal { def, args } => {
             if let Some(s) = world.struct_decl(def) {
                 if tag == 0 {
-                    return Some(s.fields.clone());
+                    return Some(
+                        s.fields
+                            .iter()
+                            .map(|field| subst_type_vars(field, args))
+                            .collect(),
+                    );
                 }
                 None
             } else {
                 let e = world.enum_decl(def)?;
-                e.variants.get(tag as usize).map(|v| v.fields.clone())
+                e.variants.get(tag as usize).map(|v| {
+                    v.fields
+                        .iter()
+                        .map(|field| subst_type_vars(field, args))
+                        .collect()
+                })
             }
         }
         _ => None,
@@ -270,6 +280,34 @@ fn list_type(elem: Type) -> Type {
     Type::Nominal {
         def: marv_core::symbol_hash("std.collections.List"),
         args: vec![elem],
+    }
+}
+
+fn subst_type_vars(t: &Type, args: &[Type]) -> Type {
+    match t {
+        Type::Var(i) => args.get(*i as usize).cloned().unwrap_or_else(|| t.clone()),
+        Type::Array(elem, len) => Type::Array(Box::new(subst_type_vars(elem, args)), *len),
+        Type::Slice(elem) => Type::Slice(Box::new(subst_type_vars(elem, args))),
+        Type::Tuple(elems) => Type::Tuple(elems.iter().map(|e| subst_type_vars(e, args)).collect()),
+        Type::Nominal { def, args: inner } => Type::Nominal {
+            def: *def,
+            args: inner.iter().map(|a| subst_type_vars(a, args)).collect(),
+        },
+        Type::Ref { mutable, of } => Type::Ref {
+            mutable: *mutable,
+            of: Box::new(subst_type_vars(of, args)),
+        },
+        Type::Linear(inner) => Type::Linear(Box::new(subst_type_vars(inner, args))),
+        Type::Arrow {
+            param,
+            ret,
+            effects,
+        } => Type::Arrow {
+            param: Box::new(subst_type_vars(param, args)),
+            ret: Box::new(subst_type_vars(ret, args)),
+            effects: effects.clone(),
+        },
+        _ => t.clone(),
     }
 }
 

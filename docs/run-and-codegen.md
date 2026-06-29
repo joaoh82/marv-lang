@@ -61,11 +61,17 @@ The integer/boolean core the M0/M1 front end can express and lower:
   (the source block is left untouched). `tests/run/slices.mv` asserts
   interp == Cranelift == wasm.
 - **strings (MARV-43):** string literals, `+` concatenation, `len(s)`, `s[i]`,
-  `s[a..b]`, `for c in s`, and `std.str.from_chars(alloc, chars)` run on the
+  `s[a..b]`, `str == str` / `str != str` content equality, `for c in s`, and
+  `std.str.from_chars(alloc, chars)` run on the
   interpreter, Cranelift, and WASM. Native backends store strings as one-word
   pointers to `[len, codepoint0, …]` blocks, so indexing and iteration yield
   `char` code points and dynamic string creation allocates a fresh block.
   `tests/run/strings.mv` asserts interp == Cranelift == wasm.
+- **Map/Set first slice (MARV-50):** `std.collections.Map[K, V]` and `Set[T]`
+  are currently runnable for string keys/elements through list-backed,
+  insertion-ordered std functions (`map_*`, `set_*`) with explicit `Alloc` for
+  growth/rebuilds. `tests/run/map_set.mv` asserts interpreter == Cranelift ==
+  WASM, including dynamically-built string keys.
 - **monomorphized generics (MARV-26):** monomorphization is a lowering-time pass
   (`spec/01` §§3.3–3.4), so a generic call has already specialized to a concrete
   def (`max@i64`) with its interface methods dispatched to the coherent `impl`

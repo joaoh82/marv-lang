@@ -836,6 +836,8 @@ struct Lowerer {
     subst: HashMap<String, SType>,
     /// Interface-dispatch context, set only when lowering a specialized body.
     spec: Option<SpecCtx>,
+    /// Type parameters in scope for the function body currently being lowered.
+    active_generics: Vec<String>,
 }
 
 impl Lowerer {
@@ -881,6 +883,23 @@ impl Lowerer {
             pending,
             subst,
             spec,
+            active_generics: Vec::new(),
+        }
+    }
+
+    fn with_active_generics(&self, active_generics: Vec<String>) -> Self {
+        Lowerer {
+            module_path: self.module_path.clone(),
+            local_items: self.local_items.clone(),
+            imports: self.imports.clone(),
+            structs: self.structs.clone(),
+            fn_rets: self.fn_rets.clone(),
+            reg: self.reg.clone(),
+            mono: self.mono.clone(),
+            pending: self.pending.clone(),
+            subst: self.subst.clone(),
+            spec: self.spec.clone(),
+            active_generics,
         }
     }
 
@@ -1029,6 +1048,26 @@ impl Lowerer {
     /// `None` when `name` is not generic or its type arguments cannot all be
     /// inferred (the call then lowers as an ordinary, un-specialized reference).
     fn resolve_generic_call(&self, name: &str, args: &[Expr], env: &[Binding]) -> Option<Atom> {
+        self.resolve_generic_call_with(name, args, env, None)
+    }
+
+    fn resolve_generic_call_with_expected(
+        &self,
+        name: &str,
+        args: &[Expr],
+        env: &[Binding],
+        expected: &SType,
+    ) -> Option<Atom> {
+        self.resolve_generic_call_with(name, args, env, Some(expected))
+    }
+
+    fn resolve_generic_call_with(
+        &self,
+        name: &str,
+        args: &[Expr],
+        env: &[Binding],
+        expected: Option<&SType>,
+    ) -> Option<Atom> {
         let gf = self.mono.generics.get(name)?;
         if gf.decl.params.len() != args.len() {
             return None;
@@ -1038,8 +1077,14 @@ impl Lowerer {
         // inferred argument type.
         let mut map: HashMap<String, SType> = HashMap::new();
         for (p, a) in gf.decl.params.iter().zip(args) {
+            if !stype_mentions_generics(&p.ty, &gnames) {
+                continue;
+            }
             let at = self.infer_type(a, env)?;
             unify(&p.ty, &at, &gnames, &mut map);
+        }
+        if let (Some(ret), Some(expected)) = (&gf.decl.ret, expected) {
+            unify(ret, expected, &gnames, &mut map);
         }
         // Every generic parameter must be solved to specialize.
         let mut subst = Vec::new();
@@ -1224,13 +1269,14 @@ impl Lowerer {
         // A nullary function is curried application over a single `()` param, so
         // synthesize one (unnamed, hence never referenced) when there are none.
         let gnames = generic_names(&f.generics);
+        let fun = self.with_active_generics(gnames.clone());
         let synth_unit = f.params.is_empty();
         let param_ctys: Vec<Type> = if synth_unit {
             vec![Type::Unit]
         } else {
             f.params
                 .iter()
-                .map(|p| self.lower_type(&p.ty, &gnames))
+                .map(|p| fun.lower_type(&p.ty, &gnames))
                 .collect()
         };
 
@@ -1244,7 +1290,7 @@ impl Lowerer {
                 env.push(Binding {
                     name: p.name.clone(),
                     atom: Atom::Var(i as u32),
-                    ty: Some(self.subst_surface(&p.ty)),
+                    ty: Some(fun.subst_surface(&p.ty)),
                     // Parameters are passed by value and are not reassignable.
                     mutable: false,
                     carried: false,
@@ -1252,12 +1298,12 @@ impl Lowerer {
             }
         }
         let n = param_ctys.len() as u32;
-        let body_core = self.lower_block(&f.body, &env, n)?;
+        let body_core = fun.lower_block(&f.body, &env, n)?;
 
         let ret_ty = f
             .ret
             .as_ref()
-            .map(|t| self.lower_type(t, &gnames))
+            .map(|t| fun.lower_type(t, &gnames))
             .unwrap_or(Type::Unit);
         // The declared **capability** row is the set of capability-typed
         // parameters (`spec/01` §5 — power enters only through a capability
@@ -1268,7 +1314,7 @@ impl Lowerer {
         let mut effects = EffectRow::empty();
         if !f.is_pure {
             for p in &f.params {
-                if let Some(cap) = self.cap_name_of(&self.subst_surface(&p.ty)) {
+                if let Some(cap) = fun.cap_name_of(&fun.subst_surface(&p.ty)) {
                     let h = symbol_hash(&cap);
                     if !effects.caps.contains(&h) {
                         effects.caps.push(h);
@@ -1315,7 +1361,7 @@ impl Lowerer {
         let contract_binding = |name: &str, ty: &SType| Binding {
             name: name.to_string(),
             atom: Atom::Var(0),
-            ty: Some(ty.clone()),
+            ty: Some(fun.subst_surface(ty)),
             mutable: false,
             carried: false,
         };
@@ -1327,7 +1373,7 @@ impl Lowerer {
         let requires = f
             .requires
             .iter()
-            .map(|e| self.lower_pred(e, &names, false, &mut Vec::new(), &cenv))
+            .map(|e| fun.lower_pred(e, &names, false, &mut Vec::new(), &cenv))
             .collect::<Result<Vec<_>, _>>()?;
         if let Some(ret) = &f.ret {
             cenv.push(contract_binding("result", ret));
@@ -1335,7 +1381,7 @@ impl Lowerer {
         let ensures = f
             .ensures
             .iter()
-            .map(|e| self.lower_pred(e, &names, true, &mut Vec::new(), &cenv))
+            .map(|e| fun.lower_pred(e, &names, true, &mut Vec::new(), &cenv))
             .collect::<Result<Vec<_>, _>>()?;
 
         Ok(Def {
@@ -1539,10 +1585,11 @@ impl Lowerer {
             match stmt {
                 Stmt::Let { name, ty, value } | Stmt::Var { name, ty, value } => {
                     let mutable = matches!(stmt, Stmt::Var { .. });
+                    let target_ty = ty.as_ref().map(|t| self.subst_surface(t));
                     // Best-effort surface type for the bound name (annotation
                     // first, else inferred from the value where M1 can).
-                    let vty = ty.clone().or_else(|| self.type_of_expr(value, env));
-                    let atom = if let Some(target) = ty {
+                    let vty = target_ty.clone().or_else(|| self.type_of_expr(value, env));
+                    let atom = if let Some(target) = &target_ty {
                         self.emit_atom_with_expected(value, target, env, b)?
                     } else {
                         self.emit_atom(value, env, b)?
@@ -1793,10 +1840,10 @@ impl Lowerer {
         env: &[Binding],
         b: &mut Builder,
     ) -> Result<Atom, LowerError> {
-        if let Some(elem) = list_elem_stype(expected) {
-            if let Expr::Call(callee, args) = e {
-                if let Expr::Var(name) = &**callee {
-                    if self.is_std_collection_op(name) && self.resolve_local(name, env).is_none() {
+        if let Expr::Call(callee, args) = e {
+            if let Expr::Var(name) = &**callee {
+                if self.is_std_collection_op(name) && self.resolve_local(name, env).is_none() {
+                    if let Some(elem) = list_elem_stype(expected) {
                         let alloc = args
                             .first()
                             .map(|a| self.emit_atom(a, env, b))
@@ -1810,10 +1857,27 @@ impl Lowerer {
                             return self.emit_atom(e, env, b);
                         };
                         return Ok(b.push(Core::ListNew {
-                            elem: self.lower_type(elem, &[]),
+                            elem: self.lower_type(elem, &self.active_generics),
                             alloc,
                             capacity: cap,
                         }));
+                    }
+                }
+                if self.resolve_local(name, env).is_none() {
+                    if let Some(func) =
+                        self.resolve_generic_call_with_expected(name, args, env, expected)
+                    {
+                        let eff: Vec<&Expr> = if args.is_empty() {
+                            vec![&UNIT_ARG]
+                        } else {
+                            args.iter().collect()
+                        };
+                        let mut cur = func;
+                        for arg_e in eff {
+                            let aa = self.emit_atom(arg_e, env, b)?;
+                            cur = b.push(Core::App { func: cur, arg: aa });
+                        }
+                        return Ok(cur);
                     }
                 }
             }
@@ -2372,7 +2436,12 @@ impl Lowerer {
         env: &mut Vec<Binding>,
         b: &mut Builder,
     ) -> Result<(), LowerError> {
-        let new_atom = self.emit_atom(value, env.as_slice(), b)?;
+        let target_ty = self.type_of_expr(&lvalue_to_expr(target), env.as_slice());
+        let new_atom = if let Some(target_ty) = &target_ty {
+            self.emit_atom_with_expected(value, target_ty, env.as_slice(), b)?
+        } else {
+            self.emit_atom(value, env.as_slice(), b)?
+        };
         self.assign_to(target, new_atom, env, b)
     }
 
@@ -3229,7 +3298,9 @@ impl Lowerer {
             } else if self
                 .imports
                 .get(&path[0])
-                .map(|m| m == "std.collections" && path[0] == "List")
+                .map(|m| {
+                    m == "std.collections" && matches!(path[0].as_str(), "List" | "Map" | "Set")
+                })
                 .unwrap_or(false)
             {
                 let module = self.imports.get(&path[0]).expect("checked above");
@@ -3659,6 +3730,21 @@ fn unify(pat: &SType, arg: &SType, generics: &HashSet<String>, map: &mut HashMap
         // Concrete leaves (`Named` non-generic, `Unit`, error unions) constrain
         // nothing.
         _ => {}
+    }
+}
+
+fn stype_mentions_generics(t: &SType, generics: &HashSet<String>) -> bool {
+    match t {
+        SType::Named(p) if p.len() == 1 => generics.contains(&p[0]),
+        SType::Named(_) | SType::Unit => false,
+        SType::Generic { args, .. } => args.iter().any(|a| stype_mentions_generics(a, generics)),
+        SType::Slice(e) | SType::Optional(e) => stype_mentions_generics(e, generics),
+        SType::Array { elem, .. } => stype_mentions_generics(elem, generics),
+        SType::Ref { inner, .. } => stype_mentions_generics(inner, generics),
+        SType::ErrorUnion(payload) => payload
+            .as_deref()
+            .map(|t| stype_mentions_generics(t, generics))
+            .unwrap_or(false),
     }
 }
 
