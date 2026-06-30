@@ -24,8 +24,9 @@ path = "../util"
 - `[dependencies.NAME].path` declares a local path dependency. The dependency's
   own `marv.toml` must declare `[package].name = "NAME"`. Dependencies load
   transitively and deterministically.
-- `std.*` imports still resolve through `MARV_STD` or the nearest repository
-  `std/` directory; `std` is not listed as a package dependency.
+- `std.*` imports still resolve through `MARV_STD`, the nearest repository
+  `std/` directory, or the `std/` directory packaged beside the installed
+  `marv` binary; `std` is not listed as a package dependency.
 
 Files are indexed by declared `mod` path, not by file path. Duplicate module
 declarations are reported as ambiguous imports; missing local modules are load
@@ -70,6 +71,11 @@ The CLI discovers `app/marv.toml`, loads every module under `app`'s roots plus
 the transitive local dependency packages, and lowers/checks the whole module set
 together. Without a `marv.toml`, the old fallback remains: non-`std` imports are
 searched from the entry file's directory.
+
+Application projects should not copy the `marv-lang` compiler repository. Use a
+release toolchain containing `marv`, `marv-mcp`, and `std/`; keep only
+application packages, sources, and optional `.marv/` store data in the app
+workspace.
 
 ## Lockfile Behavior
 

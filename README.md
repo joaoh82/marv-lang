@@ -56,6 +56,20 @@ What that means concretely:
 Tier-2 SMT verifier, a `z3` binary on `PATH` (`brew install z3` / `apt-get install z3`);
 without it, `verify` honestly falls back to runtime checks.
 
+For application projects, prefer a **release toolchain**: download the GitHub
+Release tarball for your platform, unpack it, and put the unpacked directory on
+`PATH`. The archive contains `marv`, `marv-mcp`, and `std/`; the CLI finds that
+sibling `std/` automatically, so app repositories do not need to copy this
+compiler repository.
+
+```text
+my-marv-app/
+  marv.toml
+  src/main.mv
+```
+
+Use the compiler repository only when developing the compiler itself:
+
 ```sh
 git clone https://github.com/joaoh82/marv-lang
 cd marv-lang
