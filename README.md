@@ -179,10 +179,10 @@ the first `std.spawn` scoped task-handle layer over explicit `Spawn` authority,
 operators (`-e`, `not e`, `&e`/`&mut e`), calls/recursion,
 `pure` + `requires`/`ensures` contracts). Local non-`std` source imports now
 lower/check/run/build as module sets, and the content store supports
-lockfile-pinned cross-module builds by hash. The remaining MARV-48
-application-language wave covers richer package metadata/query coverage,
-recursive/materialized JSON, production HTTP/server resource lifecycles, raw FFI
-operations, and deeper verification. The
+lockfile-pinned cross-module builds by hash. MARV-48's first application-language
+wave is complete; the remaining post-MARV-48 roadmap covers richer package
+metadata/query coverage, recursive/materialized JSON, production HTTP/server
+resource lifecycles, raw FFI operations, and deeper verification. The
 full backlog (surface growth → backend breadth → verification breadth →
 application runtime → AOT/LLVM → self-hosting) — with phases, ordering, and the
 dependency graph — is in

@@ -34,8 +34,8 @@ tightly and respect the invariants. Full context: [`docs/agents.md`](../../../do
 ## Invariants (do not fight these)
 
 - **No ambient authority** — power enters only through capability parameters (`Io`, `Fs`,
-  `Net`, `Clock`, `Rand`, `Alloc`); pass a function only what it needs. A function with no
-  `Net` parameter cannot reach the network.
+  `Net`, `Http`, `Clock`, `Rand`, `Alloc`, `Spawn`); pass a function only what it needs. A
+  function with no `Net`/`Http` parameter cannot reach the network or an HTTP request.
 - **One canonical form** — run `fmt`, don't argue about style.
 - **Local reasoning** — every signature is fully annotated; annotate.
 - **Determinism** — same source ⇒ same hashes/diagnostics.
@@ -44,8 +44,10 @@ tightly and respect the invariants. Full context: [`docs/agents.md`](../../../do
 
 ## What parses today
 
-`mod`/`import`, `struct`/`fn` (incl. `pure fn`), `let`/`var`, `if`/`else`, the binary
-operators, calls/recursion, field projection, and `requires`/`ensures` contracts. Enums/
-`match`, loops, `?`, generics, capabilities-from-source, and collections are roadmap — for
-those today, use a `*.core.json` snapshot (see `tests/run/*.core.json`). Don't generate
-surface that won't parse.
+`mod`/`import`, local source module sets, `struct`/`enum`/`fn`/`interface`/`impl` (including
+`pure fn`, generics, bounds, and capability interfaces), `let`/`var`, assignment, `if`/`else`,
+`match`, loops, early `return`, errors (`!T`, `?`), collection literals, string/bytes/JSON
+helpers, capability method calls from source, `unsafe fn` audit metadata, calls/recursion,
+field projection, and `requires`/`ensures` contracts. For raw FFI operations, production
+listener/resource lifecycles, recursive materialized JSON, or not-yet-supported backend forms,
+use a `*.core.json` snapshot or check `docs/roadmap.md` before generating source.

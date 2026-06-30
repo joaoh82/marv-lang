@@ -359,8 +359,10 @@ projection, and `requires`/`ensures` contracts. That is enough for the
 `mutation`, `loops`, `casts`, `hello`, `read_file`, `http_echo`, `spawn`, …), the `std/` prelude
 (`option`, `result`, `ord`, `capabilities`, `collections`, `bytes`, `json`, `http`, `spawn`), and the M4/M6 gates.
 Everything still marked **[core]**/**[design]** above is tracked in the project
-tracker. Local source imports already lower/check/run/build as module sets; the
-remaining MARV-48 application-language wave covers richer collections, collection
-semantics, recursive/materialized JSON, production listener/resource lifecycle
-safety, `linear` resource capabilities, `unsafeSites`,
-richer package metadata/query coverage, and broader verification.
+tracker. Local source imports already lower/check/run/build as module sets, and
+the MARV-48 application-language wave has landed first slices for collections,
+iteration, bytes/UTF-8, JSON, HTTP, `Spawn`, unsafe audit metadata, and generic
+ADT verification. Post-MARV-48 work covers recursive/materialized JSON,
+production listener/resource lifecycle safety, `linear` resource capabilities,
+raw FFI operations, richer package metadata/query coverage, and broader
+verification.

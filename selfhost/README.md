@@ -19,8 +19,9 @@ operations the M4 corpus performs.
 
 ## Why this pass first
 
-It is the largest piece of the compiler expressible in today's parsed subset
-(integer/boolean functions, `if`/`else`, recursion). Passes that traverse the
-AST or Core need `enum`s, generics, and pattern matching — surface the front end
-does not parse yet (`std/` documents those declarations). As the surface grows,
-more of the compiler moves here, each step differentially tested against Stage 0.
+It was the largest piece of the compiler expressible in the early parsed subset
+(integer/boolean functions, `if`/`else`, recursion), and it remains a compact
+oracle-friendly kernel. The surface now includes enums, generics, pattern matching,
+collections, capabilities, and more application-language pieces, so later Stage-1
+work can move larger AST/Core passes into this directory. Each port should stay
+differentially tested against Stage 0.
