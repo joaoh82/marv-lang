@@ -7,3 +7,9 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
+marv-core = { path = "../marv-core" }
+marv-types = { path = "../marv-types" }
+
+[dev-dependencies]
+marv-syntax = { path = "../marv-syntax" }
+marv-interp = { path = "../marv-interp" }

@@ -79,6 +79,8 @@ pub struct CapSpec {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OpSpec {
     #[serde(default)]
+    pub consumes_receiver: bool,
+    #[serde(default)]
     pub params: Vec<Type>,
     #[serde(default = "unit_type")]
     pub ret: Type,
@@ -137,6 +139,7 @@ impl WorldSpec {
                 .ops
                 .iter()
                 .map(|o| OpSig {
+                    consumes_receiver: o.consumes_receiver,
                     params: o.params.clone(),
                     ret: o.ret.clone(),
                     errors: o.errors.iter().map(|e| symbol_hash(e)).collect(),

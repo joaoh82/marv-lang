@@ -221,19 +221,22 @@ fn read_config(fs: Fs, path: str) -> !Config { … }   // can do FS I/O, nothing
 pure fn clamp(x: i32, lo: i32, hi: i32) -> i32 { … }  // no capabilities or growable allocation
 ```
 
-A **capability is a non-generic `interface`** (`std/capabilities.mv`). A method call on a value
-of such a type lowers to `Core::Perform`: `io.fs()` **narrows** the root to an `Fs` value (you
+A **capability is a non-generic `interface`** (`std/capabilities.mv`). A `linear interface`
+is a capability whose values must also be consumed exactly once, used for resource handles
+such as `File`, `Listener`, and `Conn`. A method call on a value
+of a capability type lowers to `Core::Perform`: `io.fs()` **narrows** the root to an `Fs` value (you
 may narrow, never construct — capabilities are **unforgeable**), and `fs.read(path)` /
 `out.write(text)` **perform** an operation. The effect row is inferred from those sites and
 checked against the function's capability parameters, where a held capability authorizes its
 **narrowing closure** (holding `Io` authorizes `Fs`/`Net`/`Http`/… ). A `pure fn` — or a function that
 reaches a capability it never received — that performs is `MissingCapability` (E0110). Standard
 capabilities: `Io` (root) and narrower `Fs`, `Net`, `Http`, `Spawn`, `Clock`, `Rand`, `Alloc` (see
-[`std/`](../std)). `Http` represents one host-provided server request/response exchange;
-without it a handler cannot read request data or send a response. On WebAssembly a capability
+[`std/`](../std)). `Http` represents one host-provided server request/response exchange, and
+`Listener.accept_http()` can produce that exchange from explicit `Net.listen` authority;
+without those capabilities a handler cannot bind, read request data, or send a response. On WebAssembly a capability
 is a host import the page chooses to provide — see [platform support](platform-support.md).
-(Generic interfaces like `Ord[T]` are bounded polymorphism, not capabilities; production
-listener/resource lifecycle safety is roadmap.)
+(Generic interfaces like `Ord[T]` are bounded polymorphism, not capabilities; host-backed
+multi-request HTTP serving remains roadmap.)
 
 ## 6. Errors: inferred sets **[impl]**
 
@@ -313,8 +316,10 @@ definitions into the store. See [store.md](store.md).
 
 ## 9. Compilation targets
 
-Native via **Cranelift** (JIT today; AOT + an LLVM release backend are roadmap) and
-**WebAssembly** (capabilities as host imports; component/WIT packaging is roadmap). The
+Native via **Cranelift** (JIT plus AOT object/executable output), a first
+**LLVM** release slice (`native-llvm`, optimized through `clang`), and
+**WebAssembly** (`wasm-component` with WIT packaging, or `wasm-core` for the core
+module substrate; capabilities remain explicit host imports). The
 tree-walking **interpreter** is the reference semantics oracle every backend is differentially
 tested against. See [run-and-codegen.md](run-and-codegen.md) and [platform-support.md](platform-support.md).
 
@@ -330,21 +335,31 @@ The interpreter records each `Spawn.start` as a host effect and may execute this
 sequentially. Generic task result handles, channels/message passing, and true parallel host
 scheduling remain future work.
 
-## 11. The escape hatch **[first slice impl]**
+## 11. The escape hatch **[impl, staged runtime]**
 
 `unsafe` is the explicit, auditable boundary (FFI, raw pointers, custom synchronization).
-The first slice supports `unsafe fn` metadata: it is visible in the signature, requires a
-preceding `/// SAFETY:` justification comment, formats canonically, and is queryable through
-`marv/unsafeSites`. The metadata is intentionally outside Core identity, so marking a
-function unsafe changes the audit surface without changing its content hash. Raw pointer/FFI
-operations themselves remain staged follow-ups.
+`unsafe fn` metadata is visible in the signature, requires a preceding `/// SAFETY:`
+justification comment, formats canonically, and is queryable through `marv/unsafeSites`.
+`unsafe extern fn name(args) -> ret` declares a host FFI symbol with no marv body; it must
+also carry a `SAFETY:` justification, cannot be `pure`, and cannot be called directly from a
+safe function. Put raw host calls inside a small audited `unsafe fn` wrapper and expose only
+the wrapper shape you are prepared to justify. The metadata is intentionally outside Core
+identity, so marking a function unsafe or documenting an extern boundary changes the audit
+surface without changing a definition's content hash.
+
+The interpreter and native/WASM backends do not link or execute host FFI symbols yet. A
+program can parse, format, check, query, and store-audit these declarations; attempting to run
+or build a definition that crosses the extern boundary reports unsupported behavior rather
+than fabricating host semantics. Raw pointers and ABI-rich value handles remain staged
+follow-ups.
 
 ---
 
 ## What you can actually write today
 
 The parser accepts: `mod`/`import`, `struct`/`enum`/`fn`/`interface`/`impl` (incl. `pure fn`,
-generic parameter lists with bounds, and capability interfaces whose method calls `perform`),
+`unsafe fn`, `unsafe extern fn`, generic parameter lists with bounds, and capability interfaces
+whose method calls `perform`),
 `let`/`var` bindings, assignment (`x = e`, `p.x = e`), `if`/`else(-if)`, `match`
 (constructor + `_` patterns, payload binding), enum constructor application, struct literals
 (`Name { f: e, … }`), array literals (`[e0, …]`), index reads/stores (`a[i]`, `a[i] = e`),
@@ -359,10 +374,10 @@ projection, and `requires`/`ensures` contracts. That is enough for the
 `mutation`, `loops`, `casts`, `hello`, `read_file`, `http_echo`, `spawn`, …), the `std/` prelude
 (`option`, `result`, `ord`, `capabilities`, `collections`, `bytes`, `json`, `http`, `spawn`), and the M4/M6 gates.
 Everything still marked **[core]**/**[design]** above is tracked in the project
-tracker. Local source imports already lower/check/run/build as module sets, and
+tracker. Local source imports already lower/check/run/build as module sets,
+`marv.toml` packages add deterministic source roots and local path dependencies, and
 the MARV-48 application-language wave has landed first slices for collections,
 iteration, bytes/UTF-8, JSON, HTTP, `Spawn`, unsafe audit metadata, and generic
-ADT verification. Post-MARV-48 work covers recursive/materialized JSON,
-production listener/resource lifecycle safety, `linear` resource capabilities,
-raw FFI operations, richer package metadata/query coverage, and broader
+ADT verification. Post-MARV-48 work covers production HTTP listener/router runtime,
+raw FFI operations, WASM component packaging, broader LLVM release coverage, self-hosting slices, and broader
 verification.

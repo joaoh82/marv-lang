@@ -17,7 +17,9 @@ marv-types = { path = "../marv-types" }
 marv-db = { path = "../marv-db" }
 marv-interp = { path = "../marv-interp" }
 marv-codegen-cl = { path = "../marv-codegen-cl" }
+marv-codegen-llvm = { path = "../marv-codegen-llvm" }
 marv-codegen-wasm = { path = "../marv-codegen-wasm" }
 marv-verify = { path = "../marv-verify" }
 marv-store = { path = "../marv-store" }
+marv-package = { path = "../marv-package" }
 serde_json.workspace = true

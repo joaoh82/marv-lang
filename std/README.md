@@ -13,7 +13,7 @@ links against once a build references them by content hash (`spec/01` §8).
 | [`collections.mv`](collections.mv) | `List[T]`, `Map[K, V]`, and `Set[T]` — growable collections allocated through explicit `Alloc`; string-compatible map/set ops plus scalar `i64` hash-backed ops run on interpreter, Cranelift, and WASM. |
 | [`str.mv`](str.mv) | `from_chars(alloc, chars)` — explicit-`Alloc` string building from `List[char]`; lowered to a Core string primitive. |
 | [`bytes.mv`](bytes.mv) | Byte-slice helpers plus source-level UTF-8 encode/decode between `[]u8`, `List[u8]`, and `str`. |
-| [`json.mv`](json.mv) | JSON scalar and source-backed flat-object parsing/serialization with typed `JsonError`. |
+| [`json.mv`](json.mv) | JSON scalar, source-backed flat-object, and recursive materialized DOM parsing/serialization with typed `JsonError`. |
 
 ## Status
 
@@ -55,17 +55,21 @@ typed errors. It provides byte length/index/equality helpers, `List[u8]` append,
 decode from `[]u8` to `str`, and UTF-8 encode from `str` to `List[u8]`; allocation remains
 explicit through `Alloc`.
 
-`json.mv` is ordinary marv source layered on strings, scalar enums, typed errors, and explicit
-`Alloc` string building. This first slice parses JSON scalars and validates flat objects whose
-field values are scalars, exposes field lookup over the validated source text, and serializes
-scalars plus validated objects. Recursive arrays/materialized object maps stay with the later
-recursive-ADT and hash-map work.
+`json.mv` is ordinary marv source layered on strings, recursive ADTs, typed errors, lists,
+and explicit `Alloc` string building. The MARV-55 scalar/source-backed flat-object API stays
+available for lightweight config reads, while MARV-66 adds a materialized recursive `Json`
+DOM with list-backed arrays/objects, typed lookup/extraction helpers, and deterministic
+serialization back to `str` or `List[u8]`. Recursive parse/error paths are Tier-1/runtime
+covered; serializer-safe construction paths are pinned across interpreter, Cranelift, and WASM.
 
 `http.mv` is the first server-runtime std layer. A host grants one `Http`
-capability per request; low-level operations read the method/path/body text and
-send a response, while user code can work with normal `Request` and `Response`
-structs through helper functions. Listener loops, raw byte streaming, and exact
-close-once lifecycle safety stay tied to follow-up linear-resource work.
+capability per request, or a `Net`-authorized `Listener` can accept one with
+`accept_http`; low-level operations read the method/path/body text and send a
+response, while user code can work with normal `Request` and `Response` structs
+through helper functions. Multi-request serve loops, raw byte streaming, and OS
+socket scheduling stay host/runtime follow-ups; `File`, `Listener`, and `Conn`
+close-once lifecycle safety is represented in `capabilities.mv` with
+`linear interface` resource capabilities.
 
 `spawn.mv` is the first structured-concurrency std slice. `Spawn` is capability-gated in
 `capabilities.mv`; `spawn_i64` performs `Spawn.start` and returns a `linear TaskI64`, and

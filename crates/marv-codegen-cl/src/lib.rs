@@ -59,6 +59,7 @@ use cranelift::prelude::{
 };
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{default_libcall_names, FuncId, Linkage, Module, ModuleError};
+use cranelift_object::{ObjectBuilder, ObjectModule};
 
 use marv_core::ir::*;
 use marv_core::symbol_hash;
@@ -210,6 +211,25 @@ pub struct JitProgram {
     names: HashMap<String, Hash>,
 }
 
+/// A native object emitted through Cranelift's object backend.
+///
+/// The object contains the entry's reachable marv functions and undefined
+/// references to the small runtime hooks (`marv_rt_alloc`,
+/// `marv_rt_heap_mark`, `marv_rt_heap_reset`, and optionally
+/// `marv_rt_bounds_fail`) that an embedder or linked executable must provide.
+pub struct AotObject {
+    pub bytes: Vec<u8>,
+    pub entry_symbol: String,
+    pub entry_arity: usize,
+}
+
+struct RuntimeIds {
+    alloc_id: FuncId,
+    heap_mark_id: FuncId,
+    heap_reset_id: FuncId,
+    bounds_fail_id: FuncId,
+}
+
 /// Compile a set of definitions (named in `module_path`'s scope) to native code
 /// with Cranelift, JIT-linking them so calls between them resolve.
 ///
@@ -266,6 +286,19 @@ pub fn compile_hashed_reachable(
     compile_hashed_inner(defs, aliases, world, opts, Some(entry))
 }
 
+/// Emit a deterministic native object for definitions whose globals are already
+/// rewritten to content dag hashes. The entry is resolved with the same rules as
+/// [`compile_hashed_reachable`].
+pub fn emit_hashed_object_reachable(
+    defs: &[(Hash, String, Def)],
+    aliases: &[(String, Hash)],
+    world: &World,
+    opts: &Options,
+    entry: &str,
+) -> Result<AotObject, CodegenError> {
+    compile_hashed_object_inner(defs, aliases, world, opts, Some(entry))
+}
+
 fn compile_inner(
     module_path: &str,
     defs: &[(String, Def)],
@@ -278,28 +311,7 @@ fn compile_inner(
     let mask = entry.map(|e| marv_core::reach::reachable_mask(module_path, defs, e));
 
     let mut module = make_module()?;
-
-    // The host allocator is an import every boxing site can call.
-    let mut alloc_sig = module.make_signature();
-    alloc_sig.params.push(AbiParam::new(WORD));
-    alloc_sig.returns.push(AbiParam::new(WORD));
-    let alloc_id = module.declare_function("marv_rt_alloc", Linkage::Import, &alloc_sig)?;
-
-    // Arena mark/reset hooks for reclaiming compiler-managed aggregate boxes.
-    let mut mark_sig = module.make_signature();
-    mark_sig.returns.push(AbiParam::new(WORD));
-    let heap_mark_id = module.declare_function("marv_rt_heap_mark", Linkage::Import, &mark_sig)?;
-    let mut reset_sig = module.make_signature();
-    reset_sig.params.push(AbiParam::new(WORD));
-    let heap_reset_id =
-        module.declare_function("marv_rt_heap_reset", Linkage::Import, &reset_sig)?;
-
-    // The host abort hook a failed Tier-1 bounds check calls (debug builds).
-    let mut bounds_sig = module.make_signature();
-    bounds_sig.params.push(AbiParam::new(WORD));
-    bounds_sig.params.push(AbiParam::new(WORD));
-    let bounds_fail_id =
-        module.declare_function("marv_rt_bounds_fail", Linkage::Import, &bounds_sig)?;
+    let runtime = declare_runtime(&mut module)?;
 
     // Pass 1: declare every function (signature only) so that bodies compiled in
     // pass 2 can reference any callee — including not-yet-compiled and recursive
@@ -359,10 +371,7 @@ fn compile_inner(
             &mut module,
             &metas,
             world,
-            alloc_id,
-            heap_mark_id,
-            heap_reset_id,
-            bounds_fail_id,
+            &runtime,
             opts,
             &mut ctx,
             &mut fb_ctx,
@@ -393,25 +402,7 @@ fn compile_hashed_inner(
     let mask = entry.map(|e| hashed_reachable_mask(defs, aliases, e));
 
     let mut module = make_module()?;
-
-    let mut alloc_sig = module.make_signature();
-    alloc_sig.params.push(AbiParam::new(WORD));
-    alloc_sig.returns.push(AbiParam::new(WORD));
-    let alloc_id = module.declare_function("marv_rt_alloc", Linkage::Import, &alloc_sig)?;
-
-    let mut mark_sig = module.make_signature();
-    mark_sig.returns.push(AbiParam::new(WORD));
-    let heap_mark_id = module.declare_function("marv_rt_heap_mark", Linkage::Import, &mark_sig)?;
-    let mut reset_sig = module.make_signature();
-    reset_sig.params.push(AbiParam::new(WORD));
-    let heap_reset_id =
-        module.declare_function("marv_rt_heap_reset", Linkage::Import, &reset_sig)?;
-
-    let mut bounds_sig = module.make_signature();
-    bounds_sig.params.push(AbiParam::new(WORD));
-    bounds_sig.params.push(AbiParam::new(WORD));
-    let bounds_fail_id =
-        module.declare_function("marv_rt_bounds_fail", Linkage::Import, &bounds_sig)?;
+    let runtime = declare_runtime(&mut module)?;
 
     let mut metas: HashMap<Hash, FnMeta> = HashMap::new();
     let mut names: HashMap<String, Hash> = HashMap::new();
@@ -463,10 +454,7 @@ fn compile_hashed_inner(
             &mut module,
             &metas,
             world,
-            alloc_id,
-            heap_mark_id,
-            heap_reset_id,
-            bounds_fail_id,
+            &runtime,
             opts,
             &mut ctx,
             &mut fb_ctx,
@@ -485,6 +473,132 @@ fn compile_hashed_inner(
         metas,
         names,
     })
+}
+
+fn compile_hashed_object_inner(
+    defs: &[(Hash, String, Def)],
+    aliases: &[(String, Hash)],
+    world: &World,
+    opts: &Options,
+    entry: Option<&str>,
+) -> Result<AotObject, CodegenError> {
+    let mask = entry.map(|e| hashed_reachable_mask(defs, aliases, e));
+
+    let mut module = make_object_module()?;
+    let runtime = declare_runtime(&mut module)?;
+
+    let mut metas: HashMap<Hash, FnMeta> = HashMap::new();
+    let mut names: HashMap<String, Hash> = HashMap::new();
+    let mut order: Vec<(Hash, usize)> = Vec::new();
+    for (idx, (h, name, def)) in defs.iter().enumerate() {
+        if def.kind != DefKind::Fn {
+            continue;
+        }
+        if mask.as_ref().is_some_and(|m| !m[idx]) {
+            continue;
+        }
+        if def.ty.is_polymorphic() {
+            continue;
+        }
+        let param_tys = peel_param_types(&def.ty);
+        let param_is_unit: Vec<bool> = param_tys.iter().map(|t| is_no_slot(t, world)).collect();
+        let arity = param_tys.len();
+
+        let mut sig = module.make_signature();
+        for _ in 0..param_is_unit.iter().filter(|u| !**u).count() {
+            sig.params.push(AbiParam::new(WORD));
+        }
+        sig.returns.push(AbiParam::new(WORD));
+        let symbol = hashed_symbol_name(h);
+        let id = module.declare_function(&symbol, Linkage::Export, &sig)?;
+
+        metas.insert(
+            *h,
+            FnMeta {
+                id,
+                arity,
+                param_is_unit,
+                param_tys,
+            },
+        );
+        names.insert(name.clone(), *h);
+        names.insert(h.to_b3(), *h);
+        order.push((*h, idx));
+    }
+    for (alias, h) in aliases {
+        names.insert(alias.clone(), *h);
+    }
+
+    let mut ctx = module.make_context();
+    let mut fb_ctx = FunctionBuilderContext::new();
+    for (h, idx) in &order {
+        let (_, _, def) = &defs[*idx];
+        compile_fn(
+            &mut module,
+            &metas,
+            world,
+            &runtime,
+            opts,
+            &mut ctx,
+            &mut fb_ctx,
+            *h,
+            def,
+        )?;
+        module.clear_context(&mut ctx);
+    }
+
+    let entry_hash = resolve_entry_from_maps(&metas, &names, entry.unwrap_or(""))?;
+    let entry_arity = metas[&entry_hash].abi_param_count();
+    let entry_symbol = hashed_symbol_name(&entry_hash);
+    let mut product = module.finish();
+    patch_object_metadata(&mut product);
+    let bytes = product
+        .emit()
+        .map_err(|e| CodegenError::Backend(e.to_string()))?;
+    Ok(AotObject {
+        bytes,
+        entry_symbol,
+        entry_arity,
+    })
+}
+
+fn patch_object_metadata(product: &mut cranelift_object::ObjectProduct) {
+    #[cfg(target_os = "macos")]
+    {
+        if product.object.format() == cranelift_object::object::BinaryFormat::MachO {
+            let mut build = cranelift_object::object::write::MachOBuildVersion::default();
+            build.platform = cranelift_object::object::macho::PLATFORM_MACOS;
+            build.minos = 0;
+            build.sdk = 0;
+            product.object.set_macho_build_version(build);
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = product;
+    }
+}
+
+fn resolve_entry_from_maps(
+    metas: &HashMap<Hash, FnMeta>,
+    names: &HashMap<String, Hash>,
+    entry: &str,
+) -> Result<Hash, CodegenError> {
+    if !entry.is_empty() {
+        return names
+            .get(entry)
+            .copied()
+            .filter(|h| metas.contains_key(h))
+            .ok_or_else(|| CodegenError::NoSuchEntry(entry.to_string()));
+    }
+    if let Some(h) = names.get("main").copied().filter(|h| metas.contains_key(h)) {
+        return Ok(h);
+    }
+    let all: Vec<Hash> = metas.keys().copied().collect();
+    match all.as_slice() {
+        [h] => Ok(*h),
+        _ => Err(CodegenError::NoSuchEntry("main".to_string())),
+    }
 }
 
 fn hashed_symbol_name(h: &Hash) -> String {
@@ -661,16 +775,59 @@ fn make_module() -> Result<JITModule, CodegenError> {
     Ok(JITModule::new(builder))
 }
 
+fn make_object_module() -> Result<ObjectModule, CodegenError> {
+    let mut flags = settings::builder();
+    flags
+        .set("use_colocated_libcalls", "false")
+        .map_err(|e| CodegenError::Backend(e.to_string()))?;
+    flags
+        .set("is_pic", "true")
+        .map_err(|e| CodegenError::Backend(e.to_string()))?;
+    let isa_builder = cranelift_native::builder()
+        .map_err(|m| CodegenError::Backend(format!("host machine is not supported: {m}")))?;
+    let isa = isa_builder
+        .finish(settings::Flags::new(flags))
+        .map_err(|e| CodegenError::Backend(e.to_string()))?;
+    let builder = ObjectBuilder::new(isa, "marv", default_libcall_names())?;
+    Ok(ObjectModule::new(builder))
+}
+
+fn declare_runtime<M: Module>(module: &mut M) -> Result<RuntimeIds, CodegenError> {
+    let mut alloc_sig = module.make_signature();
+    alloc_sig.params.push(AbiParam::new(WORD));
+    alloc_sig.returns.push(AbiParam::new(WORD));
+    let alloc_id = module.declare_function("marv_rt_alloc", Linkage::Import, &alloc_sig)?;
+
+    let mut mark_sig = module.make_signature();
+    mark_sig.returns.push(AbiParam::new(WORD));
+    let heap_mark_id = module.declare_function("marv_rt_heap_mark", Linkage::Import, &mark_sig)?;
+
+    let mut reset_sig = module.make_signature();
+    reset_sig.params.push(AbiParam::new(WORD));
+    let heap_reset_id =
+        module.declare_function("marv_rt_heap_reset", Linkage::Import, &reset_sig)?;
+
+    let mut bounds_sig = module.make_signature();
+    bounds_sig.params.push(AbiParam::new(WORD));
+    bounds_sig.params.push(AbiParam::new(WORD));
+    let bounds_fail_id =
+        module.declare_function("marv_rt_bounds_fail", Linkage::Import, &bounds_sig)?;
+
+    Ok(RuntimeIds {
+        alloc_id,
+        heap_mark_id,
+        heap_reset_id,
+        bounds_fail_id,
+    })
+}
+
 /// Compile one function definition into the module.
 #[allow(clippy::too_many_arguments)]
-fn compile_fn(
-    module: &mut JITModule,
+fn compile_fn<M: Module>(
+    module: &mut M,
     metas: &HashMap<Hash, FnMeta>,
     world: &World,
-    alloc_id: FuncId,
-    heap_mark_id: FuncId,
-    heap_reset_id: FuncId,
-    bounds_fail_id: FuncId,
+    runtime: &RuntimeIds,
     opts: &Options,
     ctx: &mut cranelift::codegen::Context,
     fb_ctx: &mut FunctionBuilderContext,
@@ -722,13 +879,13 @@ fn compile_fn(
                 module,
                 metas,
                 world,
-                alloc_id,
+                alloc_id: runtime.alloc_id,
                 alloc_ref: None,
-                heap_mark_id,
+                heap_mark_id: runtime.heap_mark_id,
                 heap_mark_ref: None,
-                heap_reset_id,
+                heap_reset_id: runtime.heap_reset_id,
                 heap_reset_ref: None,
-                bounds_fail_id,
+                bounds_fail_id: runtime.bounds_fail_id,
                 bounds_fail_ref: None,
                 bounds_checks: opts.bounds_checks,
                 builder: &mut builder,
@@ -786,8 +943,8 @@ enum LoopBody {
 }
 
 /// The per-function translation state.
-struct Trans<'a, 'b> {
-    module: &'a mut JITModule,
+struct Trans<'a, 'b, M: Module> {
+    module: &'a mut M,
     metas: &'a HashMap<Hash, FnMeta>,
     world: &'a World,
     alloc_id: FuncId,
@@ -812,7 +969,7 @@ struct Trans<'a, 'b> {
     tys: Vec<Option<Type>>,
 }
 
-impl Trans<'_, '_> {
+impl<M: Module> Trans<'_, '_, M> {
     fn eval(&mut self, c: &Core) -> Result<Slot, CodegenError> {
         match c {
             Core::Atom(a) => self.eval_atom(a),

@@ -15,7 +15,7 @@ marv <command> [args]
 |---------|--------|-------------|
 | `fmt`    | **working** (M0+, parse-and-reprint for the implemented surface) | Canonicalize marv source. |
 | `check`  | **working** (M2) | Type / effect / capability / error-set / reference / linearity checking. |
-| `build`  | **working** (M4 `native-cranelift`, M5 `wasm-component`, MARV-14 pinned store) | Compile a target: Cranelift JIT or a WebAssembly module. |
+| `build`  | **working** (M4 `native-cranelift`, M5 `wasm-core`, MARV-14 pinned store, MARV-68 native AOT, MARV-69 LLVM first slice, MARV-70 `wasm-component`) | Compile a target: Cranelift JIT/AOT, LLVM/clang native release-slice output, a WebAssembly component+WIT package, or a core WebAssembly module. |
 | `run`    | **working** (M4, MARV-14 pinned store) | Interpret an entry point with an explicit capability grant set. |
 | `resolve-impl` | **working** (MARV-5) | Report each generic instantiation and which coherent `impl` its bounded type arguments select. |
 | `verify` | **working** (M6, Tier 2) | Discharge `requires`/`ensures` contracts via SMT. |
@@ -40,17 +40,22 @@ Missing `std` modules remain opaque so not-yet-surfaced builtins such as
 `std.math` can be imported without forcing a source file.
 
 ```text
-pkg/
-  main.mv   # mod app;  import math (double)
-  math.mv   # mod math; pure fn double(...)
+workspace/
+  app/
+    marv.toml
+    src/main.mv   # mod app.main; import util.math (double)
+  util/
+    marv.toml
+    src/math.mv   # mod util.math; pure fn double(...)
 ```
 
-`marv check pkg/main.mv`, `marv run pkg/main.mv`, `marv build --run pkg/main.mv`,
-and `marv commit pkg/main.mv` all operate on the discovered module set. Imported
-definitions are frozen under their own qualified names (`math.double`), while the
-entry file keeps normal bare-entry behavior (`main`, or `--entry app.main`).
-`build --store` / `run --store` then use the content store for pinned hash
-linking.
+`marv check app/src/main.mv`, `marv run app/src/main.mv`, `marv build --run
+app/src/main.mv`, and `marv commit --store app/.marv app/src/main.mv` all operate
+on the discovered package graph. Imported definitions are frozen under their own
+qualified names (`util.math.double`), while the entry file keeps normal
+bare-entry behavior (`main`, or `--entry app.main.main`). `build --store` /
+`run --store` then use the content store for pinned hash linking. See
+[`packages.md`](packages.md) for the manifest format and bootstrap path.
 
 ## `marv fmt`
 
@@ -148,7 +153,7 @@ marv run examples/hello.mv                              # refused: capability `I
 ## `marv build`
 
 ```
-marv build [--target T] [--run] [--release] [--store DIR] [--out PATH] [--entry NAME] <file> [args...]
+marv build [--target T] [--run] [--release] [--store DIR] [--emit object|exe] [--out PATH] [--entry NAME] <file> [args...]
 ```
 
 Compiles with the selected backend. Like `run`, it first runs `check` and
@@ -174,10 +179,16 @@ The entry resolves as for `run`: `--entry NAME` (bare or qualified), else
 `commit`/audit flows always operate on every discovered definition; pruning is a
 `build` behavior only.
 
-- **`--target`** — `native-cranelift` (default) or `wasm-component`. LLVM is a
-  later milestone. Unknown targets are rejected.
+- **`--target`** — `native-cranelift` (default), `native-llvm`,
+  `wasm-component`, or `wasm-core`. Unknown targets are rejected. `wasm` remains
+  an alias for `wasm-core`.
 - **`--run`** *(native only)* — after compiling, JIT-executes the entry point and
-  prints its integer result. Without it, `build` reports success and the arity.
+  prints its integer result. It cannot be combined with native AOT output flags.
+  Without `--run`, `--out`, or `--emit`, `build` reports success and the arity.
+- **`--emit object|exe`** *(native only)* — `object` writes the deterministic
+  relocatable object for the entry's reachable closure; `exe` links that object
+  with the small native runtime wrapper. For native builds, `--out` without
+  `--emit` means `--emit exe`.
 - **`--release`** — omit the Tier-1 debug checks from the compiled artifact.
   Today that is the runtime **bounds check** (MARV-34): debug builds (the
   default) abort on an array/slice subscript outside `0..len` — Cranelift with a
@@ -185,39 +196,98 @@ The entry resolves as for `run`: `--entry NAME` (bare or qualified), else
   builds emit the unchecked pre-MARV-34 code. The interpreter (`marv run`) is
   the debug runner and always checks. See
   [run-and-codegen.md](run-and-codegen.md).
-- **`--out PATH`** *(wasm only)* — where to write the `.wasm` module (default
-  `<file>.wasm`).
+- **`--out PATH`** — where to write the artifact. Defaults are `<file>` for a
+  native executable, `<file>.o` for a native object, and `<file>.wasm` for wasm.
 - **`--store DIR`** — resolve known imports through `DIR/lockfile.json`, fetch
   their transitive closure from `DIR/blobs/b3/`, and compile Core whose calls
-  are keyed by pinned dag hashes. Missing blobs are hard errors.
+  are keyed by pinned dag hashes. Missing blobs are hard errors. For packages,
+  use the same store directory passed to `marv commit`; the source package is
+  still parsed/checked before edges are rewritten to pinned hashes.
 - **`--entry`** / **`[args...]`** — as for `run` (integer arguments).
 
 ### `--target native-cranelift`
 
-Cranelift JIT (`marv-codegen-cl`).
+Cranelift (`marv-codegen-cl`) has two modes:
+
+- **JIT**: `--run` executes the entry in-process and prints its integer result.
+- **AOT**: `--emit object` writes a relocatable object, and `--out` /
+  `--emit exe` links a host executable that can run without `marv`.
+
+The object exports content-hashed marv symbols and imports the small runtime ABI
+(`marv_rt_alloc`, `marv_rt_heap_mark`, `marv_rt_heap_reset`, and, for debug
+bounds checks, `marv_rt_bounds_fail`). The CLI executable path links those hooks
+with a generated C wrapper. Today that wrapper supports entries with up to four
+integer value arguments and prints the integer result; richer host integration
+for capabilities stays with the interpreter/WASM host story for now.
 
 ```sh
 marv build examples/factorial.mv                              # compiles, reports success
 marv build --run examples/factorial.mv --entry factorial 6    # prints 720
+marv build examples/factorial.mv --entry factorial --out factorial
+./factorial 6                                                  # prints 720
+marv build --emit object examples/factorial.mv --entry factorial -o factorial.o
 ```
+
+If the reachable closure needs a construct the backend cannot lower, such as a
+capability `perform`, native AOT fails with the same clear backend error as the
+JIT path and does not leave a partial artifact.
+
+### `--target native-llvm`
+
+`native-llvm` emits deterministic textual LLVM IR for the entry's reachable Core
+closure, then uses the host `clang` driver to optimize, run, or link it. It is a
+MARV-69 release backend slice, not a capability-hosted native runtime: scalar
+arithmetic/casts, calls/recursion, `if`/`match`, `while`, early `return`, boxed
+structs/enums, arrays, runtime-length slice element updates, `List[T]` runtime
+operations, string concat/equality/slice/from_chars, iterator loops, and the
+current bytes/UTF-8, JSON serializer-safe, map/set, and app corpus paths are
+covered. Capability `perform`, `raise`, and unsafe/resource host integration
+still report honest `unsupported` errors when reachable.
+
+```sh
+marv build --target native-llvm --run examples/factorial.mv --entry factorial 6
+marv build --target native-llvm examples/factorial.mv --entry factorial --out factorial-llvm
+./factorial-llvm 6
+```
+
+`--out` links an executable. Without `--run` or `--out`, the target checks and
+compiles the reachable closure and reports the entry arity. `--emit` is not
+defined for `native-llvm` yet.
 
 ### `--target wasm-component`
 
-Emits a WebAssembly module (`marv-codegen-wasm`) and reports its **capability
-manifest** — the host imports it requires. A pure module imports nothing; a
-module that `perform`s a capability imports one function per operation
-(`spec/01` §9). The host (a wasmtime embedding or a browser page) grants a
-capability by supplying that import, and withholds it by not.
+Emits a WebAssembly **component** (`marv-codegen-wasm`) and a deterministic WIT
+sidecar next to it (`out.wasm` → `out.wit`). The component embeds the existing
+core module, lowers typed component imports into the core capability imports,
+and lifts reachable core exports back out as component functions. It also
+reports its **capability manifest** — the host imports it requires. A pure
+component imports nothing; a module that `perform`s a capability imports one
+typed function per operation (`spec/01` §9). The host grants a capability by
+supplying that import, and withholds it by not.
 
 ```sh
 marv build --target wasm-component examples/factorial.mv -o factorial.wasm
-#   → wrote factorial.wasm … capabilities required: none (pure — imports nothing)
+#   → wrote factorial.wasm … WIT: factorial.wit
+#   → capabilities required: none (pure — imports nothing)
 marv build --target wasm-component web/fetcher.core.json -o fetcher.wasm
 #   → capabilities required (host imports): Net::op0
 ```
 
-(Today the artifact is a core wasm module — the component model's substrate —
-with capabilities as host imports; full component/WIT packaging is a later step.)
+The current component ABI maps Marv scalar/boolean/string-handle values to
+one-word `s64` component parameters/results. Aggregates and strings still live
+inside the embedded core module's linear-memory layout; richer named
+component-model records/resources are staged follow-ups.
+
+### `--target wasm-core`
+
+Emits the core WebAssembly module substrate directly. This is still the artifact
+used by the wasmtime differential tests and the dependency-free browser demo,
+where `WebAssembly.Module.imports` inspects capability imports directly.
+
+```sh
+marv build --target wasm-core examples/factorial.mv -o factorial.wasm
+marv build --target wasm-core web/fetcher.core.json -o fetcher.wasm
+```
 
 All three backends — interpreter, Cranelift, and WASM — are differentially tested
 for agreement on a corpus under [`../tests/run/`](../tests/run); the WASM sandbox
@@ -276,8 +346,9 @@ and how a counterexample is produced.
 marv commit [--store DIR] <file>
 ```
 
-Checks the file, then freezes its definitions into the content-addressed store
-(default `.marv/`), rebinds their names in the lockfile, and prints the delta —
+Checks the file, then freezes its discovered source module/package graph into
+the content-addressed store (default `.marv/`), rebinds names in the lockfile,
+and prints the delta —
 each definition marked **new** (frozen & reviewed) or **already in store /
 already reviewed**, plus any names **rebound** to a new hash. Identity is the
 content (dag) hash, so re-committing the same source is idempotent and renames
@@ -286,6 +357,13 @@ change no hashes:
 ```sh
 marv commit examples/clamp.mv          # + math.clamp  b3:d94f…  (new — frozen & reviewed)
 marv commit examples/clamp.mv          # = math.clamp  b3:d94f…  (already reviewed)
+```
+
+For a package, prefer an explicit package-local store:
+
+```sh
+marv commit --store app/.marv app/src/main.mv
+marv build --store app/.marv --run app/src/main.mv
 ```
 
 See [`store.md`](store.md) for the dag-hash / Merkle-DAG scheme, free renames,
@@ -299,10 +377,10 @@ marv store audit [--store DIR]
 ```
 
 Prints every stored blob with its hash, last-seen name, reviewed flag, lockfile
-reachability, dependency count, and unsafe-site count. `unsafe fn` metadata is
-source-level audit data outside Core identity; committed unsafe definitions
-therefore show a nonzero unsafe-site count even when their Core body dedups with
-an already-reviewed safe definition.
+reachability, dependency count, and unsafe-site count. `unsafe fn` and
+`unsafe extern fn` metadata is source-level audit data outside Core identity;
+committed unsafe definitions therefore show a nonzero unsafe-site count even
+when their Core body dedups with an already-reviewed safe definition.
 
 ## `marv store gc`
 

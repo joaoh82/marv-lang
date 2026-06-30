@@ -37,9 +37,9 @@ Then:
 ## Regenerating the `.wasm` files
 
 ```sh
-cargo run --bin marv -- build --target wasm-component examples/factorial.mv  -o web/factorial.wasm
-cargo run --bin marv -- build --target wasm-component examples/arithmetic.mv -o web/arithmetic.wasm
-cargo run --bin marv -- build --target wasm-component web/fetcher.core.json  -o web/fetcher.wasm
+cargo run --bin marv -- build --target wasm-core examples/factorial.mv  -o web/factorial.wasm
+cargo run --bin marv -- build --target wasm-core examples/arithmetic.mv -o web/arithmetic.wasm
+cargo run --bin marv -- build --target wasm-core web/fetcher.core.json  -o web/fetcher.wasm
 ```
 
 The committed `.wasm` files are small (≈60–110 bytes) and are kept in the repo so

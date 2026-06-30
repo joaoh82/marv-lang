@@ -26,6 +26,7 @@
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, Write};
+use std::path::Path;
 
 use marv_core::lower_modules;
 use marv_core::symbol_hash;
@@ -33,6 +34,7 @@ use marv_db::{
     analyze, qualify, repair_core_text, DefInfo, DiagInfo, FileAnalysis, FixInfo, MarvDatabase,
     SourceFile, SourceKind, SrcSpan,
 };
+use marv_package::{load_package, load_package_containing, PackageError};
 use marv_syntax::parse;
 use marv_types::{check_def, World};
 use serde_json::{json, Value};
@@ -63,6 +65,14 @@ impl RpcError {
 }
 
 type RpcResult = Result<Value, RpcError>;
+
+fn package_rpc_error(e: PackageError) -> RpcError {
+    match e {
+        PackageError::Io(e) | PackageError::Manifest(e) | PackageError::Source(e) => {
+            RpcError::app(e)
+        }
+    }
+}
 
 /// One file within a snapshot: its identity plus the salsa input handle whose
 /// `analyze` query holds the file's compiled view.
@@ -218,6 +228,7 @@ impl Server {
         let m = method.strip_prefix("marv/").unwrap_or(method);
         match m {
             "openSnapshot" => self.open_snapshot(params),
+            "openPackage" => self.open_package(params),
             "applyEdits" => self.apply_edits(params),
             "closeSnapshot" => self.close_snapshot(params),
             "check" => self.check(params),
@@ -252,6 +263,53 @@ impl Server {
         }
         let id = self.register(snap_files);
         Ok(json!({ "snapshotId": id }))
+    }
+
+    fn open_package(&mut self, params: &Value) -> RpcResult {
+        let path = params
+            .get("path")
+            .or_else(|| params.get("root"))
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                RpcError::invalid_params("`path` package root or source file required")
+            })?;
+        let path = Path::new(path);
+        let graph = if path.is_dir() {
+            load_package(path)
+        } else {
+            load_package_containing(path).and_then(|maybe| {
+                maybe.ok_or_else(|| {
+                    PackageError::Manifest(format!(
+                        "{}: no containing marv.toml package was found",
+                        path.display()
+                    ))
+                })
+            })
+        }
+        .map_err(package_rpc_error)?;
+
+        let mut snap_files = Vec::with_capacity(graph.sources.len());
+        for source in graph.sources {
+            let path = source.path.display().to_string();
+            let text = source.text;
+            let input = SourceFile::new(&self.db, path.clone(), SourceKind::Source, text.clone());
+            snap_files.push(SnapFile {
+                path,
+                kind: SourceKind::Source,
+                text,
+                input,
+            });
+        }
+        let file_count = snap_files.len();
+        let package = graph.manifest.name.clone();
+        let root = graph.root.display().to_string();
+        let id = self.register(snap_files);
+        Ok(json!({
+            "snapshotId": id,
+            "package": package,
+            "root": root,
+            "files": file_count,
+        }))
     }
 
     fn apply_edits(&mut self, params: &Value) -> RpcResult {

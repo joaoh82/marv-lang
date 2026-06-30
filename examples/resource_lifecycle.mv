@@ -1,0 +1,26 @@
+mod resource_lifecycle
+import std.io (Conn, File, Fs, Listener, Net)
+
+/// Open a file capability resource and close it exactly once.
+fn file_scope(fs: Fs, path: str) -> ! {
+    let file: File = fs.open(path)?
+    let closed = file.close()?
+    ()
+}
+
+/// Connect to a host and close the connection exactly once.
+fn connection_scope(net: Net) -> ! {
+    let conn: Conn = net.connect("localhost", (8080 as u16))?
+    let closed = conn.close()?
+    ()
+}
+
+/// A listener can accept borrowed, but both the accepted connection and the
+/// listener itself must be closed exactly once.
+fn listener_scope(net: Net) -> ! {
+    let listener: Listener = net.listen("127.0.0.1", (8080 as u16))?
+    let conn: Conn = listener.accept()?
+    let conn_closed = conn.close()?
+    let listener_closed = listener.close()?
+    ()
+}

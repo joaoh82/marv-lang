@@ -36,6 +36,9 @@ use marv_core::{symbol_hash, LoweredModule};
 /// [`OpId`] indexes into a capability's `ops`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OpSig {
+    /// Whether the operation consumes its receiver. Linear resource capabilities
+    /// use this for close/finish operations; borrowed receivers do not consume.
+    pub consumes_receiver: bool,
     pub params: Vec<Type>,
     pub ret: Type,
     /// Errors this operation may raise (folded into the caller's error set).
@@ -137,6 +140,7 @@ impl World {
                     .method_sigs
                     .iter()
                     .map(|s| OpSig {
+                        consumes_receiver: consumes_receiver(s.params.first()),
                         params: s.params.iter().skip(1).cloned().collect(),
                         ret: s.ret.clone(),
                         errors: Vec::new(),
@@ -270,7 +274,7 @@ impl World {
             }
             if let Some(decl) = self.caps.get(&h) {
                 for op in &decl.ops {
-                    if let Type::Nominal { def, .. } = &op.ret {
+                    if let Type::Nominal { def, .. } = peel_capability_result(&op.ret) {
                         if self.caps.contains_key(def) && !reachable.contains(def) {
                             stack.push(*def);
                         }
@@ -289,7 +293,7 @@ impl World {
     pub fn cap_op_narrows(&self, cap_name: &str, op: u32) -> Option<String> {
         let decl = self.caps.values().find(|c| c.name == cap_name)?;
         let sig = decl.ops.get(op as usize)?;
-        if let Type::Nominal { def, .. } = &sig.ret {
+        if let Type::Nominal { def, .. } = peel_capability_result(&sig.ret) {
             if let Some(narrowed) = self.caps.get(def) {
                 return Some(narrowed.name.clone());
             }
@@ -332,6 +336,20 @@ impl World {
     pub fn builder(self) -> WorldBuilder {
         WorldBuilder { world: self }
     }
+}
+
+fn peel_capability_result(t: &Type) -> &Type {
+    match t {
+        Type::Linear(inner) => peel_capability_result(inner),
+        Type::Nominal { def, args } if *def == symbol_hash("Result") && !args.is_empty() => {
+            peel_capability_result(&args[0])
+        }
+        other => other,
+    }
+}
+
+fn consumes_receiver(receiver: Option<&Type>) -> bool {
+    matches!(receiver, Some(Type::Linear(_)))
 }
 
 /// A small fluent builder for assembling a [`World`] in tests, where caps,

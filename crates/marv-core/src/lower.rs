@@ -122,6 +122,9 @@ pub enum LowerError {
     CollectionLiteralMissingAlloc { kind: &'static str },
     /// A map literal's parallel key/value arrays differ in length.
     MapLiteralLengthMismatch { keys: usize, values: usize },
+    /// A safe function directly called a host FFI declaration. Raw host calls
+    /// must stay inside an explicit unsafe audit boundary.
+    UnsafeFfiOutsideUnsafe { name: String },
 }
 
 impl std::fmt::Display for LowerError {
@@ -240,6 +243,11 @@ impl std::fmt::Display for LowerError {
                 "map literal requires the same number of keys and values (got {keys} keys and \
                  {values} values)"
             ),
+            LowerError::UnsafeFfiOutsideUnsafe { name } => write!(
+                f,
+                "host FFI declaration `{name}` may only be called from an `unsafe fn` audit \
+                 boundary"
+            ),
         }
     }
 }
@@ -330,6 +338,8 @@ pub struct LoweredModule {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InterfaceInfo {
     pub name: String,
+    /// Whether values of this interface type are linear resources.
+    pub linear: bool,
     /// The interface's method names, in declaration order.
     pub methods: Vec<String>,
     /// Whether this interface is a **capability** (`spec/01` §5). A capability
@@ -632,6 +642,10 @@ struct MonoReg {
     /// a capability receiver at a method-call site and to recover the operation's
     /// index and (narrowed) return type.
     cap_ifaces: HashMap<String, CapIface>,
+    /// Fully-qualified source names of host FFI declarations.
+    ffi_externs: HashSet<String>,
+    /// Fully-qualified struct declarations across the lowered module set.
+    structs: HashMap<String, LocalStruct>,
 }
 
 /// A capability interface in the registry: its methods, in declaration order, so
@@ -639,6 +653,7 @@ struct MonoReg {
 /// recovers the narrowed capability's type.
 #[derive(Debug, Clone)]
 struct CapIface {
+    linear: bool,
     methods: Vec<CapMethod>,
 }
 
@@ -674,6 +689,18 @@ impl MonoReg {
             let mp = m.name.join(".");
             for item in &m.items {
                 match item {
+                    Item::Fn(f) if f.is_extern => {
+                        reg.ffi_externs.insert(format!("{mp}.{}", f.name));
+                    }
+                    Item::Struct(s) => {
+                        reg.structs.insert(
+                            format!("{mp}.{}", s.name),
+                            LocalStruct {
+                                fields: s.fields.clone(),
+                                linear: s.linear,
+                            },
+                        );
+                    }
                     Item::Fn(f) if !f.generics.is_empty() => {
                         reg.generics.insert(
                             f.name.clone(),
@@ -693,6 +720,7 @@ impl MonoReg {
                             reg.cap_ifaces.insert(
                                 iface.name.clone(),
                                 CapIface {
+                                    linear: iface.linear,
                                     methods: iface
                                         .methods
                                         .iter()
@@ -821,13 +849,14 @@ impl Builder {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct LocalStruct {
     fields: Vec<Field>,
     linear: bool,
 }
 
 /// Module-level context shared across every definition's lowering.
+#[derive(Clone)]
 struct Lowerer {
     /// Dotted module path, e.g. `["geometry"]`.
     module_path: String,
@@ -843,6 +872,9 @@ struct Lowerer {
     structs: HashMap<String, LocalStruct>,
     /// In-module function return types, for best-effort projection typing.
     fn_rets: HashMap<String, Option<SType>>,
+    /// Bare names in this module that resolve to host FFI declarations (local or
+    /// explicitly imported).
+    ffi_externs: HashSet<String>,
     /// Constructor / enum registry (may span several modules; see [`EnumReg`]).
     reg: EnumReg,
     /// Generics / interfaces / impls registry, shared across modules.
@@ -857,6 +889,9 @@ struct Lowerer {
     spec: Option<SpecCtx>,
     /// Type parameters in scope for the function body currently being lowered.
     active_generics: Vec<String>,
+    /// Whether the function body currently being lowered is an unsafe audit
+    /// boundary.
+    current_unsafe_boundary: bool,
 }
 
 impl Lowerer {
@@ -878,6 +913,7 @@ impl Lowerer {
         let mut local_items = HashSet::new();
         let mut structs = HashMap::new();
         let mut fn_rets = HashMap::new();
+        let mut ffi_externs = HashSet::new();
         for item in &m.items {
             match item {
                 Item::Struct(s) => {
@@ -893,8 +929,16 @@ impl Lowerer {
                 Item::Fn(f) => {
                     local_items.insert(f.name.clone());
                     fn_rets.insert(f.name.clone(), f.ret.clone());
+                    if f.is_extern {
+                        ffi_externs.insert(f.name.clone());
+                    }
                 }
                 Item::Enum(_) | Item::Error(_) | Item::Interface(_) | Item::Impl(_) => {}
+            }
+        }
+        for (name, module) in &imports {
+            if mono.ffi_externs.contains(&format!("{module}.{name}")) {
+                ffi_externs.insert(name.clone());
             }
         }
         Lowerer {
@@ -903,12 +947,14 @@ impl Lowerer {
             imports,
             structs,
             fn_rets,
+            ffi_externs,
             reg,
             mono,
             pending,
             subst,
             spec,
             active_generics: Vec::new(),
+            current_unsafe_boundary: false,
         }
     }
 
@@ -919,13 +965,21 @@ impl Lowerer {
             imports: self.imports.clone(),
             structs: self.structs.clone(),
             fn_rets: self.fn_rets.clone(),
+            ffi_externs: self.ffi_externs.clone(),
             reg: self.reg.clone(),
             mono: self.mono.clone(),
             pending: self.pending.clone(),
             subst: self.subst.clone(),
             spec: self.spec.clone(),
             active_generics,
+            current_unsafe_boundary: self.current_unsafe_boundary,
         }
+    }
+
+    fn with_unsafe_boundary(&self, current_unsafe_boundary: bool) -> Self {
+        let mut out = self.clone();
+        out.current_unsafe_boundary = current_unsafe_boundary;
+        out
     }
 
     /// Lower every item of a module's *base* form (no instances yet), collecting
@@ -981,6 +1035,7 @@ impl Lowerer {
                         .collect();
                     interfaces.push(InterfaceInfo {
                         name: iface.name.clone(),
+                        linear: iface.linear,
                         methods: iface.methods.iter().map(|s| s.name.clone()).collect(),
                         is_capability: iface.generics.is_empty(),
                         method_sigs,
@@ -1298,7 +1353,9 @@ impl Lowerer {
         // A nullary function is curried application over a single `()` param, so
         // synthesize one (unnamed, hence never referenced) when there are none.
         let gnames = generic_names(&f.generics);
-        let fun = self.with_active_generics(gnames.clone());
+        let fun = self
+            .with_active_generics(gnames.clone())
+            .with_unsafe_boundary(f.is_unsafe);
         let synth_unit = f.params.is_empty();
         let param_ctys: Vec<Type> = if synth_unit {
             vec![Type::Unit]
@@ -1327,7 +1384,11 @@ impl Lowerer {
             }
         }
         let n = param_ctys.len() as u32;
-        let body_core = fun.lower_block(&f.body, &env, n)?;
+        let body_core = f
+            .body
+            .as_ref()
+            .map(|body| fun.lower_block(body, &env, n))
+            .transpose()?;
 
         let ret_ty = f
             .ret
@@ -1353,7 +1414,7 @@ impl Lowerer {
         }
 
         let last = param_ctys.len() - 1;
-        let mut lam = body_core;
+        let mut body = body_core;
         let mut arrow = ret_ty;
         for (i, pty) in param_ctys.iter().enumerate().rev() {
             let eff = if i == last {
@@ -1361,11 +1422,13 @@ impl Lowerer {
             } else {
                 EffectRow::empty()
             };
-            lam = Core::Lam {
-                param: pty.clone(),
-                effects: eff.clone(),
-                body: Box::new(lam),
-            };
+            if let Some(lam) = body {
+                body = Some(Core::Lam {
+                    param: pty.clone(),
+                    effects: eff.clone(),
+                    body: Box::new(lam),
+                });
+            }
             arrow = Type::Arrow {
                 param: Box::new(pty.clone()),
                 ret: Box::new(arrow),
@@ -1374,7 +1437,7 @@ impl Lowerer {
         }
 
         // Finalize: rewrite de Bruijn levels to indices over the whole term.
-        let body = to_indices(&lam, 0);
+        let body = body.map(|lam| to_indices(&lam, 0));
 
         // Lower the contract clauses (`spec/01` §7). Contract atoms use a *flat*
         // convention independent of the body's de Bruijn spine: `Var(k)` is the
@@ -1418,7 +1481,7 @@ impl Lowerer {
             ty: arrow,
             requires,
             ensures,
-            body: Some(body),
+            body,
         })
     }
 
@@ -2597,17 +2660,16 @@ impl Lowerer {
         b: &mut Builder,
     ) -> Result<Core, LowerError> {
         let sname = path.join(".");
-        let decl = self
-            .structs
-            .get(&sname)
-            .ok_or_else(|| LowerError::UnknownStruct {
-                name: sname.clone(),
-            })?;
+        let (qualified, decl) =
+            self.resolve_struct(&sname)
+                .ok_or_else(|| LowerError::UnknownStruct {
+                    name: sname.clone(),
+                })?;
         // Reject any initializer naming a field the struct does not declare.
         for init in inits {
             if !decl.fields.iter().any(|f| f.name == init.name) {
                 return Err(LowerError::UnknownField {
-                    ty: sname.clone(),
+                    ty: qualified.clone(),
                     field: init.name.clone(),
                 });
             }
@@ -2619,14 +2681,14 @@ impl Lowerer {
         for fname in &field_names {
             let init = inits.iter().find(|i| &i.name == fname).ok_or_else(|| {
                 LowerError::MissingStructField {
-                    ty: sname.clone(),
+                    ty: qualified.clone(),
                     field: fname.clone(),
                 }
             })?;
             fields.push(self.emit_atom(&init.value, env, b)?);
         }
         Ok(Core::Ctor {
-            ty: self.struct_ty_hash(&sname),
+            ty: symbol_hash(&qualified),
             tag: 0,
             fields,
         })
@@ -2705,22 +2767,21 @@ impl Lowerer {
                 let sname = struct_name(&bt).ok_or_else(|| LowerError::UnresolvedProjection {
                     field: field.clone(),
                 })?;
-                let decl =
-                    self.structs
-                        .get(&sname)
-                        .ok_or_else(|| LowerError::UnresolvedProjection {
-                            field: field.clone(),
-                        })?;
+                let (qualified, decl) = self.resolve_struct(&sname).ok_or_else(|| {
+                    LowerError::UnresolvedProjection {
+                        field: field.clone(),
+                    }
+                })?;
                 let idx = decl
                     .fields
                     .iter()
                     .position(|f| &f.name == field)
                     .ok_or_else(|| LowerError::UnknownField {
-                        ty: sname.clone(),
+                        ty: qualified.clone(),
                         field: field.clone(),
                     })? as u32;
                 let n = decl.fields.len();
-                let ty_hash = self.struct_ty_hash(&sname);
+                let ty_hash = symbol_hash(&qualified);
 
                 // The current value of the aggregate being updated.
                 let base_atom = self.emit_atom(&base_expr, env.as_slice(), b)?;
@@ -3310,16 +3371,20 @@ impl Lowerer {
         }
     }
 
-    /// The nominal content hash of an in-module struct by source name — the same
-    /// hash [`Self::lower_named`] commits to, so a literal/field-rebuild `Ctor`
-    /// and a type reference to the struct agree.
-    fn struct_ty_hash(&self, sname: &str) -> Hash {
-        let qualified = if self.structs.contains_key(sname) {
-            format!("{}.{}", self.module_path, sname)
-        } else {
+    fn resolve_struct(&self, sname: &str) -> Option<(String, &LocalStruct)> {
+        if let Some(decl) = self.structs.get(sname) {
+            return Some((format!("{}.{}", self.module_path, sname), decl));
+        }
+        let qualified = if sname.contains('.') {
             sname.to_string()
+        } else {
+            let module = self.imports.get(sname)?;
+            format!("{module}.{sname}")
         };
-        symbol_hash(&qualified)
+        self.mono
+            .structs
+            .get(&qualified)
+            .map(|decl| (qualified, decl))
     }
 
     /// Resolve the function atom and the effective argument list of a call,
@@ -3346,6 +3411,11 @@ impl Lowerer {
                 Ok((func, eff))
             }
             Expr::Var(name) if self.resolve_local(name, env).is_none() => {
+                if self.ffi_externs.contains(name) && !self.current_unsafe_boundary {
+                    return Err(LowerError::UnsafeFfiOutsideUnsafe {
+                        name: self.qualify_value(name),
+                    });
+                }
                 // A free-function call to a bare name. Two monomorphization hooks
                 // fire here (`spec/01` §§3.3–3.4), before the ordinary path:
                 //   1. an interface method, when lowering a specialized body, is
@@ -3467,10 +3537,15 @@ impl Lowerer {
                         return Type::Var(i as u32);
                     }
                     if self
-                        .structs
-                        .get(&path[0])
-                        .map(|s| s.linear)
+                        .resolve_struct(&path[0])
+                        .map(|(_, s)| s.linear)
                         .unwrap_or(false)
+                        || self
+                            .mono
+                            .cap_ifaces
+                            .get(&path[0])
+                            .map(|iface| iface.linear)
+                            .unwrap_or(false)
                     {
                         return Type::Linear(Box::new(self.lower_named(path, &[])));
                     }
@@ -3481,11 +3556,16 @@ impl Lowerer {
                 let lowered: Vec<Type> =
                     args.iter().map(|a| self.lower_type(a, generics)).collect();
                 if path.len() == 1
-                    && self
-                        .structs
-                        .get(&path[0])
-                        .map(|s| s.linear)
+                    && (self
+                        .resolve_struct(&path[0])
+                        .map(|(_, s)| s.linear)
                         .unwrap_or(false)
+                        || self
+                            .mono
+                            .cap_ifaces
+                            .get(&path[0])
+                            .map(|iface| iface.linear)
+                            .unwrap_or(false))
                 {
                     return Type::Linear(Box::new(self.lower_named(path, &lowered)));
                 }
@@ -3533,8 +3613,8 @@ impl Lowerer {
                     return builtin;
                 }
             }
-            let qualified = if self.structs.contains_key(&path[0]) {
-                format!("{}.{}", self.module_path, path[0])
+            let qualified = if let Some((qualified, _)) = self.resolve_struct(&path[0]) {
+                qualified
             } else if let Some(q) = self.reg.enum_qualified(&path[0]) {
                 q.clone()
             } else if self
@@ -3572,19 +3652,18 @@ impl Lowerer {
         let sname = struct_name(&bt).ok_or_else(|| LowerError::UnresolvedProjection {
             field: field.to_string(),
         })?;
-        let fields = self
-            .structs
-            .get(&sname)
-            .ok_or_else(|| LowerError::UnresolvedProjection {
-                field: field.to_string(),
-            })?;
+        let (qualified, fields) =
+            self.resolve_struct(&sname)
+                .ok_or_else(|| LowerError::UnresolvedProjection {
+                    field: field.to_string(),
+                })?;
         fields
             .fields
             .iter()
             .position(|f| f.name == field)
             .map(|i| i as u32)
             .ok_or_else(|| LowerError::UnknownField {
-                ty: sname,
+                ty: qualified,
                 field: field.to_string(),
             })
     }
@@ -3603,7 +3682,7 @@ impl Lowerer {
             Expr::Field(base, field) => {
                 let bt = self.type_of_expr(base, env)?;
                 let sname = struct_name(&bt)?;
-                let fields = self.structs.get(&sname)?;
+                let (_qualified, fields) = self.resolve_struct(&sname)?;
                 fields
                     .fields
                     .iter()
@@ -3716,6 +3795,7 @@ impl Lowerer {
                     inner: Box::new(t),
                 }),
             },
+            Expr::Try(inner) => self.type_of_expr(inner, env).map(peel_error_union_ty),
             _ => None,
         }
     }
@@ -4097,6 +4177,15 @@ fn iter_elem_stype(t: &SType) -> Option<&SType> {
 fn peel_ref_ty(t: SType) -> SType {
     match t {
         SType::Ref { inner, .. } => peel_ref_ty(*inner),
+        other => other,
+    }
+}
+
+/// `e?` yields the success side of `!T` for best-effort source type inference.
+fn peel_error_union_ty(t: SType) -> SType {
+    match t {
+        SType::ErrorUnion(Some(inner)) => *inner,
+        SType::ErrorUnion(None) => SType::Unit,
         other => other,
     }
 }

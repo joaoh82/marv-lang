@@ -346,6 +346,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "cranelift-object"
+version = "0.132.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5f7a263727954f7b310796e1b5543e6dfd6afed7e15c62f2454b51b6f38a39e1"
+dependencies = [
+ "anyhow",
+ "cranelift-codegen",
+ "cranelift-control",
+ "cranelift-module",
+ "log",
+ "object",
+ "target-lexicon",
+]
+
+[[package]]
 name = "cranelift-srcgen"
 version = "0.132.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -645,10 +660,12 @@ name = "marv-cli"
 version = "0.0.0"
 dependencies = [
  "marv-codegen-cl",
+ "marv-codegen-llvm",
  "marv-codegen-wasm",
  "marv-core",
  "marv-db",
  "marv-interp",
+ "marv-package",
  "marv-store",
  "marv-syntax",
  "marv-types",
@@ -664,6 +681,7 @@ dependencies = [
  "cranelift-jit",
  "cranelift-module",
  "cranelift-native",
+ "cranelift-object",
  "marv-core",
  "marv-db",
  "marv-interp",
@@ -675,6 +693,12 @@ dependencies = [
 [[package]]
 name = "marv-codegen-llvm"
 version = "0.0.0"
+dependencies = [
+ "marv-core",
+ "marv-interp",
+ "marv-syntax",
+ "marv-types",
+]
 
 [[package]]
 name = "marv-codegen-wasm"
@@ -730,11 +754,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "marv-package"
+version = "0.0.0"
+dependencies = [
+ "marv-syntax",
+]
+
+[[package]]
 name = "marv-server"
 version = "0.0.0"
 dependencies = [
  "marv-core",
  "marv-db",
+ "marv-package",
  "marv-store",
  "marv-syntax",
  "marv-types",

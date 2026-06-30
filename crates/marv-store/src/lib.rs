@@ -51,6 +51,8 @@ pub struct StoredVariant {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StoredOpSig {
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub consumes_receiver: bool,
     #[serde(default)]
     pub params: Vec<Type>,
     #[serde(default = "unit_type")]
@@ -61,6 +63,10 @@ pub struct StoredOpSig {
 
 fn unit_type() -> Type {
     Type::Unit
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// One stored definition, keyed in the [`Store`] by its dag hash. Identity is

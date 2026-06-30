@@ -135,7 +135,12 @@ fn indent_lines(text: &str, level: usize) -> String {
 /// signature per line at 4-space indentation. An interface with no methods is
 /// `{}` on the signature line.
 fn format_interface(decl: &InterfaceDecl) -> String {
-    let mut s = format!("interface {}{}", decl.name, format_generics(&decl.generics));
+    let prefix = if decl.linear {
+        "linear interface"
+    } else {
+        "interface"
+    };
+    let mut s = format!("{prefix} {}{}", decl.name, format_generics(&decl.generics));
     if decl.methods.is_empty() {
         s.push_str(" {}");
         return s;
@@ -252,6 +257,9 @@ fn format_fn(decl: &FnDecl) -> String {
     if decl.is_unsafe {
         s.push_str("unsafe ");
     }
+    if decl.is_extern {
+        s.push_str("extern ");
+    }
     s.push_str("fn ");
     s.push_str(&decl.name);
     s.push_str(&format_generics(&decl.generics));
@@ -267,6 +275,9 @@ fn format_fn(decl: &FnDecl) -> String {
         s.push_str(" -> ");
         s.push_str(&format_type(ret));
     }
+    let Some(body) = &decl.body else {
+        return s;
+    };
     // Contracts (if any) each go on their own indented line, and the body's
     // brace then starts a fresh line; otherwise the brace shares the signature
     // line. This is the canonical form the parser round-trips (`spec/01` §7).
@@ -288,7 +299,7 @@ fn format_fn(decl: &FnDecl) -> String {
         }
         s.push('\n');
     }
-    s.push_str(&format_block(&decl.body, 0));
+    s.push_str(&format_block(body, 0));
     s
 }
 

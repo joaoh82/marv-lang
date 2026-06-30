@@ -17,11 +17,12 @@ the capability interfaces every program links against (`spec/01` §§3, 5, 6).
 > and `Set[T]` types with a first string-keyed/string-set operation slice over explicit
 > `Alloc` (MARV-50), plus the scalar hash-backed `i64` path from MARV-61. `std.http`
 > now exposes host-provided request/response structs over an explicit `Http` capability
-> (MARV-53). `std.spawn` now exposes the first scoped `Spawn` task-handle slice
-> (MARV-56). Still pending:
-> `linear` capabilities, so a `Conn`/listener/request lifecycle must be `close`d or
-> completed exactly once (MARV-27). The capability *model* is also exercised over the
-> Core IR and on WebAssembly (host imports).
+> (MARV-53), and `std.io.Listener.accept_http` lets a `Net`-authorized listener accept
+> one HTTP exchange for router code (MARV-63). `std.spawn` now exposes the first scoped `Spawn` task-handle slice
+> (MARV-56), and `std.io` marks `File`, `Listener`, and `Conn` as `linear interface`
+> resource capabilities: `open`/`connect`/`listen` results must be closed exactly once
+> (MARV-64). The capability *model* is also exercised over the Core IR and on WebAssembly
+> (host imports).
 
 ## Data types
 
@@ -165,40 +166,63 @@ fn decode_utf8(alloc: Alloc, bytes: []u8) -> !str
 fn encode_utf8(alloc: Alloc, text: str) -> List[u8]
 ```
 
-### `std/json.mv` — JSON scalar and flat-object support
-MARV-55 adds a first JSON/serialization slice in ordinary marv source. `JsonScalar` covers
-`null`, booleans, integer numbers, and strings. `JsonObject` is currently a validated
+### `std/json.mv` — JSON scalar, flat-object, and recursive DOM support
+MARV-55 added the first JSON/serialization slice in ordinary marv source. `JsonScalar` covers
+`null`, booleans, integer numbers, and strings. `JsonObject` remains a validated
 source-backed flat object: parsing checks object syntax and scalar field values, field lookup
 re-parses the requested scalar value, and `serialize_object` returns the validated source.
-This avoids pretending recursive `Json.Array` / materialized nested `Json.Object` values exist
-before the recursive-ADT and general map work lands. Parsing failures are typed `JsonError`
-values; string/number serialization takes explicit `Alloc` when it builds output text.
+MARV-66 adds a materialized recursive `Json` DOM with list-backed arrays and objects
+(`List[Json]` / `List[JsonField]`) so nested API/config payloads can be parsed, inspected,
+rebuilt, and serialized deterministically. Parsing failures are typed `JsonError` values;
+all parser/builder/serializer APIs that allocate take explicit `Alloc`.
 
 ```marv
 error JsonError { UnexpectedEnd, UnexpectedChar, ExpectedColon, ... }
 enum JsonScalar { Null, Bool(bool), Number(i64), String(str) }
+enum Json { Null, Bool(bool), Number(i64), String(str), Array(List[Json]), Object(List[JsonField]) }
 struct JsonObject { source: str }
+struct JsonField { key: str, value: Json }
 fn parse_scalar(alloc: Alloc, text: str) -> !JsonScalar
 fn parse_object(alloc: Alloc, text: str) -> !JsonObject
+fn parse_json(alloc: Alloc, text: str) -> !Json
+fn parse_json_bytes(alloc: Alloc, bytes: []u8) -> !Json
 fn object_get_or(alloc: Alloc, object: JsonObject, key: str, fallback: JsonScalar) -> !JsonScalar
+fn json_object_get_or(value: Json, key: str, fallback: Json) -> Json
+fn json_array_get_or(value: Json, index: usize, fallback: Json) -> Json
+fn json_object_insert(alloc: Alloc, value: Json, key: str, item: Json) -> Json
+fn json_array_push(alloc: Alloc, value: Json, item: Json) -> Json
 pure fn object_len(object: JsonObject) -> usize
 fn serialize_scalar(alloc: Alloc, value: JsonScalar) -> str
+fn serialize_json(alloc: Alloc, value: Json) -> str
+fn serialize_json_bytes(alloc: Alloc, value: Json) -> List[u8]
 pure fn serialize_object(object: JsonObject) -> str
 ```
 
+The recursive parser is runtime/Tier-1 today. Deterministic DOM construction and serialization
+are backend-safe and differentially tested in `tests/run/json_dom.mv`; raise-lowering still
+keeps parser error paths out of the WASM differential entry.
+
 ### `std/http.mv` — request/response
 `Http` is declared in `std/capabilities.mv`; `std.http` layers normal app-level
-types over it. A host hands a function an `Http` capability for one request.
-The current ABI exposes UTF-8 request pieces (`method`, `path`, `body`) and a
-single `respond(status, body)` operation. Raw bytes, streaming bodies, listener
-accept loops, and exact once-only lifecycle safety are intentionally left to the
-bytes/JSON and linear-capability follow-ups.
+types over it. A host can hand a function an `Http` capability for one request
+directly (`marv run --grant Http`) or return one from a `Listener.accept_http()`
+operation on a listener created with explicit `Net` authority. The current ABI exposes
+UTF-8 request pieces (`method`, `path`, `body`) and a `respond(status, body)` operation.
+Raw bytes, streaming bodies, multi-request serve loops, and real OS socket scheduling remain
+host/runtime follow-ups; close-once lifecycle checking for `File`, `Listener`, and `Conn`
+resources lives in `std.io`.
 
 ```marv
 struct Request { method: str, path: str, body: str }
 struct Response { status: u16, body: str }
+pure fn request_method(request: Request) -> str
+pure fn request_path(request: Request) -> str
 pure fn request_body(request: Request) -> str
+pure fn route_matches(request: Request, method: str, path: str) -> bool
 pure fn response(status: u16, body: str) -> Response
+pure fn text_response(body: str) -> Response
+pure fn json_response(status: u16, body: str) -> Response
+pure fn not_found() -> Response
 fn receive(http: Http) -> !Request
 fn send(http: Http, response: Response) -> !
 ```
@@ -230,10 +254,12 @@ supplies the implementations the process/page chooses to grant.
 |------------|------|---------------------------|
 | `Io` | Root capability; everything narrows from it | `fs() -> Fs`, `net() -> Net`, `clock() -> Clock`, `rand() -> Rand`, `alloc() -> Alloc`, `stdout() -> Stream`, `http() -> Http` |
 | `Stream` | A text/byte output stream | `write(text: str) -> !` |
-| `Fs` | Filesystem | `read(path: str) -> ![]u8`, `write(path, bytes) -> !` |
-| `Net` | Network | `get(url) -> ![]u8`, `connect(host, port) -> !Conn` |
+| `Fs` | Filesystem | `read(path: str) -> ![]u8`, `write(path, bytes) -> !`, `open(path) -> !File` |
+| `Net` | Network | `get(url) -> ![]u8`, `connect(host, port) -> !Conn`, `listen(host, port) -> !Listener` |
 | `Http` | One server request/response exchange | `method()`, `path()`, `body_text()`, `respond(status, body)` |
-| `Conn` | Open connection | `send`, `recv`, `close` |
+| `File` | Linear file handle | `read`, `write`, `close` |
+| `Listener` | Linear listening socket | `accept`, `accept_http`, `close` |
+| `Conn` | Linear open connection | `send`, `recv`, `close` |
 | `Spawn` | Structured-concurrency authority | `start() -> !` |
 | `Clock` | Monotonic time | `now() -> i64` |
 | `Rand` | Randomness | `next_u64() -> u64` |

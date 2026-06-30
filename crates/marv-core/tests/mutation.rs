@@ -13,7 +13,7 @@
 
 use marv_core::ir::*;
 use marv_core::lower::LowerError;
-use marv_core::{lower_module, DefEntry, LoweredModule};
+use marv_core::{lower_module, lower_modules, DefEntry, LoweredModule};
 use marv_syntax::parse;
 
 fn lower(src: &str) -> LoweredModule {
@@ -106,6 +106,40 @@ fn struct_literal_field_write_order_is_canonical() {
         def(&reordered, "make").hash,
         "field write-order must not affect identity"
     );
+}
+
+#[test]
+fn imported_struct_literals_and_projections_resolve_to_imported_decl() {
+    let model = parse("mod model\n\nlinear struct Boxed { value: i64 }\n")
+        .unwrap_or_else(|e| panic!("parse model failed: {e}"));
+    let app = parse(
+        "mod app\n\nimport model (Boxed)\n\npure fn make() -> Boxed {\n    Boxed { value: 7 }\n}\n\npure fn read(b: Boxed) -> i64 {\n    b.value\n}\n",
+    )
+    .unwrap_or_else(|e| panic!("parse app failed: {e}"));
+    let lowered = lower_modules(&[model, app]).expect("lower imported struct use");
+    let app = lowered
+        .iter()
+        .find(|module| module.module == ["app".to_string()])
+        .expect("lowered app module");
+
+    match &def(app, "make").def.ty {
+        Type::Arrow { ret, .. } => match &**ret {
+            Type::Linear(inner) => assert!(matches!(&**inner, Type::Nominal { .. })),
+            other => panic!("expected imported linear struct return, got {other:?}"),
+        },
+        other => panic!("expected make to lower to an arrow, got {other:?}"),
+    }
+    match fn_body(app, "make") {
+        Core::Ctor { tag, fields, .. } => {
+            assert_eq!(tag, 0);
+            assert_eq!(fields, vec![Atom::Lit(Literal::Int(7))]);
+        }
+        other => panic!("expected imported struct literal to lower to Ctor, got {other:?}"),
+    }
+    match fn_body(app, "read") {
+        Core::Proj { idx, .. } => assert_eq!(idx, 0),
+        other => panic!("expected imported struct projection, got {other:?}"),
+    }
 }
 
 #[test]

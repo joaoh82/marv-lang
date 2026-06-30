@@ -29,6 +29,7 @@ use marv_db::{CapSpec, CoreDefSpec, CoreModuleSpec, OpSpec, WorldSpec};
 use marv_server::{serve, Server};
 use serde_json::{json, Value};
 use std::io::Cursor;
+use std::path::PathBuf;
 
 /// Send a request and unwrap its `result`, asserting there was no `error`.
 fn call(server: &mut Server, method: &str, params: Value) -> Value {
@@ -40,6 +41,13 @@ fn call(server: &mut Server, method: &str, params: Value) -> Value {
         "{method} returned an error: {resp:#}"
     );
     resp.get("result").cloned().unwrap_or(Value::Null)
+}
+
+fn temp_project(tag: &str) -> PathBuf {
+    let root = std::env::temp_dir().join(format!("marv-server-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("create temp project");
+    root
 }
 
 /// The `report` module ingested as Core: `load(fs: Fs, path: str)` performs an
@@ -87,6 +95,7 @@ fn report_core_module() -> Value {
             caps: vec![CapSpec {
                 name: "Fs".into(),
                 ops: vec![OpSpec {
+                    consumes_receiver: true,
                     params: vec![Type::Str],
                     ret: Type::Unit,
                     errors: Vec::new(),
@@ -234,6 +243,9 @@ fn unsafe_sites_lists_source_safety_justifications() {
     let src = "\
 mod demo
 
+/// SAFETY: the host symbol follows the marv i64 ABI.
+unsafe extern fn host_add_one(x: i64) -> i64
+
 /// SAFETY: host boundary validates the raw value before calling this function.
 unsafe fn raw_value(x: i64) -> i64 {
     x
@@ -256,15 +268,27 @@ pure fn safe_value(x: i64) -> i64 {
         json!({ "snapshotId": snapshot }),
     );
     let sites = unsafe_sites["sites"].as_array().unwrap();
-    assert_eq!(sites.len(), 1, "expected one unsafe site: {unsafe_sites:#}");
+    assert_eq!(
+        sites.len(),
+        2,
+        "expected two unsafe sites: {unsafe_sites:#}"
+    );
     assert_eq!(sites[0]["file"], "demo.mv");
-    assert_eq!(sites[0]["def"], "demo.raw_value");
+    assert_eq!(sites[0]["def"], "demo.host_add_one");
     assert!(sites[0]["hash"].as_str().unwrap().starts_with("b3:"));
     assert_eq!(
         sites[0]["justification"],
-        "host boundary validates the raw value before calling this function."
+        "the host symbol follows the marv i64 ABI."
     );
     assert_eq!(sites[0]["span"]["file"], "demo.mv");
+    assert_eq!(sites[1]["file"], "demo.mv");
+    assert_eq!(sites[1]["def"], "demo.raw_value");
+    assert!(sites[1]["hash"].as_str().unwrap().starts_with("b3:"));
+    assert_eq!(
+        sites[1]["justification"],
+        "host boundary validates the raw value before calling this function."
+    );
+    assert_eq!(sites[1]["span"]["file"], "demo.mv");
 }
 
 #[test]
@@ -352,6 +376,50 @@ fn source_snapshot_checks_as_a_module_set() {
         0,
         "two-file package snapshot checks cleanly: {checked:#}"
     );
+}
+
+#[test]
+fn package_snapshot_checks_manifest_local_dependency() {
+    let root = temp_project("package-open");
+    let app = root.join("app");
+    let util = root.join("util");
+    std::fs::create_dir_all(app.join("src")).expect("create app src");
+    std::fs::create_dir_all(util.join("src")).expect("create util src");
+    std::fs::write(
+        app.join("marv.toml"),
+        "[package]\nname = \"app\"\nroots = [\"src\"]\n\n[dependencies.util]\npath = \"../util\"\n",
+    )
+    .expect("write app manifest");
+    std::fs::write(
+        app.join("src/main.mv"),
+        "mod app.main\nimport util.math (double)\n\npure fn main() -> i64 {\n    double(21)\n}\n",
+    )
+    .expect("write app source");
+    std::fs::write(
+        util.join("marv.toml"),
+        "[package]\nname = \"util\"\nroots = [\"src\"]\n",
+    )
+    .expect("write util manifest");
+    std::fs::write(
+        util.join("src/math.mv"),
+        "mod util.math\n\npure fn double(x: i64) -> i64 {\n    (x * 2)\n}\n",
+    )
+    .expect("write util source");
+
+    let mut server = Server::new();
+    let open = call(
+        &mut server,
+        "marv/openPackage",
+        json!({ "path": app.display().to_string() }),
+    );
+    assert_eq!(open["package"], "app");
+    assert_eq!(open["files"], 2);
+    let snapshot = open["snapshotId"].as_str().unwrap();
+
+    let checked = call(&mut server, "marv/check", json!({ "snapshotId": snapshot }));
+    assert_eq!(checked["diagnostics"], json!([]));
+
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]

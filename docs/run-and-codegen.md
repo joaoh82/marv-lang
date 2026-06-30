@@ -7,7 +7,11 @@ canonical Core IR (`spec/02` §C):
   is the reference meaning of a program and is kept permanently as the thing the
   native backends are tested against.
 - **`marv-codegen-cl`** — a **Cranelift** backend that JIT-compiles Core to
-  native code (`spec/01` §9 — "same Core IR feeds both").
+  native code and can also emit AOT object/executable artifacts (`spec/01` §9
+  — "same Core IR feeds both").
+- **`marv-codegen-llvm`** — a **LLVM/clang** release backend slice that emits
+  deterministic textual LLVM IR for reachable Core closures and asks `clang` to
+  optimize/run/link them.
 
 The acceptance gate for M4 is that the two **agree** on a corpus of programs,
 plus one program that *fails to compile* because it uses a capability absent
@@ -85,10 +89,53 @@ Every scalar lives in a 64-bit register in *both* backends, so their wrapping
 arithmetic matches — the property that makes the differential test meaningful.
 Constructs the Cranelift backend cannot lower (`perform` — now expressible from
 source, MARV-6, and lowered by the WASM backend — first-class closures, floats)
-are interpreted where
-the interpreter can, and Cranelift returns an honest `unsupported` rather than
-emitting wrong code. New constructs land in *both* backends together so agreement
-is preserved.
+are interpreted where the interpreter can, and Cranelift returns an honest
+`unsupported` rather than emitting wrong code. Native AOT uses that same lowering
+path, so an unsupported reachable construct fails before any object or linked
+executable is written. New constructs land in *both* backends together so
+agreement is preserved.
+
+The LLVM release backend follows the same honesty rule. Its MARV-69 slice covers
+scalar arithmetic/casts, calls/recursion, bool `if`/`match`, `while`, early
+`return`, boxed structs/enums, arrays, runtime-length slice updates, `List[T]`
+grow/set/pop/index operations, string concat/equality/slice/from_chars, iterator
+loops, bytes/UTF-8 backend-safe paths, JSON serializer-safe paths, and the
+current map/set/app corpus paths. It intentionally reports `unsupported` for
+reachable capability `perform`, `raise`, and unsafe/resource host integration
+until those paths are lowered into LLVM too.
+
+### Cranelift AOT objects and executables (MARV-68)
+
+`marv build --emit object` emits a relocatable native object for the entry's
+reachable closure. Function symbols are derived from content hashes, the module
+name is fixed, and repeated builds of the same checked source produce identical
+object bytes on the same host target. The object imports the small runtime ABI:
+`marv_rt_alloc`, `marv_rt_heap_mark`, `marv_rt_heap_reset`, and, in debug builds,
+`marv_rt_bounds_fail`.
+
+`marv build --out app` (or `--emit exe --out app`) links that object with a
+generated C runtime wrapper. The wrapper supplies the allocation/arena hooks,
+parses up to four integer entry arguments, calls the selected entry, resets the
+runtime heap, and prints the integer result. This is intentionally still a
+backend-supported pure/value entrypoint story: capability-hosted programs should
+use `marv run --grant ...` or the WASM host-import model until the production
+native host runtime grows a capability ABI.
+
+### LLVM release slice (MARV-69)
+
+`marv build --target native-llvm --run <file> --entry f ...` compiles the
+entry's reachable closure to textual LLVM IR, links it with a tiny C entry
+wrapper through `clang -O2`, runs the executable, and prints the integer result.
+`marv build --target native-llvm --out app ...` writes the linked executable
+instead. Without `--run` or `--out`, the CLI still checks and compiles the
+closure and reports the entry arity.
+
+This backend does not require `llvm-config` or in-process LLVM bindings. The IR
+uses the same one-word value model as Cranelift: scalars are `i64`; boxed
+aggregates and arrays are heap blocks with the tag/length in word 0; projections,
+enum matches, `len`, `index`, slice updates, runtime lists, and strings operate
+over that layout. Debug builds emit Tier-1 bounds checks that abort through LLVM
+IR's `abort` call; `--release` omits those checks.
 
 ### Reachability-pruned builds (MARV-8)
 
@@ -254,7 +301,8 @@ the results are equal to each other and to a hand-computed golden value:
 | `arrays.mv`     | array literals + `len` + index read `a[i]` + index store `a[i] = e` (functional element update); a `len`-bounded `while` loop over an array — MARV-30 |
 | `slices.mv`     | runtime-length slices `[]T`: construct (array→slice), `len`/index, a `Core::IndexSet` element store over a runtime length, and `total` over a slice of structs (`sales[i].amount`) — MARV-33; `for x in s` over a slice and over a slice of structs, nested `for`s (depth-keyed index names), and sequential `for`s — MARV-20 |
 | `iter.mv`       | `std.iter.IndexIter[i64]` over a `List[i64]`; `for x in it` lowers through the `Iter[i64]` protocol wrappers instead of direct `len`/index — MARV-52 |
-| `json.mv`       | `std.json` first slice: scalar serialization with explicit `Alloc` runs three-way; parser/typed-error paths are interpreter-smoked — MARV-55 |
+| `json.mv`       | `std.json` first slice: scalar serialization with explicit `Alloc` runs across the interpreter, Cranelift, WASM, and LLVM; parser/typed-error paths are interpreter-smoked — MARV-55 |
+| `json_dom.mv`   | `std.json` recursive/materialized DOM: backend-safe nested construction + deterministic serialization run across the interpreter, Cranelift, WASM, and LLVM; recursive parse/error paths are interpreter/check covered until raise lowering reaches native/WASM backends — MARV-66 |
 
 Both differential harnesses also carry an **out-of-bounds corpus** (MARV-34):
 slice reads at `len` and at `-1`, a slice store at `len`, and an array read at
@@ -287,12 +335,14 @@ marv run --grant Spawn examples/spawn.mv                     # 42 + two Spawn ef
 
 ## The WebAssembly backend (M5)
 
-`marv-codegen-wasm` is the third backend, emitting a WebAssembly module with
-`wasm-encoder`. It compiles the same subset as Cranelift — including aggregates
-and enums over a linear-memory heap (MARV-9) and arrays with `len`/index/store
-(MARV-30) — plus `Core::Perform`, and every scalar is an `i64`, so it stays in
-lockstep with the oracle. `marv build --target wasm-component <file> -o out.wasm`
-writes the module and prints its capability manifest.
+`marv-codegen-wasm` is the third backend, emitting either a WebAssembly
+component (`--target wasm-component`) or the core module substrate
+(`--target wasm-core`) with `wasm-encoder`. It compiles the same subset as
+Cranelift — including aggregates and enums over a linear-memory heap (MARV-9)
+and arrays with `len`/index/store (MARV-30) — plus `Core::Perform`, and every
+scalar is an `i64`, so it stays in lockstep with the oracle. `marv build
+--target wasm-component <file> -o out.wasm` writes a validating component plus a
+deterministic `out.wit` sidecar and prints its capability manifest.
 
 ### Capabilities are host imports
 
@@ -313,16 +363,19 @@ lowers to a **call to an imported function** — one import per
 - String operands to an import are passed as the normal `str` ABI word: a pointer
   to the module's `[len, codepoint…]` linear-memory block.
 - String results from an import use the same one-word handle shape. The core-WASM
-  backend can model this today for `Http.method/path/body_text`; component/WIT
-  packaging remains the place where those handles become named host-level string
-  types.
+  backend can model this today for `Http.method/path/body_text`. Listener operations that
+  return linear resource capabilities, such as `Net.listen`, still report honest
+  `unsupported`. The MARV-70 component wrapper exposes current scalar/handle-shaped
+  imports and exports as `s64` in WIT; named component-model records/resources remain
+  staged follow-ups.
 
 ### The differential gate and the browser demo
 
 `crates/marv-codegen-wasm/tests/differential.rs` runs the same `tests/run/*.mv`
-corpus through **wasmtime** and asserts it matches the interpreter, and checks
-that a pure module imports nothing, a `Net`-performing module imports exactly
-`Net`, and a string-returning `Http` operation validates as a host import.
+corpus through **wasmtime** and asserts the core module matches the interpreter,
+then checks that the component wrapper validates, pure modules import nothing,
+a `Net`-performing module imports exactly `Net`, and string-returning `Http`
+operations validate as host imports.
 
 [`../web/`](../web) is a dependency-free browser demo (serve it with any static
 server) proving the sandbox live:
@@ -333,25 +386,26 @@ server) proving the sandbox live:
   with it checked the page supplies `Net` and `fetch()` runs through it.
 
 ```sh
-marv build --target wasm-component examples/factorial.mv -o web/factorial.wasm
-marv build --target wasm-component web/fetcher.core.json -o web/fetcher.wasm
+marv build --target wasm-core examples/factorial.mv -o web/factorial.wasm
+marv build --target wasm-core web/fetcher.core.json -o web/fetcher.wasm
 cd web && python3 -m http.server 8087   # then open http://localhost:8087/
 ```
 
 ## Status and what's next
 
 - **Done:** interpreter over the full Core IR (capability injection, effect
-  logging, currying, recursion, `match`); a Cranelift JIT and a WebAssembly
-  backend over the integer/boolean subset **plus heap-boxed aggregates and enums
-  with field-binding `match`** (MARV-9) **plus fixed-length arrays with
-  `len`/index/store** (MARV-30) **plus runtime-length slices `[]T` with
-  `len`/index and an allocate-copy-store element store** (MARV-33) **plus the
-  Tier-1 debug bounds check on runtime element reads/stores, with
-  `marv build --release` to omit it** (MARV-34); `marv run`, `marv build --target
-  native-cranelift`, `marv build --target wasm-component`; the three-way
-  differential gate (interpreter ↔ Cranelift ↔ wasm) and a browser sandbox demo.
-- **Next:** ahead-of-time object/executable emission and an LLVM backend for
-  release builds (MARV-10); broader ownership-aware reclamation for heap values
-  that escape arena reset scopes; string/aggregate-typed capability operands and
-  full component-model / WIT packaging. The interpreter remains the oracle each
-  backend is differentially tested against.
+  logging, currying, recursion, `match`); Cranelift JIT/AOT, WebAssembly, and
+  LLVM/clang release slices over the integer/boolean subset **plus heap-boxed
+  aggregates and enums with field-binding `match`** (MARV-9) **plus fixed-length
+  arrays with `len`/index/store** (MARV-30) **plus runtime-length slices `[]T`
+  with `len`/index and an allocate-copy-store element store** (MARV-33) **plus
+  the Tier-1 debug bounds check on runtime element reads/stores, with
+  `marv build --release` to omit it** (MARV-34); `marv run`, `marv build
+  --target native-cranelift`, `marv build --target native-llvm`, `marv build
+  --target wasm-component`; differential gates against the interpreter and a
+  browser sandbox demo.
+- **Next:** capability-hosted native runtimes, broader ownership-aware
+  reclamation for heap values that escape arena reset scopes,
+  string/aggregate-typed capability operands, and full component-model / WIT
+  packaging. The interpreter remains the oracle each backend is differentially
+  tested against.

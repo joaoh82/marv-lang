@@ -124,6 +124,7 @@ fn interp_i64(
             | "map_set.mv"
             | "bytes_utf8.mv"
             | "json.mv"
+            | "json_dom.mv"
             | "app_tokenizer.mv"
             | "app_router.mv"
             | "app_invoice_summary.mv"
@@ -404,6 +405,10 @@ fn corpus_cases() -> Vec<(&'static str, &'static str, Vec<i64>, i64)> {
         // JSON first slice (MARV-55): deterministic scalar serialization with
         // explicit Alloc; parser/error paths are interpreter-smoked separately.
         ("json.mv", "exercise", vec![], 280),
+        // Recursive/materialized JSON DOM (MARV-66): deterministic construction
+        // and serialization of nested array/object values. Parse/error paths
+        // stay interpreter/check covered until raise lowering reaches WASM.
+        ("json_dom.mv", "exercise", vec![], 379),
         // MARV-40 app examples: app-shaped string/list programs with explicit
         // Alloc, pinned across interpreter, Cranelift, and WASM.
         ("app_tokenizer.mv", "main", vec![], 310),
@@ -582,6 +587,15 @@ fn a_pure_module_imports_nothing() {
     let engine = Engine::default();
     let module = Module::new(&engine, &artifact.bytes).unwrap();
     assert!(Instance::new(&mut Store::new(&engine, ()), &module, &[]).is_ok());
+
+    assert_component_artifact(&artifact);
+    assert!(
+        artifact
+            .wit
+            .contains("export demo-factorial: func(arg0: s64) -> s64;"),
+        "pure component WIT should expose the exported entry, got:\n{}",
+        artifact.wit
+    );
 }
 
 /// A `fetch(net: Net)` that performs `Net` op 0 must surface exactly one host
@@ -621,6 +635,7 @@ fn a_capability_using_module_imports_that_capability() {
         .cap(
             "Net",
             vec![OpSig {
+                consumes_receiver: true,
                 params: Vec::new(),
                 ret: Type::Unit,
                 errors: Vec::new(),
@@ -642,6 +657,29 @@ fn a_capability_using_module_imports_that_capability() {
         .map(|i| (i.module().to_string(), i.name().to_string()))
         .collect();
     assert_eq!(imports, vec![("Net".to_string(), "op0".to_string())]);
+
+    assert_component_artifact(&artifact);
+    assert!(
+        artifact.wit.contains("import net-op0: func();"),
+        "capability component WIT should expose typed capability imports, got:\n{}",
+        artifact.wit
+    );
+}
+
+fn assert_component_artifact(artifact: &marv_codegen_wasm::WasmArtifact) {
+    assert_eq!(
+        &artifact.component_bytes[..8],
+        &[0x00, 0x61, 0x73, 0x6d, 0x0d, 0x00, 0x01, 0x00],
+        "component artifact should use the component-model header"
+    );
+    assert_eq!(
+        &artifact.bytes[..8],
+        &[0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00],
+        "core artifact should remain available for wasmtime/browser core-module execution"
+    );
+    wasmparser::Validator::new()
+        .validate_all(&artifact.component_bytes)
+        .expect("component validates");
 }
 
 #[test]
@@ -678,6 +716,7 @@ fn capability_imports_can_return_string_handles() {
         .cap(
             "Http",
             vec![OpSig {
+                consumes_receiver: true,
                 params: Vec::new(),
                 ret: Type::Str,
                 errors: Vec::new(),

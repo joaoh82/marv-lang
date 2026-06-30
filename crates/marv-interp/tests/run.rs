@@ -211,6 +211,7 @@ fn touch_program() -> Program {
         .cap(
             "Fs",
             vec![OpSig {
+                consumes_receiver: true,
                 params: vec![Type::Str],
                 ret: Type::Unit,
                 errors: Vec::new(),
@@ -256,6 +257,7 @@ fn alloc_program() -> Program {
         .cap(
             "Alloc",
             vec![OpSig {
+                consumes_receiver: true,
                 params: vec![Type::Int(IntTy::Usize)],
                 ret: Type::Slice(Box::new(Type::Int(IntTy::U8))),
                 errors: Vec::new(),

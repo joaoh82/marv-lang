@@ -55,11 +55,17 @@ one module set. That lets an agent open `app.mv` plus `math.mv` and check
 such as `signature`, `core`, and `typeAt` still use the per-file incremental
 analysis path.
 
+`marv/openPackage` is the package-aware entry point for disk-backed projects. It
+loads the package root's `marv.toml`, all declared source roots, and transitive
+local path dependencies into one source snapshot. MCP exposes the same operation
+as `marv_open_package`, so agents do not need to hand-enumerate package files.
+
 ### Method catalog
 
 | Method | Returns |
 |--------|---------|
 | `marv/openSnapshot` | `{ snapshotId }` from a set of `{path, text}` (source) or `{path, core}` (Core IR) files. |
+| `marv/openPackage` | `{ snapshotId, package, root, files }` from a disk package root or source file inside a `marv.toml` package. |
 | `marv/applyEdits` | A new `{ snapshotId }` after whole-file replacements and/or byte-range `edits`. |
 | `marv/closeSnapshot` | `{ closed }`. |
 | `marv/check` | `{ diagnostics }` for the snapshot/module set, optionally scoped to a `def` or `file`. |
@@ -67,7 +73,7 @@ analysis path.
 | `marv/signature` | `{ name, params, ret, effects, errorSet, pure, requires, ensures, hash }`. |
 | `marv/effects` | `{ effects }` — the **inferred** capability row. |
 | `marv/errorSet` | `{ errorSet }` — the **inferred** error set. |
-| `marv/unsafeSites` | `{ sites }` — unsafe audit boundaries as `{ file, def, hash, justification, span }`. |
+| `marv/unsafeSites` | `{ sites }` — unsafe audit boundaries (`unsafe fn` and `unsafe extern fn`) as `{ file, def, hash, justification, span }`. |
 | `marv/callers` / `marv/callees` | `{ callers }` / `{ callees }` — call edges, by qualified name. |
 | `marv/canonical` | `{ text }` — the canonical form of a `def` or `file`. |
 | `marv/core` | `{ hash, core, deps, alphaCanonical }` — the Core IR and content identity (`spec/03` §4.4). |

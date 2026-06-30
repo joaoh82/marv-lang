@@ -32,6 +32,7 @@ interface Stream {
 interface Fs {
     fn read(fs: &Fs, path: str) -> ![]u8
     fn write(fs: &Fs, path: str, bytes: &[]u8) -> !
+    fn open(fs: &Fs, path: str) -> !File
 }
 
 /// Network access. A function without a `Net` parameter provably cannot reach
@@ -39,13 +40,12 @@ interface Fs {
 interface Net {
     fn get(net: &Net, url: str) -> ![]u8
     fn connect(net: &Net, host: str, port: u16) -> !Conn
+    fn listen(net: &Net, host: str, port: u16) -> !Listener
 }
 
 /// HTTP request/response authority supplied by a server host. `Http` is the
-/// app-facing request capability for one host-provided request: reading method,
-/// path, and UTF-8 body text, then sending one response. Raw byte bodies and
-/// listener lifecycle safety are follow-ups tied to bytes/JSON and linear
-/// resources.
+/// app-facing request capability for one host-provided request: handlers can
+/// read method/path/UTF-8 body text, then send a response through the host.
 interface Http {
     fn method(http: &Http) -> !str
     fn path(http: &Http) -> !str
@@ -61,10 +61,23 @@ interface Spawn {
     fn start(spawn: &Spawn) -> !
 }
 
-/// An open network connection. A connection must be `close`d exactly once;
-/// enforcing that with a `linear interface` awaits linear-capability support
-/// (tracked as a follow-up), so it is a plain capability interface for now.
-interface Conn {
+/// An open file handle. A file must be closed exactly once.
+linear interface File {
+    fn read(file: &File) -> ![]u8
+    fn write(file: &File, bytes: &[]u8) -> !usize
+    fn close(file: File) -> !
+}
+
+/// A listening socket. A listener can accept connections and must be closed
+/// exactly once when the serving scope exits.
+linear interface Listener {
+    fn accept(listener: &Listener) -> !Conn
+    fn accept_http(listener: &Listener) -> !Http
+    fn close(listener: Listener) -> !
+}
+
+/// An open network connection. A connection must be `close`d exactly once.
+linear interface Conn {
     fn send(conn: &mut Conn, bytes: &[]u8) -> !usize
     fn recv(conn: &mut Conn, buf: &mut []u8) -> !usize
     fn close(conn: Conn) -> !

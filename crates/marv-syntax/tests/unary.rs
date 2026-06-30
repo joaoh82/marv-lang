@@ -57,7 +57,8 @@ fn unary_parses_to_expected_shape() {
         let Item::Fn(f) = &m.items[0] else {
             panic!("expected a fn item")
         };
-        match f.body.tail.clone().expect("a tail expression") {
+        let body = f.body.as_ref().expect("function has a body");
+        match body.tail.clone().expect("a tail expression") {
             Tail::Expr(e) => e,
             other => panic!("expected a tail expression, got {other:?}"),
         }

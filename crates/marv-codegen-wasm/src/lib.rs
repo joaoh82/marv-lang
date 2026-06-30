@@ -39,9 +39,12 @@
 use std::collections::HashMap;
 
 use wasm_encoder::{
-    BlockType, CodeSection, ConstExpr, EntityType, ExportKind, ExportSection, Function,
-    FunctionSection, GlobalSection, GlobalType, ImportSection, Instruction, MemArg, MemorySection,
-    MemoryType, Module, TypeSection, ValType,
+    Alias, BlockType, CanonicalFunctionSection, CodeSection, Component, ComponentAliasSection,
+    ComponentExportKind, ComponentExportSection, ComponentImportSection, ComponentTypeRef,
+    ComponentTypeSection, ConstExpr, EntityType, ExportKind, ExportSection, Function,
+    FunctionSection, GlobalSection, GlobalType, ImportSection, InstanceSection, Instruction,
+    MemArg, MemorySection, MemoryType, Module, ModuleArg, ModuleSection, PrimitiveValType,
+    TypeSection, ValType,
 };
 
 use marv_core::ir::*;
@@ -142,6 +145,12 @@ pub struct ExportInfo {
 pub struct WasmArtifact {
     /// The encoded `.wasm` bytes (a core module).
     pub bytes: Vec<u8>,
+    /// The encoded WebAssembly component bytes. This wraps `bytes`, lowers
+    /// typed component imports into the core capability imports, and lifts
+    /// reachable core exports back out as component functions.
+    pub component_bytes: Vec<u8>,
+    /// A deterministic WIT world describing the component imports/exports.
+    pub wit: String,
     /// The capabilities the module requires from its host, in import order.
     pub imports: Vec<CapImport>,
     /// The functions the module exports.
@@ -390,14 +399,18 @@ fn compile_inner(
         .section(&global_sec)
         .section(&export_sec)
         .section(&code_sec);
-    let bytes = module.finish();
+    let bytes = module.clone().finish();
 
     // Validate before handing the bytes back, so a backend bug surfaces here
     // rather than as an opaque trap in wasmtime / the browser.
     wasmparser::validate(&bytes).map_err(|e| WasmError::Invalid(e.to_string()))?;
+    let component_bytes = encode_component(&module, &imports, &exports)?;
+    let wit = generate_wit(&imports, &exports);
 
     Ok(WasmArtifact {
         bytes,
+        component_bytes,
+        wit,
         imports,
         exports,
     })
@@ -521,16 +534,207 @@ fn compile_hashed_inner(
     module.section(&global_sec);
     module.section(&export_sec);
     module.section(&code_sec);
-    let bytes = module.finish();
+    let bytes = module.clone().finish();
     wasmparser::Validator::new()
         .validate_all(&bytes)
         .map_err(|e| WasmError::Invalid(e.to_string()))?;
+    let component_bytes = encode_component(&module, &imports, &exports)?;
+    let wit = generate_wit(&imports, &exports);
 
     Ok(WasmArtifact {
         bytes,
+        component_bytes,
+        wit,
         imports,
         exports,
     })
+}
+
+fn encode_component(
+    core_module: &Module,
+    imports: &[CapImport],
+    exports: &[ExportInfo],
+) -> Result<Vec<u8>, WasmError> {
+    let mut component = Component::new();
+
+    component.section(&ModuleSection(core_module));
+
+    let mut component_types = ComponentTypeSection::new();
+    for imp in imports {
+        let params = named_s64_params(imp.params);
+        component_types
+            .function()
+            .params(params.iter().map(|(name, ty)| (name.as_str(), *ty)))
+            .result(imp.returns_value.then_some(PrimitiveValType::S64.into()));
+    }
+    for export in exports {
+        let params = named_s64_params(export.arity);
+        component_types
+            .function()
+            .params(params.iter().map(|(name, ty)| (name.as_str(), *ty)))
+            .result(Some(PrimitiveValType::S64.into()));
+    }
+    if !imports.is_empty() || !exports.is_empty() {
+        component.section(&component_types);
+    }
+
+    if !imports.is_empty() {
+        let mut component_imports = ComponentImportSection::new();
+        for (idx, imp) in imports.iter().enumerate() {
+            component_imports.import(
+                sanitize_wit_ident(&component_import_name(imp)),
+                ComponentTypeRef::Func(idx as u32),
+            );
+        }
+        component.section(&component_imports);
+
+        let mut lowers = CanonicalFunctionSection::new();
+        for (idx, _imp) in imports.iter().enumerate() {
+            lowers.lower(idx as u32, []);
+        }
+        component.section(&lowers);
+    }
+
+    let mut instances = InstanceSection::new();
+    let import_instances = grouped_import_instances(imports);
+    for (_cap, exports) in &import_instances {
+        instances.export_items(
+            exports
+                .iter()
+                .map(|(name, func_idx)| (name.as_str(), ExportKind::Func, *func_idx)),
+        );
+    }
+    instances.instantiate(
+        0,
+        import_instances
+            .iter()
+            .enumerate()
+            .map(|(idx, (cap, _))| (cap.as_str(), ModuleArg::Instance(idx as u32))),
+    );
+    component.section(&instances);
+
+    let core_instance_idx = import_instances.len() as u32;
+    if !exports.is_empty() {
+        let mut aliases = ComponentAliasSection::new();
+        for export in exports {
+            aliases.alias(Alias::CoreInstanceExport {
+                instance: core_instance_idx,
+                kind: ExportKind::Func,
+                name: &export.name,
+            });
+        }
+        component.section(&aliases);
+
+        let mut lifts = CanonicalFunctionSection::new();
+        let core_func_base = imports.len() as u32;
+        let component_type_base = imports.len() as u32;
+        for (idx, _export) in exports.iter().enumerate() {
+            lifts.lift(
+                core_func_base + idx as u32,
+                component_type_base + idx as u32,
+                [],
+            );
+        }
+        component.section(&lifts);
+
+        let mut component_exports = ComponentExportSection::new();
+        let component_func_base = imports.len() as u32;
+        for (idx, export) in exports.iter().enumerate() {
+            component_exports.export(
+                sanitize_wit_ident(&export.name),
+                ComponentExportKind::Func,
+                component_func_base + idx as u32,
+                Some(ComponentTypeRef::Func(component_type_base + idx as u32)),
+            );
+        }
+        component.section(&component_exports);
+    }
+
+    let bytes = component.finish();
+    wasmparser::Validator::new()
+        .validate_all(&bytes)
+        .map_err(|e| WasmError::Invalid(format!("component: {e}")))?;
+    Ok(bytes)
+}
+
+fn named_s64_params(count: usize) -> Vec<(String, PrimitiveValType)> {
+    (0..count)
+        .map(|idx| (format!("arg{idx}"), PrimitiveValType::S64))
+        .collect()
+}
+
+fn grouped_import_instances(imports: &[CapImport]) -> Vec<(String, Vec<(String, u32)>)> {
+    let mut groups: Vec<(String, Vec<(String, u32)>)> = Vec::new();
+    for (idx, imp) in imports.iter().enumerate() {
+        if let Some((_, exports)) = groups.iter_mut().find(|(cap, _)| cap == &imp.cap) {
+            exports.push((format!("op{}", imp.op), idx as u32));
+        } else {
+            groups.push((imp.cap.clone(), vec![(format!("op{}", imp.op), idx as u32)]));
+        }
+    }
+    groups
+}
+
+fn component_import_name(imp: &CapImport) -> String {
+    format!("{}.op{}", imp.cap, imp.op)
+}
+
+pub fn generate_wit(imports: &[CapImport], exports: &[ExportInfo]) -> String {
+    let mut out = String::from("package marv:component;\n\nworld marv {\n");
+    for imp in imports {
+        out.push_str("  import ");
+        out.push_str(&sanitize_wit_ident(&component_import_name(imp)));
+        out.push_str(": func(");
+        out.push_str(&wit_params(imp.params));
+        out.push(')');
+        if imp.returns_value {
+            out.push_str(" -> s64");
+        }
+        out.push_str(";\n");
+    }
+    for export in exports {
+        out.push_str("  export ");
+        out.push_str(&sanitize_wit_ident(&export.name));
+        out.push_str(": func(");
+        out.push_str(&wit_params(export.arity));
+        out.push_str(") -> s64;\n");
+    }
+    out.push_str("}\n");
+    out
+}
+
+fn wit_params(count: usize) -> String {
+    (0..count)
+        .map(|idx| format!("arg{idx}: s64"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn sanitize_wit_ident(name: &str) -> String {
+    let mut out = String::new();
+    let mut last_dash = false;
+    for ch in name.chars() {
+        let c = ch.to_ascii_lowercase();
+        if c.is_ascii_alphanumeric() {
+            out.push(c);
+            last_dash = false;
+        } else if !last_dash {
+            out.push('-');
+            last_dash = true;
+        }
+    }
+    let trimmed = out.trim_matches('-').to_string();
+    if trimmed.is_empty() {
+        "item".to_string()
+    } else if trimmed
+        .as_bytes()
+        .first()
+        .is_some_and(|b| b.is_ascii_digit())
+    {
+        format!("item-{trimmed}")
+    } else {
+        trimmed
+    }
 }
 
 fn hashed_reachable_mask(

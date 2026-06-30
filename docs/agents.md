@@ -50,7 +50,7 @@ Use as many as your harness supports:
 3. fmt (canonical form — never argue about style; there is exactly one)
 4. for each pure / verified-subset def: verify(def)
        on "failed": use the counterexample to repair, then re-verify
-5. build (--target native-cranelift | wasm-component) ; run with an explicit capability grant
+5. build (--target native-cranelift | native-llvm | wasm-component | wasm-core; native can JIT-run, AOT emit, or LLVM-run the release slice; wasm-component writes a component plus WIT) ; run with an explicit capability grant
 6. commit (freeze hashes into the store + lockfile)
 ```
 
@@ -63,7 +63,11 @@ marv check <file>                              # diagnostics (codes are stable: 
 marv run <file> --entry NAME [args…]           # interpret (the reference semantics)
 marv run <file> --grant Fs,Net --entry NAME    # inject ONLY these capabilities
 marv build --run <file> --entry NAME [args…]   # Cranelift JIT, then execute
-marv build --target wasm-component <file> -o out.wasm
+marv build <file> --entry NAME --out app       # Cranelift AOT executable
+marv build --emit object <file> -o app.o       # deterministic native object
+marv build --target native-llvm --run <file> --entry NAME [args…]
+marv build --target wasm-component <file> -o out.wasm  # writes out.wasm + out.wit
+marv build --target wasm-core <file> -o out.wasm       # core module for browser/wasmtime
 marv verify <file> [--def NAME]                # SMT: proved / failed+counterexample / unsupported
 marv commit <file> [--store .marv]             # freeze into the content-addressed store
 ```
@@ -175,16 +179,19 @@ literals + index reads + assignment (`lvalue = e`, `var`), `while`/`for` loops w
 projection, generic parameter lists + type arguments, `interface`/`impl` with
 monomorphization, **capabilities & `perform` from source** (capability method calls →
 `Perform`, `io.fs()` narrowing, inferred-and-checked effect rows), and `requires`/`ensures`
-contracts. Local source imports are discoverable by the CLI, and source-only
+contracts. Local source imports are discoverable by the CLI; `marv.toml` package
+roots add deterministic source roots and local path dependencies; and source-only
 JSON-RPC snapshots can be checked as a module set. `std.bytes` provides UTF-8
-helpers, `std.json` provides the first scalar/source-backed flat-object parsing and
-serialization slice, `std.http` exposes the first host-provided request/response capability,
+helpers, `std.json` provides scalar/source-backed flat-object helpers plus a recursive
+materialized JSON DOM for nested parse/inspect/rebuild/serialize workflows, `std.http` exposes the first host-provided request/response capability,
+`std.io.Listener.accept_http` exposes a listener-accepted HTTP exchange for one router turn,
 `std.spawn` exposes scoped linear task handles over explicit `Spawn`, `unsafe fn` audit metadata is
 queryable through `marv/unsafeSites`, and
 explicit-allocation `List`/`Set`/`Map` collection literals plus `std.iter.IndexIter[T]` are
-implemented. Post-MARV-48 roadmap work includes `linear` resource capabilities,
-recursive/materialized JSON, production listener/resource lifecycle safety, raw FFI operations,
-richer package metadata, and package-aware read queries. For
+implemented. `File`, `Listener`, and `Conn` are now linear resource capabilities that must
+be closed exactly once. `unsafe extern fn` declarations now make raw host FFI boundaries
+auditable, while executing/linking host symbols remains a staged follow-up. Post-MARV-48
+roadmap work includes host-backed multi-request HTTP serving and deeper verification. For
 anything not yet expressible, construct a `*.core.json` snapshot (see
 [`store.md`](store.md) and the `tests/run/*.core.json` fixtures) or check
 [`roadmap.md`](roadmap.md).

@@ -107,16 +107,20 @@ pub fn generic_names(generics: &[Generic]) -> Vec<String> {
 }
 
 /// `interface Name[generics] { fn sig; ... }` (`spec/02` §B `interface_decl`,
-/// `spec/01` §3.4). An interface is bounded polymorphism: it declares abstract
-/// method signatures over its type parameter(s); concrete types supply bodies via
-/// an [`ImplDecl`]. The grammar requires a non-empty generic list.
+/// `spec/01` §3.4). A generic interface is bounded polymorphism: it declares
+/// abstract method signatures over its type parameter(s); concrete types supply
+/// bodies via an [`ImplDecl`]. A non-generic interface is a capability, and a
+/// `linear interface` is a linear capability resource.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InterfaceDecl {
     /// Doc-comment lines preceding the declaration (see [`ErrorDecl::docs`]).
     pub docs: Vec<String>,
+    /// Whether values of this interface type are linear resources that must be
+    /// consumed exactly once.
+    pub linear: bool,
     pub name: String,
-    /// Generic type parameter names, e.g. `["T"]` for `interface Ord[T]`. Always
-    /// non-empty (the grammar requires generics on an interface).
+    /// Generic type parameter names, e.g. `["T"]` for `interface Ord[T]`.
+    /// Empty for capability interfaces.
     pub generics: Vec<Generic>,
     /// The method signatures the interface declares (bodies live in `impl`s).
     pub methods: Vec<FnSig>,
@@ -236,6 +240,8 @@ pub struct Variant {
 }
 
 /// `[pure] [unsafe] fn name(params) [-> ret] [requires e]* [ensures e]* { body }`.
+/// `unsafe extern fn name(params) [-> ret]` declares a host FFI symbol with no
+/// body; it is always an unsafe audit boundary.
 ///
 /// Contract clauses (`spec/01` §7) sit between the signature and the body, each
 /// on its own line. `requires` expressions may mention the parameters;
@@ -249,6 +255,9 @@ pub struct FnDecl {
     /// Whether this function is an explicit unsafe audit boundary. This is
     /// source metadata, not part of the Core identity.
     pub is_unsafe: bool,
+    /// Whether this is a host FFI declaration. Extern functions have no body and
+    /// must also be unsafe so the audit metadata remains discoverable.
+    pub is_extern: bool,
     pub name: String,
     /// Generic type parameters, e.g. `[T]` (or `[T: Ord]`) for `fn sort[T](...)`.
     /// Empty for a non-generic function.
@@ -259,7 +268,7 @@ pub struct FnDecl {
     pub requires: Vec<Expr>,
     /// Postconditions, in source order (`ensures` clauses; may mention `result`).
     pub ensures: Vec<Expr>,
-    pub body: Block,
+    pub body: Option<Block>,
 }
 
 /// One `name: Type` function parameter.

@@ -11,8 +11,10 @@ fixture source for the test suite. As of M4 the integer/boolean subset is
 | [`hello.mv`](hello.mv) | **Runnable (MARV-6):** capabilities & `perform` from source — `io.stdout()` narrows `Io` to a `Stream`, `out.write(...)` performs. `marv run --grant Io examples/hello.mv` logs the `Io`/`Stream` effects; without `--grant Io` it is refused. |
 | [`read_file.mv`](read_file.mv) | **Runnable (MARV-6):** capability **narrowing** — `io.fs()` attenuates `Io` to `Fs`, then `fs.read(path)` performs. `marv run --grant Io examples/read_file.mv /etc/hosts` records the `Io`→`Fs` narrowing and the read; the signature alone proves it touches only the filesystem. |
 | [`http_echo.mv`](http_echo.mv) | **Runnable (MARV-53):** request/response app logic over an explicit `Http` capability. `std.http.receive` reads the host-provided method/path/body, `send` responds, and `marv run --grant Http examples/http_echo.mv` returns the deterministic interpreter test-host body. |
+| [`http_router.mv`](http_router.mv) | **Runnable (MARV-63):** listener/router shape over explicit `Net` authority. `net.listen` creates a linear `Listener`, `accept_http` yields one `Http` exchange, two routes respond (including a JSON body), and the listener is closed exactly once. `marv run --entry serve_once --grant Net examples/http_router.mv` uses the deterministic interpreter host. |
 | [`spawn.mv`](spawn.mv) | **Runnable (MARV-56):** structured-concurrency first slice over an explicit `Spawn` capability. `std.spawn.spawn_i64` returns linear task handles, `join_i64` consumes them, and `marv run --grant Spawn examples/spawn.mv` records two `Spawn.start` effects before returning `42`. |
-| [`unsafe_audit.mv`](unsafe_audit.mv) | **Checks (MARV-57):** `unsafe fn` with a required `SAFETY:` doc comment. It appears in `marv/unsafeSites` and contributes unsafe-site metadata to `marv store audit` when committed. |
+| [`resource_lifecycle.mv`](resource_lifecycle.mv) | **Checks (MARV-64):** linear resource capabilities — `File`, `Listener`, and `Conn` values returned by `Fs`/`Net` operations must be closed exactly once. |
+| [`unsafe_audit.mv`](unsafe_audit.mv) | **Checks (MARV-65):** `unsafe extern fn` host FFI declarations and audited `unsafe fn` wrappers, both with required `SAFETY:` doc comments. They appear in `marv/unsafeSites` and contribute unsafe-site metadata to `marv store audit` when committed; execution/codegen of host FFI remains honestly unsupported. |
 | [`clamp.mv`](clamp.mv) | **Verifiable (M6):** a `pure` function with `requires`/`ensures` contracts. `marv verify examples/clamp.mv` proves it (Tier 2); `marv run` enforces it at runtime (Tier 1). |
 | [`report.mv`](report.mv) | **Checks (MARV-6):** `struct`/`error` decls, second-class `&` references, a loop `invariant`, an inferred error set, and a real capability `perform` — `load_and_total(fs: Fs, …)` does `fs.read(path)?`. |
 | [`geometry.mv`](geometry.mv) | The **M0 parsed subset** end to end: `struct`/`linear struct`, `pure fn`, `&`/`&mut` params, `if`/`else`, fully-parenthesized binary operators. Round-trips through the real parser. |
@@ -29,6 +31,8 @@ fixture source for the test suite. As of M4 the integer/boolean subset is
 | [`list_literals.mv`](list_literals.mv) | **Runnable (MARV-51):** explicit-allocation `List`, `Map`, and `Set` literals. It sums a list, reads a string-keyed map literal, and checks a set literal whose duplicate item is deduped through ordinary set insertion. Pinned in the three-way differential corpus as [`tests/run/list_literals.mv`](../tests/run/list_literals.mv). |
 | [`iter.mv`](iter.mv) | **Runnable (MARV-52):** wraps a `List[i64]` in `std.iter.IndexIter[i64]`; `for x in it` lowers through the `Iter[i64]` protocol wrappers instead of direct `len`/index. Pinned in the three-way differential corpus as [`tests/run/iter.mv`](../tests/run/iter.mv). |
 | [`json.mv`](json.mv) | **Std example (MARV-55):** parses a flat JSON object through `std.json`, inspects scalar fields with typed errors, and serializes a scalar string with explicit `Alloc`. The companion corpus interpreter-smokes parse/error paths and pins serializer-safe output three-way in [`tests/run/json.mv`](../tests/run/json.mv). |
+| [`json_dom.mv`](json_dom.mv) | **Std example (MARV-66):** parses a nested config payload into the recursive `Json` DOM, inspects array/object fields with typed helpers, builds a response object/array tree with explicit `Alloc`, and serializes it deterministically. The companion corpus pins backend-safe construction/serialization three-way in [`tests/run/json_dom.mv`](../tests/run/json_dom.mv) and keeps recursive parse/error paths interpreter-covered. |
+| [`packages/app`](packages/app) | **Package example (MARV-67):** a manifest-backed package with `marv.toml`, `src/main.mv`, and a local path dependency on [`packages/util`](packages/util). `marv check examples/packages/app/src/main.mv`, `marv run ...`, `marv build --run ...`, and `marv commit --store examples/packages/app/.marv ...` load the package graph deterministically. |
 | [`optionals.mv`](optionals.mv) | **Runnable (MARV-18):** constructing and matching an enum **imported from another module**, checked as a single file — `import std.option (Option)`, then `Option.Some(n)` / `Option.None` and an exhaustive `match`, resolved to the imported enum's real constructors (correct tags, `std.option.Option` nominal) by the CLI's `std` resolution. `marv check examples/optionals.mv` is clean; `marv run --entry main examples/optionals.mv` yields `42`, and the same program runs on the Cranelift JIT (`marv build --run --entry main`). |
 | [`generics.mv`](generics.mv) | **Runnable (MARV-5):** generics + an `interface`/`impl` with a bound. `max[T: Ord](a, b)` calls the interface method `cmp`; `main` calls `max(3, 7)`, which **monomorphizes** to `max@i32` and **dispatches** `cmp` to the coherent `impl Ord[i32]`. `marv run --entry main examples/generics.mv` yields `7`; `marv resolve-impl examples/generics.mv` reports the selected impl; instantiating at a type with no impl (e.g. `max(true, false)`) fails `marv check` with `E0160`. Since the `Ordering` enum got a runtime layout (MARV-9), the monomorphized program also runs on the Cranelift JIT and WASM — an `i64` variant lives in the differential corpus as [`tests/run/generics.mv`](../tests/run/generics.mv) (MARV-26). |
 | [`app_tokenizer.mv`](app_tokenizer.mv) | **Application example (MARV-40 / MARV-45):** scans a string, splits on separators, pushes token slices into a growable `List[str]` through explicit `Alloc`, and returns a deterministic token summary. Pinned in the three-way differential corpus as [`tests/run/app_tokenizer.mv`](../tests/run/app_tokenizer.mv). |
@@ -49,16 +53,21 @@ contract arithmetic, and `old(e)`); `color.mv` when `enum`/`match` landed; `gene
 `optionals.mv` when single-file lowering of imported enums landed (MARV-18);
 `bytes_utf8.mv` when the source-level `std.bytes` UTF-8 helpers landed (MARV-54);
 `json.mv` when the first `std.json` scalar/flat-object slice landed (MARV-55);
+`json_dom.mv` when the recursive/materialized JSON DOM landed (MARV-66);
+`packages/app` when `marv.toml` package manifests landed (MARV-67);
 `http_echo.mv` when the first host-provided HTTP request capability landed (MARV-53);
+`http_router.mv` when listener-accepted HTTP exchanges landed (MARV-63);
 `spawn.mv` when scoped `Spawn` task handles landed (MARV-56);
-`unsafe_audit.mv` when `unsafe fn` audit metadata landed (MARV-57).
+`unsafe_audit.mv` when `unsafe fn` audit metadata landed (MARV-57), then host FFI
+declarations behind unsafe audit boundaries landed (MARV-65).
 `factorial.mv`, `arithmetic.mv`, `color.mv`, `mutation.mv`, `loops.mv`,
 `generics.mv`, `arrays.mv`, `slices.mv`, and `optionals.mv` additionally lie inside the
 *executable* subset, so the interpreter runs them (`marv run`); the integer ones
 (`factorial`, `arithmetic`, `loops`, `arrays`, `slices`) also run on the Cranelift JIT (`marv build --run`)
 and WebAssembly (`marv build --target wasm-component`, then via wasmtime or the browser
 demo in [`../web/`](../web)). `hello`/`read_file` run on the interpreter under
-`marv run --grant Io`, and `http_echo` runs under `marv run --grant Http`
+`marv run --grant Io`, `http_echo` runs under `marv run --grant Http`, and
+`http_router` runs under `marv run --entry serve_once --grant Net`
 (capability ops are interpreter-modeled; Cranelift rejects `perform`). `spawn.mv` runs on the
 interpreter under `marv run --grant Spawn`; its host operations are modeled as recorded
 effects. `generics.mv` constructs an `enum` (`Ordering`); now that aggregate codegen

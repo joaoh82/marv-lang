@@ -70,6 +70,17 @@ The same logic is exposed as `marv/commit` (`spec/03` §3.4), returning
 `{ committed: [{name, hash, status, reviewed}], added, alreadyReviewed, rebound,
 storeSize }`.
 
+For a `marv.toml` package, commit operates on the manifest-controlled package
+graph: local path dependencies are loaded from source and frozen into the same
+store/lockfile under their own qualified names. Use an explicit package-local
+store when you want the lockfile beside the manifest:
+
+```sh
+$ marv commit --store app/.marv app/src/main.mv
+  + app.main.main ...
+  + util.math.double ...
+```
+
 ## Pinned builds
 
 ```
@@ -84,6 +95,10 @@ blob's `deps`, and hands the interpreter/backend a hash-keyed program. Missing
 dependency blobs are hard errors: a stored build never falls back to whatever
 source happens to be on disk.
 
+In package mode the source graph is still loaded through `marv.toml` first, so
+the checker sees the same package/dependency modules. The lockfile then pins
+which already-reviewed hashes are used for known names during run/build.
+
 ## Audit and GC
 
 ```
@@ -93,9 +108,9 @@ marv store gc [--store .marv]
 
 `audit` prints each blob's reviewed flag, lockfile reachability, dependency
 count, and unsafe-site count. Unsafe sites come from source-level `unsafe fn`
-metadata and its required `SAFETY:` justification; this metadata lives beside
-Core identity, so audit can flag unsafe boundaries without changing a
-definition's content hash. `gc` removes blobs unreachable from every current
+and `unsafe extern fn` metadata with required `SAFETY:` justifications; this
+metadata lives beside Core identity, so audit can flag unsafe boundaries
+without changing a definition's content hash. `gc` removes blobs unreachable from every current
 lockfile binding and rewrites the blob directory.
 
 ## Self-hosting

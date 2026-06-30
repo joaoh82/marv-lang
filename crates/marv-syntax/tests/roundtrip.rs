@@ -149,8 +149,13 @@ fn gen_item(rng: &mut Rng) -> Item {
 }
 
 fn gen_interface(rng: &mut Rng) -> InterfaceDecl {
-    let mut generics = gen_generics(rng);
-    if generics.is_empty() {
+    let linear = rng.chance(1, 4);
+    let mut generics = if linear {
+        Vec::new()
+    } else {
+        gen_generics(rng)
+    };
+    if !linear && generics.is_empty() {
         generics.push(Generic {
             name: "T".to_string(),
             bound: None,
@@ -159,6 +164,7 @@ fn gen_interface(rng: &mut Rng) -> InterfaceDecl {
     let methods = (0..rng.below(3)).map(|_| gen_fn_sig(rng)).collect();
     InterfaceDecl {
         docs: gen_docs(rng),
+        linear,
         name: rng.pick(TYPE_NAMES).to_string(),
         generics,
         methods,
@@ -253,13 +259,14 @@ fn gen_fn(rng: &mut Rng) -> FnDecl {
         docs: gen_docs(rng),
         is_pure,
         is_unsafe: false,
+        is_extern: false,
         name,
         generics,
         params,
         ret,
         requires: Vec::new(),
         ensures: Vec::new(),
-        body,
+        body: Some(body),
     }
 }
 

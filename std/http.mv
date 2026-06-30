@@ -11,8 +11,32 @@ pure fn request_body(request: Request) -> str {
     request.body
 }
 
+pure fn request_method(request: Request) -> str {
+    request.method
+}
+
+pure fn request_path(request: Request) -> str {
+    request.path
+}
+
+pure fn route_matches(request: Request, method: str, path: str) -> bool {
+    ((request.method == method) and (request.path == path))
+}
+
 pure fn response(status: u16, body: str) -> Response {
     Response { status: status, body: body }
+}
+
+pure fn text_response(body: str) -> Response {
+    response((200 as u16), body)
+}
+
+pure fn json_response(status: u16, body: str) -> Response {
+    response(status, body)
+}
+
+pure fn not_found() -> Response {
+    response((404 as u16), "not found")
 }
 
 /// Read the scalar/string request pieces from the host. The low-level ABI stays

@@ -1,6 +1,7 @@
 mod std.json
 import std.io (Alloc)
-import std.collections (List, with_capacity, push)
+import std.bytes (decode_utf8, encode_utf8)
+import std.collections (List, with_capacity, push, set)
 import std.str (from_chars)
 
 /// Typed JSON parse errors. JSON parsing returns data-flow errors instead of
@@ -8,8 +9,6 @@ import std.str (from_chars)
 error JsonError { UnexpectedEnd, UnexpectedChar, ExpectedColon, ExpectedCommaOrEnd, ExpectedString, ExpectedNumber, ExpectedValue, TrailingInput }
 
 /// First JSON value slice: scalars plus a validated source-backed flat object.
-/// Arrays and materialized nested objects stay with the recursive ADT and
-/// general map work tracked later in MARV-48.
 enum JsonScalar {
     Null,
     Bool(bool),
@@ -17,11 +16,26 @@ enum JsonScalar {
     String(str),
 }
 
+/// Materialized recursive JSON DOM. Objects are list-backed in this slice so
+/// they run on the current interpreter, Cranelift, and WASM collection model.
+enum Json {
+    Null,
+    Bool(bool),
+    Number(i64),
+    String(str),
+    Array(List[Json]),
+    Object(List[JsonField]),
+}
+
 struct JsonObject { source: str }
+
+struct JsonField { key: str, value: Json }
 
 struct ParsedScalar { scalar_value: JsonScalar, next_index: usize }
 
 struct ParsedString { string_value: str, next_index: usize }
+
+struct JsonSep { next_index: usize, done: bool }
 
 pure fn is_ws(c: char) -> bool {
     ((((c == ' ') or (c == '\n')) or (c == '\r')) or (c == '\t'))
@@ -179,6 +193,231 @@ fn parse_scalar(alloc: Alloc, text: str) -> !JsonScalar {
     }
 }
 
+pure fn scalar_to_json(value: JsonScalar) -> Json {
+    match value {
+        JsonScalar.Null => Json.Null,
+        JsonScalar.Bool(flag) => Json.Bool(flag),
+        JsonScalar.Number(n) => Json.Number(n),
+        JsonScalar.String(s) => Json.String(s),
+    }
+}
+
+fn parse_json_sep(text: str, index: usize, close: char) -> !JsonSep {
+    if char_eq_at(text, index, ',') {
+        JsonSep { next_index: skip_ws(text, (index + 1)), done: false }
+    } else if char_eq_at(text, index, close) {
+        JsonSep { next_index: (index + 1), done: true }
+    } else {
+        JsonError.ExpectedCommaOrEnd
+    }
+}
+
+fn skip_string_at(text: str, index: usize) -> !usize {
+    let i: usize = skip_ws(text, index)
+    if not char_eq_at(text, i, '"') {
+        JsonError.ExpectedString
+    } else {
+        let parsed: ParsedString = parse_string_body(text, i)?
+        parsed.next_index
+    }
+}
+
+fn skip_number_at(text: str, index: usize) -> !usize {
+    let parsed: ParsedScalar = parse_number_at(text, index)?
+    parsed.next_index
+}
+
+fn skip_scalar_at(text: str, index: usize) -> !usize {
+    let i: usize = skip_ws(text, index)
+    if (i >= len(text)) {
+        JsonError.UnexpectedEnd
+    } else if has_null_at(text, i) {
+        (i + 4)
+    } else if has_true_at(text, i) {
+        (i + 4)
+    } else if has_false_at(text, i) {
+        (i + 5)
+    } else if char_eq_at(text, i, '"') {
+        skip_string_at(text, i)
+    } else if (char_eq_at(text, i, '-') or digit_at(text, i)) {
+        skip_number_at(text, i)
+    } else {
+        JsonError.ExpectedValue
+    }
+}
+
+fn skip_json_at(text: str, index: usize) -> !usize {
+    let i: usize = skip_ws(text, index)
+    if (i >= len(text)) {
+        JsonError.UnexpectedEnd
+    } else if char_eq_at(text, i, '[') {
+        skip_json_array_at(text, i)
+    } else if char_eq_at(text, i, '{') {
+        skip_json_object_at(text, i)
+    } else {
+        skip_scalar_at(text, i)
+    }
+}
+
+fn skip_json_array_items(text: str, index: usize) -> !usize {
+    var i: usize = index
+    var done: bool = false
+    while ((i < len(text)) and not done) {
+        let next: usize = skip_json_at(text, i)?
+        i = skip_ws(text, next)
+        let sep: JsonSep = parse_json_sep(text, i, ']')?
+        i = sep.next_index
+        done = sep.done
+    }
+    if done {
+        i
+    } else {
+        JsonError.UnexpectedEnd
+    }
+}
+
+fn skip_json_array_at(text: str, open_index: usize) -> !usize {
+    let i: usize = skip_ws(text, (open_index + 1))
+    if char_eq_at(text, i, ']') {
+        (i + 1)
+    } else {
+        skip_json_array_items(text, i)
+    }
+}
+
+fn skip_json_object_fields(text: str, index: usize) -> !usize {
+    var i: usize = index
+    var done: bool = false
+    while ((i < len(text)) and not done) {
+        let key_end: usize = skip_string_at(text, i)?
+        i = skip_ws(text, key_end)
+        if not char_eq_at(text, i, ':') {
+            JsonError.ExpectedColon
+        } else {
+            let value_end: usize = skip_json_at(text, (i + 1))?
+            i = skip_ws(text, value_end)
+            let sep: JsonSep = parse_json_sep(text, i, '}')?
+            i = sep.next_index
+            done = sep.done
+        }
+    }
+    if done {
+        i
+    } else {
+        JsonError.UnexpectedEnd
+    }
+}
+
+fn skip_json_object_at(text: str, open_index: usize) -> !usize {
+    let i: usize = skip_ws(text, (open_index + 1))
+    if char_eq_at(text, i, '}') {
+        (i + 1)
+    } else {
+        skip_json_object_fields(text, i)
+    }
+}
+
+fn parse_json_value_at(alloc: Alloc, text: str, index: usize) -> !Json {
+    let i: usize = skip_ws(text, index)
+    if (i >= len(text)) {
+        JsonError.UnexpectedEnd
+    } else if char_eq_at(text, i, '[') {
+        parse_json_array_at(alloc, text, i)
+    } else if char_eq_at(text, i, '{') {
+        parse_json_object_at(alloc, text, i)
+    } else {
+        let parsed: ParsedScalar = parse_scalar_at(alloc, text, i)?
+        scalar_to_json(parsed.scalar_value)
+    }
+}
+
+fn push_json_array_item_at(alloc: Alloc, items: List[Json], text: str, index: usize) -> !List[Json] {
+    let item: Json = parse_json_value_at(alloc, text, index)?
+    push(alloc, items, item)
+}
+
+fn push_json_object_field_at(alloc: Alloc, fields: List[JsonField], key: str, text: str, index: usize) -> !List[JsonField] {
+    let value: Json = parse_json_value_at(alloc, text, index)?
+    push(alloc, fields, JsonField { key: key, value: value })
+}
+
+fn parse_json_array_items(alloc: Alloc, text: str, index: usize, items: List[Json]) -> !Json {
+    if (index >= len(text)) {
+        JsonError.UnexpectedEnd
+    } else {
+        let next: usize = skip_json_at(text, index)?
+        let out: List[Json] = push_json_array_item_at(alloc, items, text, index)?
+        let after_value: usize = skip_ws(text, next)
+        let sep: JsonSep = parse_json_sep(text, after_value, ']')?
+        if sep.done {
+            Json.Array(out)
+        } else {
+            parse_json_array_items(alloc, text, sep.next_index, out)
+        }
+    }
+}
+
+fn parse_json_array_at(alloc: Alloc, text: str, open_index: usize) -> !Json {
+    let i: usize = skip_ws(text, (open_index + 1))
+    if char_eq_at(text, i, ']') {
+        let items: List[Json] = with_capacity(alloc, 0)
+        Json.Array(items)
+    } else {
+        let items: List[Json] = with_capacity(alloc, 4)
+        parse_json_array_items(alloc, text, i, items)
+    }
+}
+
+fn parse_json_object_fields(alloc: Alloc, text: str, index: usize, fields: List[JsonField]) -> !Json {
+    if (index >= len(text)) {
+        JsonError.UnexpectedEnd
+    } else {
+        let key: ParsedString = parse_string_at(alloc, text, index)?
+        let colon: usize = skip_ws(text, key.next_index)
+        if not char_eq_at(text, colon, ':') {
+            JsonError.ExpectedColon
+        } else {
+            let value_start: usize = (colon + 1)
+            let next: usize = skip_json_at(text, value_start)?
+            let out: List[JsonField] = push_json_object_field_at(alloc, fields, key.string_value, text, value_start)?
+            let after_value: usize = skip_ws(text, next)
+            let sep: JsonSep = parse_json_sep(text, after_value, '}')?
+            if sep.done {
+                Json.Object(out)
+            } else {
+                parse_json_object_fields(alloc, text, sep.next_index, out)
+            }
+        }
+    }
+}
+
+fn parse_json_object_at(alloc: Alloc, text: str, open_index: usize) -> !Json {
+    let i: usize = skip_ws(text, (open_index + 1))
+    if char_eq_at(text, i, '}') {
+        let fields: List[JsonField] = with_capacity(alloc, 0)
+        Json.Object(fields)
+    } else {
+        let fields: List[JsonField] = with_capacity(alloc, 4)
+        parse_json_object_fields(alloc, text, i, fields)
+    }
+}
+
+fn parse_json(alloc: Alloc, text: str) -> !Json {
+    let value: Json = parse_json_value_at(alloc, text, 0)?
+    let next: usize = skip_json_at(text, 0)?
+    let end: usize = skip_ws(text, next)
+    if (end == len(text)) {
+        value
+    } else {
+        JsonError.TrailingInput
+    }
+}
+
+fn parse_json_bytes(alloc: Alloc, bytes: []u8) -> !Json {
+    let text: str = decode_utf8(alloc, bytes)?
+    parse_json(alloc, text)
+}
+
 fn finish_object(text: str, index: usize) -> !JsonObject {
     let end: usize = skip_ws(text, index)
     if (end == len(text)) {
@@ -306,6 +545,130 @@ pure fn as_string(value: JsonScalar, fallback: str) -> str {
     }
 }
 
+pure fn json_as_bool(value: Json, fallback: bool) -> bool {
+    match value {
+        Json.Bool(flag) => flag,
+        _ => fallback,
+    }
+}
+
+pure fn json_as_number(value: Json, fallback: i64) -> i64 {
+    match value {
+        Json.Number(n) => n,
+        _ => fallback,
+    }
+}
+
+pure fn json_as_string(value: Json, fallback: str) -> str {
+    match value {
+        Json.String(s) => s,
+        _ => fallback,
+    }
+}
+
+pure fn json_array_len(value: Json) -> usize {
+    match value {
+        Json.Array(items) => len(items),
+        _ => 0,
+    }
+}
+
+pure fn json_object_len(value: Json) -> usize {
+    match value {
+        Json.Object(fields) => len(fields),
+        _ => 0,
+    }
+}
+
+fn json_array_get_or(value: Json, index: usize, fallback: Json) -> Json {
+    match value {
+        Json.Array(items) => {
+            if (index < len(items)) {
+                items[index]
+            } else {
+                fallback
+            }
+        },
+        _ => fallback,
+    }
+}
+
+fn json_object_get_or(value: Json, key: str, fallback: Json) -> Json {
+    match value {
+        Json.Object(fields) => {
+            var out: Json = fallback
+            var found: bool = false
+            var i: usize = 0
+            while ((i < len(fields)) and not found) {
+                let field: JsonField = fields[i]
+                if (field.key == key) {
+                    out = field.value
+                    found = true
+                } else {
+                    i = (i + 1)
+                }
+            }
+            out
+        },
+        _ => fallback,
+    }
+}
+
+fn json_empty_array(alloc: Alloc) -> Json {
+    let items: List[Json] = with_capacity(alloc, 0)
+    Json.Array(items)
+}
+
+fn json_array_push(alloc: Alloc, value: Json, item: Json) -> Json {
+    match value {
+        Json.Array(items) => Json.Array(push(alloc, items, item)),
+        _ => value,
+    }
+}
+
+fn json_array_set(value: Json, index: usize, item: Json) -> Json {
+    match value {
+        Json.Array(items) => {
+            if (index < len(items)) {
+                Json.Array(set(items, index, item))
+            } else {
+                value
+            }
+        },
+        _ => value,
+    }
+}
+
+fn json_empty_object(alloc: Alloc) -> Json {
+    let fields: List[JsonField] = with_capacity(alloc, 0)
+    Json.Object(fields)
+}
+
+fn json_object_insert(alloc: Alloc, value: Json, key: str, item: Json) -> Json {
+    match value {
+        Json.Object(fields) => {
+            var out: List[JsonField] = fields
+            var found: bool = false
+            var i: usize = 0
+            while ((i < len(out)) and not found) {
+                let field: JsonField = out[i]
+                if (field.key == key) {
+                    out = set(out, i, JsonField { key: key, value: item })
+                    found = true
+                } else {
+                    i = (i + 1)
+                }
+            }
+            if found {
+                Json.Object(out)
+            } else {
+                Json.Object(push(alloc, out, JsonField { key: key, value: item }))
+            }
+        },
+        _ => value,
+    }
+}
+
 fn serialize_positive_number(alloc: Alloc, nval: i64) -> str {
     var place: i64 = 1
     while (place <= (nval / 10)) {
@@ -363,6 +726,67 @@ fn serialize_scalar(alloc: Alloc, value: JsonScalar) -> str {
         JsonScalar.Number(n) => serialize_number(alloc, n),
         JsonScalar.String(s) => quote_string(alloc, s),
     }
+}
+
+fn push_text(alloc: Alloc, chars: List[char], text: str) -> List[char] {
+    var out: List[char] = chars
+    for c in text {
+        out = push(alloc, out, c)
+    }
+    out
+}
+
+fn push_comma_if(alloc: Alloc, chars: List[char], include: bool) -> List[char] {
+    if include {
+        push(alloc, chars, ',')
+    } else {
+        chars
+    }
+}
+
+fn serialize_json_array(alloc: Alloc, items: List[Json]) -> str {
+    var chars: List[char] = with_capacity(alloc, 2)
+    chars = push(alloc, chars, '[')
+    var i: usize = 0
+    while (i < len(items)) {
+        chars = push_comma_if(alloc, chars, (i > 0))
+        let text: str = serialize_json(alloc, items[i])
+        chars = push_text(alloc, chars, text)
+        i = (i + 1)
+    }
+    chars = push(alloc, chars, ']')
+    from_chars(alloc, chars)
+}
+
+fn serialize_json_object(alloc: Alloc, fields: List[JsonField]) -> str {
+    var chars: List[char] = with_capacity(alloc, 2)
+    chars = push(alloc, chars, '{')
+    var i: usize = 0
+    while (i < len(fields)) {
+        chars = push_comma_if(alloc, chars, (i > 0))
+        let field: JsonField = fields[i]
+        chars = push_text(alloc, chars, quote_string(alloc, field.key))
+        chars = push(alloc, chars, ':')
+        chars = push_text(alloc, chars, serialize_json(alloc, field.value))
+        i = (i + 1)
+    }
+    chars = push(alloc, chars, '}')
+    from_chars(alloc, chars)
+}
+
+fn serialize_json(alloc: Alloc, value: Json) -> str {
+    match value {
+        Json.Null => "null",
+        Json.Bool(flag) => bool_text(flag),
+        Json.Number(n) => serialize_number(alloc, n),
+        Json.String(s) => quote_string(alloc, s),
+        Json.Array(items) => serialize_json_array(alloc, items),
+        Json.Object(fields) => serialize_json_object(alloc, fields),
+    }
+}
+
+fn serialize_json_bytes(alloc: Alloc, value: Json) -> List[u8] {
+    encode_utf8(alloc, serialize_json(alloc, value))
 }
 
 pure fn bool_text(flag: bool) -> str {
