@@ -53,7 +53,7 @@ where each one sits and what must land first. Each task references back here.
 | ~~**MARV-64** linear resource capabilities for files/listeners/connections~~ ✅ done — adds `linear interface` for capability resource handles, marks `File`, `Listener`, and `Conn` as close-once resources, and pins source diagnostics for forgotten close, double close, and branch-only close paths. Production listener loops remain MARV-63 | 7 · Runtime/capabilities | ~~MARV-56~~ ✅ | 63 | high |
 | ~~**MARV-65** raw FFI operations behind explicit unsafe audit boundaries~~ ✅ done — adds `unsafe extern fn` host FFI declarations with required `SAFETY:` justifications, canonical formatting, `marv/unsafeSites` / store-audit visibility, direct-call rejection from safe functions, and honest unsupported runtime/backend behavior until host symbol linking lands. Raw pointers/ABI-rich handles remain staged follow-ups. | 7 · Platform/unsafe | ~~MARV-57~~ ✅, ~~MARV-64~~ ✅ | — | medium |
 | ~~**MARV-66** recursive/materialized JSON DOM with typed codecs~~ ✅ done — adds a list-backed recursive `Json` DOM (`Null`/`Bool`/`Number`/`String`/`Array`/`Object`), `JsonField`, nested parse from `str`/`[]u8`, deterministic `str`/byte serialization, typed lookup/extraction/build helpers, interpreter parse/error coverage, and three-way backend parity for serializer-safe construction paths. Honest residue: parser/error paths still rely on `raise`, so WASM coverage stays on reachable serializer entries until raise lowering lands. | 7 · Std/app data | ~~MARV-55~~ ✅, ~~MARV-59~~ ✅, ~~MARV-61~~ ✅ | 63 | medium |
-| **MARV-67** package manifest, dependency resolution, package-aware agent queries | 7 · Packages | ~~MARV-49~~ ✅, ~~MARV-14~~ ✅ | 71–74 | medium |
+| ~~**MARV-67** package manifest, dependency resolution, package-aware agent queries~~ ✅ done — adds a minimal deterministic `marv.toml` manifest (`[package] name`, `roots`, local `[dependencies.NAME] path`), a shared `marv-package` loader, CLI package-root discovery with transitive local path deps, `marv/openPackage` / MCP `marv_open_package`, a multi-package example, and docs for package bootstrap plus commit/build lockfile behavior. Pinned store deps remain the existing `--store` lockfile flow: package source graphs are loaded first, then known names are rewritten to dag hashes. | 7 · Packages | ~~MARV-49~~ ✅, ~~MARV-14~~ ✅ | 71–74 | medium |
 | **MARV-68** Cranelift AOT object/executable builds | 7 · Backends | ~~MARV-8~~ ✅, ~~MARV-9~~ ✅ | 69 | medium |
 | **MARV-69** LLVM optimized release backend | 7 · Backends | 68 | — | medium |
 | **MARV-70** WASM component model and WIT packaging | 7 · Backends | ~~MARV-53~~ ✅ | 63 | medium |
@@ -315,8 +315,8 @@ they unblock the rest. Then:
   scalar hash-backed Map/Set path.
 - **Longer horizon:** MARV-71 through MARV-74 self-hosting; MARV-68 through MARV-70
   AOT/LLVM/component packaging; MARV-39 trap-freedom verification;
-  richer package metadata and package-aware agent queries on top of the MARV-49
-  source-module discovery and MARV-14 pinned store.
+  richer package/version metadata on top of MARV-67 package manifests and the
+  MARV-14 pinned store.
 
 **Parallel track (no surface dependency — pick up anytime):** ~~MARV-8 (reachability-pruned
 builds)~~ ✅ and ~~MARV-12 (doc-comments + spans)~~ ✅ are both done — the track is clear.
@@ -339,8 +339,7 @@ builds)~~ ✅ and ~~MARV-12 (doc-comments + spans)~~ ✅ are both done — the t
   gap an honest `unsupported`.
 - **Phase 4 · Self-hosting & store.** Port compiler passes to marv (Stage-1, differential vs
   the Rust Stage-0 oracle) as the surface allows. The pinned content store is done (MARV-14);
-  the remaining developer-facing project/package discovery work is tracked in Phase 6 as
-  MARV-49.
+  developer-facing source and package discovery is done through MARV-49 and MARV-67.
 - **Phase 5 · Infra/polish.** Doc-comment preservation and real (definition-granular) source
   spans through to diagnostics/`typeAt`/`verify` are **done** (MARV-12). (Phase 0 —
   repo/CI/agent enablement — is also done.)
@@ -350,8 +349,9 @@ builds)~~ ✅ and ~~MARV-12 (doc-comments + spans)~~ ✅ are both done — the t
   the first scoped `Spawn` task-handle slice, unsafe audit metadata, generic non-recursive ADT
   verification, scalar hash-backed `Map`/`Set` operations, MARV-64's linear resource
   capability lifecycle slice, MARV-63's listener-accepted HTTP router slice, and MARV-66's
-  recursive/materialized JSON DOM. Remaining post-MARV-48 work covers host-backed multi-request
-  HTTP serving, raw FFI execution/linking, richer package metadata/query coverage, and broader verification.
+  recursive/materialized JSON DOM, and MARV-67's manifest-backed package graph loading.
+  Remaining post-MARV-48 work covers host-backed multi-request HTTP serving, raw FFI
+  execution/linking, richer package/version metadata, and broader verification.
 
 ## How a task is meant to be picked up
 

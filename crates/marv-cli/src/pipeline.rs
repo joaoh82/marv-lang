@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 use marv_core::ir::{Def, Hash, Type};
 use marv_core::{lower_modules, symbol_hash};
 use marv_db::{qualify, CoreModuleSpec};
+use marv_package::{load_package_containing, PackageError, PackageGraph};
 use marv_store::{DefMeta, StoredOpSig, StoredVariant};
 use marv_syntax::{parse, Module};
 use marv_types::{check_bounds, check_def, Diagnostic, Severity, World};
@@ -150,8 +151,27 @@ fn resolve_source_imports(main: &Module, path: &Path) -> Result<Vec<Module>, Loa
         return Ok(Vec::new());
     }
 
-    let project_root = find_project_root(path);
-    let project_index = module_index(&project_root, true, Some("std"))?;
+    let package_graph = load_package_containing(path).map_err(package_error)?;
+    let fallback_root;
+    let project_root;
+    let (project_index, project_label) = if let Some(graph) = package_graph.as_ref() {
+        project_root = graph.root.clone();
+        (
+            module_index_from_package(graph),
+            format!(
+                "package `{}` at {}",
+                graph.manifest.name,
+                graph.root.display()
+            ),
+        )
+    } else {
+        fallback_root = find_project_root(path);
+        project_root = fallback_root.clone();
+        (
+            module_index(&fallback_root, true, Some("std"))?,
+            format!("the source root {}", fallback_root.display()),
+        )
+    };
     let std_index = find_std_dir(path)
         .map(|std_dir| module_index(&std_dir, false, None))
         .transpose()?;
@@ -173,12 +193,7 @@ fn resolve_source_imports(main: &Module, path: &Path) -> Result<Vec<Module>, Loa
             };
             module
         } else {
-            resolve_indexed_module(
-                &project_index,
-                &mp,
-                &project_root,
-                &format!("the source root {}", project_root.display()),
-            )?
+            resolve_indexed_module(&project_index, &mp, &project_root, &project_label)?
         };
         for imp in &m.imports {
             queue.push_back(imp.path.clone());
@@ -186,6 +201,24 @@ fn resolve_source_imports(main: &Module, path: &Path) -> Result<Vec<Module>, Loa
         selected.push(m.clone());
     }
     Ok(selected)
+}
+
+fn package_error(e: PackageError) -> LoadError {
+    match e {
+        PackageError::Io(e) => LoadError::Io(e),
+        PackageError::Manifest(e) | PackageError::Source(e) => LoadError::Front(e),
+    }
+}
+
+fn module_index_from_package(graph: &PackageGraph) -> ModuleIndex {
+    let mut index = HashMap::new();
+    for source in &graph.sources {
+        index
+            .entry(source.module.name.clone())
+            .or_insert_with(Vec::new)
+            .push((source.path.clone(), source.module.clone()));
+    }
+    index
 }
 
 fn find_project_root(path: &Path) -> PathBuf {
@@ -723,6 +756,68 @@ enum Color {
         assert_eq!(report.added(), 2);
         assert!(lock.bindings.contains_key("app.main"));
         assert!(lock.bindings.contains_key("math.double"));
+    }
+
+    #[test]
+    fn manifest_package_loads_local_path_dependency() {
+        let ws = Workspace::new(
+            "manifest",
+            &[],
+            "mod scratch\n\npure fn unused() -> i64 {\n    0\n}\n",
+        );
+        let app_main = ws.write(
+            "app/src/main.mv",
+            "mod app.main\nimport util.math (double)\n\npure fn main() -> i64 {\n    double(21)\n}\n",
+        );
+        ws.write(
+            "app/marv.toml",
+            "[package]\nname = \"app\"\nroots = [\"src\"]\n\n[dependencies.util]\npath = \"../util\"\n",
+        );
+        ws.write(
+            "util/marv.toml",
+            "[package]\nname = \"util\"\nroots = [\"src\"]\n",
+        );
+        ws.write(
+            "util/src/math.mv",
+            "mod util.math\n\npure fn double(x: i64) -> i64 {\n    (x * 2)\n}\n",
+        );
+
+        let loaded = load(app_main.to_str().unwrap()).unwrap_or_else(|e| panic!("load: {e}"));
+        assert!(!any_errors(&loaded.check()), "package should check cleanly");
+        assert_eq!(loaded.module_path, "app.main");
+        assert!(
+            loaded
+                .defs
+                .iter()
+                .any(|(name, _)| name == "util.math.double"),
+            "dependency bodies are part of the manifest-controlled module set"
+        );
+
+        let program = marv_interp::Program::new(
+            &loaded.module_path,
+            loaded.defs.clone(),
+            loaded.world.clone(),
+        );
+        assert_eq!(
+            program
+                .run("", &[], &[])
+                .expect("run manifest package")
+                .value
+                .render(),
+            "42"
+        );
+
+        let mut store = marv_store::Store::new();
+        let mut lock = marv_store::Lockfile::new();
+        let report = marv_store::commit_with_meta(
+            &mut store,
+            &mut lock,
+            &loaded.module_path,
+            &loaded.store_entries(),
+        );
+        assert_eq!(report.added(), 2);
+        assert!(lock.bindings.contains_key("app.main.main"));
+        assert!(lock.bindings.contains_key("util.math.double"));
     }
 
     #[test]

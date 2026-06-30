@@ -40,17 +40,22 @@ Missing `std` modules remain opaque so not-yet-surfaced builtins such as
 `std.math` can be imported without forcing a source file.
 
 ```text
-pkg/
-  main.mv   # mod app;  import math (double)
-  math.mv   # mod math; pure fn double(...)
+workspace/
+  app/
+    marv.toml
+    src/main.mv   # mod app.main; import util.math (double)
+  util/
+    marv.toml
+    src/math.mv   # mod util.math; pure fn double(...)
 ```
 
-`marv check pkg/main.mv`, `marv run pkg/main.mv`, `marv build --run pkg/main.mv`,
-and `marv commit pkg/main.mv` all operate on the discovered module set. Imported
-definitions are frozen under their own qualified names (`math.double`), while the
-entry file keeps normal bare-entry behavior (`main`, or `--entry app.main`).
-`build --store` / `run --store` then use the content store for pinned hash
-linking.
+`marv check app/src/main.mv`, `marv run app/src/main.mv`, `marv build --run
+app/src/main.mv`, and `marv commit --store app/.marv app/src/main.mv` all operate
+on the discovered package graph. Imported definitions are frozen under their own
+qualified names (`util.math.double`), while the entry file keeps normal
+bare-entry behavior (`main`, or `--entry app.main.main`). `build --store` /
+`run --store` then use the content store for pinned hash linking. See
+[`packages.md`](packages.md) for the manifest format and bootstrap path.
 
 ## `marv fmt`
 
@@ -189,7 +194,9 @@ The entry resolves as for `run`: `--entry NAME` (bare or qualified), else
   `<file>.wasm`).
 - **`--store DIR`** — resolve known imports through `DIR/lockfile.json`, fetch
   their transitive closure from `DIR/blobs/b3/`, and compile Core whose calls
-  are keyed by pinned dag hashes. Missing blobs are hard errors.
+  are keyed by pinned dag hashes. Missing blobs are hard errors. For packages,
+  use the same store directory passed to `marv commit`; the source package is
+  still parsed/checked before edges are rewritten to pinned hashes.
 - **`--entry`** / **`[args...]`** — as for `run` (integer arguments).
 
 ### `--target native-cranelift`
@@ -276,8 +283,9 @@ and how a counterexample is produced.
 marv commit [--store DIR] <file>
 ```
 
-Checks the file, then freezes its definitions into the content-addressed store
-(default `.marv/`), rebinds their names in the lockfile, and prints the delta —
+Checks the file, then freezes its discovered source module/package graph into
+the content-addressed store (default `.marv/`), rebinds names in the lockfile,
+and prints the delta —
 each definition marked **new** (frozen & reviewed) or **already in store /
 already reviewed**, plus any names **rebound** to a new hash. Identity is the
 content (dag) hash, so re-committing the same source is idempotent and renames
@@ -286,6 +294,13 @@ change no hashes:
 ```sh
 marv commit examples/clamp.mv          # + math.clamp  b3:d94f…  (new — frozen & reviewed)
 marv commit examples/clamp.mv          # = math.clamp  b3:d94f…  (already reviewed)
+```
+
+For a package, prefer an explicit package-local store:
+
+```sh
+marv commit --store app/.marv app/src/main.mv
+marv build --store app/.marv --run app/src/main.mv
 ```
 
 See [`store.md`](store.md) for the dag-hash / Merkle-DAG scheme, free renames,

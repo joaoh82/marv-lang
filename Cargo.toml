@@ -11,6 +11,7 @@ members = [
     "crates/marv-codegen-wasm",
     "crates/marv-interp",
     "crates/marv-store",
+    "crates/marv-package",
     "crates/marv-server",
     "crates/marv-mcp",
     "crates/marv-cli",

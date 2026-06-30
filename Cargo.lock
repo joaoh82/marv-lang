@@ -649,6 +649,7 @@ dependencies = [
  "marv-core",
  "marv-db",
  "marv-interp",
+ "marv-package",
  "marv-store",
  "marv-syntax",
  "marv-types",
@@ -730,11 +731,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "marv-package"
+version = "0.0.0"
+dependencies = [
+ "marv-syntax",
+]
+
+[[package]]
 name = "marv-server"
 version = "0.0.0"
 dependencies = [
  "marv-core",
  "marv-db",
+ "marv-package",
  "marv-store",
  "marv-syntax",
  "marv-types",

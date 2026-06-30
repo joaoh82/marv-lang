@@ -55,11 +55,17 @@ one module set. That lets an agent open `app.mv` plus `math.mv` and check
 such as `signature`, `core`, and `typeAt` still use the per-file incremental
 analysis path.
 
+`marv/openPackage` is the package-aware entry point for disk-backed projects. It
+loads the package root's `marv.toml`, all declared source roots, and transitive
+local path dependencies into one source snapshot. MCP exposes the same operation
+as `marv_open_package`, so agents do not need to hand-enumerate package files.
+
 ### Method catalog
 
 | Method | Returns |
 |--------|---------|
 | `marv/openSnapshot` | `{ snapshotId }` from a set of `{path, text}` (source) or `{path, core}` (Core IR) files. |
+| `marv/openPackage` | `{ snapshotId, package, root, files }` from a disk package root or source file inside a `marv.toml` package. |
 | `marv/applyEdits` | A new `{ snapshotId }` after whole-file replacements and/or byte-range `edits`. |
 | `marv/closeSnapshot` | `{ closed }`. |
 | `marv/check` | `{ diagnostics }` for the snapshot/module set, optionally scoped to a `def` or `file`. |

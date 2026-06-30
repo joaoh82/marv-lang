@@ -1,0 +1,6 @@
+mod app.main
+import util.math (double)
+
+pure fn main() -> i64 {
+    double(21)
+}

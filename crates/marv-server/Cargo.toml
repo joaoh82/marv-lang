@@ -24,3 +24,4 @@ marv-syntax = { path = "../marv-syntax" }
 marv-types = { path = "../marv-types" }
 marv-verify = { path = "../marv-verify" }
 marv-store = { path = "../marv-store" }
+marv-package = { path = "../marv-package" }

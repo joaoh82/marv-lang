@@ -43,6 +43,13 @@ const TOOLS: &[Tool] = &[
         params: &[("files", "array", true)],
     },
     Tool {
+        name: "marv_open_package",
+        method: "marv/openPackage",
+        description: "Open a manifest-backed package from disk (`marv.toml`) as a source snapshot; \
+                      `path` may be the package root or any source file inside it.",
+        params: &[("path", "string", true)],
+    },
+    Tool {
         name: "marv_check",
         method: "marv/check",
         description: "Type / effect / capability / error-set / reference / linearity check; \

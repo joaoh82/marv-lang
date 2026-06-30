@@ -1,0 +1,6 @@
+[package]
+name = "app"
+roots = ["src"]
+
+[dependencies.util]
+path = "../util"
