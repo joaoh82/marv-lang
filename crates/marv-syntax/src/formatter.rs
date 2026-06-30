@@ -257,6 +257,9 @@ fn format_fn(decl: &FnDecl) -> String {
     if decl.is_unsafe {
         s.push_str("unsafe ");
     }
+    if decl.is_extern {
+        s.push_str("extern ");
+    }
     s.push_str("fn ");
     s.push_str(&decl.name);
     s.push_str(&format_generics(&decl.generics));
@@ -272,6 +275,9 @@ fn format_fn(decl: &FnDecl) -> String {
         s.push_str(" -> ");
         s.push_str(&format_type(ret));
     }
+    let Some(body) = &decl.body else {
+        return s;
+    };
     // Contracts (if any) each go on their own indented line, and the body's
     // brace then starts a fresh line; otherwise the brace shares the signature
     // line. This is the canonical form the parser round-trips (`spec/01` §7).
@@ -293,7 +299,7 @@ fn format_fn(decl: &FnDecl) -> String {
         }
         s.push('\n');
     }
-    s.push_str(&format_block(&decl.body, 0));
+    s.push_str(&format_block(body, 0));
     s
 }
 

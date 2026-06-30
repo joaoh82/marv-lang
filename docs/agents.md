@@ -184,8 +184,9 @@ serialization slice, `std.http` exposes the first host-provided request/response
 queryable through `marv/unsafeSites`, and
 explicit-allocation `List`/`Set`/`Map` collection literals plus `std.iter.IndexIter[T]` are
 implemented. `File`, `Listener`, and `Conn` are now linear resource capabilities that must
-be closed exactly once. Post-MARV-48 roadmap work includes
-recursive/materialized JSON, host-backed multi-request HTTP serving, raw FFI operations,
+be closed exactly once. `unsafe extern fn` declarations now make raw host FFI boundaries
+auditable, while executing/linking host symbols remains a staged follow-up. Post-MARV-48
+roadmap work includes recursive/materialized JSON, host-backed multi-request HTTP serving,
 richer package metadata, and package-aware read queries. For
 anything not yet expressible, construct a `*.core.json` snapshot (see
 [`store.md`](store.md) and the `tests/run/*.core.json` fixtures) or check

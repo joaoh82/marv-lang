@@ -253,6 +253,7 @@ impl Parser {
                 self.bump();
                 Ok(Item::Fn(self.parse_fn(true, docs)?))
             }
+            Tok::Extern => Ok(Item::Fn(self.parse_fn(false, docs)?)),
             Tok::Unsafe => Ok(Item::Fn(self.parse_fn(false, docs)?)),
             Tok::Fn => Ok(Item::Fn(self.parse_fn(false, docs)?)),
             Tok::Linear => {
@@ -271,8 +272,8 @@ impl Parser {
             Tok::Interface => Ok(Item::Interface(self.parse_interface(false, docs)?)),
             Tok::Impl => Ok(Item::Impl(self.parse_impl(docs)?)),
             other => Err(ParseError::new(format!(
-                "expected an item (`fn`, `pure fn`, `unsafe fn`, `struct`, `linear struct`, \
-                 `enum`, `error`, `interface`, `impl`), found {other:?}"
+                "expected an item (`fn`, `pure fn`, `unsafe fn`, `unsafe extern fn`, `struct`, \
+                 `linear struct`, `enum`, `error`, `interface`, `impl`), found {other:?}"
             ))),
         }
     }
@@ -558,6 +559,17 @@ impl Parser {
 
     fn parse_fn(&mut self, is_pure: bool, docs: Vec<String>) -> PResult<FnDecl> {
         let is_unsafe = self.eat(&Tok::Unsafe);
+        let is_extern = self.eat(&Tok::Extern);
+        if is_extern && !is_unsafe {
+            return Err(ParseError::new(
+                "`extern fn` declarations must be written `unsafe extern fn`",
+            ));
+        }
+        if is_extern && is_pure {
+            return Err(ParseError::new(
+                "`unsafe extern fn` declarations cannot be marked `pure`",
+            ));
+        }
         if is_unsafe && !docs.iter().any(|d| d.trim_start().starts_with("SAFETY:")) {
             return Err(ParseError::new(
                 "`unsafe fn` requires a preceding `/// SAFETY:` justification",
@@ -568,6 +580,11 @@ impl Parser {
         let name = self.ident()?;
         self.name_hi = name_hi;
         let generics = self.parse_generics()?;
+        if is_extern && !generics.is_empty() {
+            return Err(ParseError::new(
+                "`unsafe extern fn` does not support generic parameters in this FFI slice",
+            ));
+        }
         // Record the byte just inside `(` as the capability-insertion point: a new
         // leading parameter (`fs: Fs, `) lands here for the `MissingCapability` fix.
         self.param_insert = Some(self.cur_span().1);
@@ -591,6 +608,27 @@ impl Parser {
             None
         };
 
+        if is_extern {
+            if self.peek() == &Tok::LBrace {
+                return Err(ParseError::new(
+                    "`unsafe extern fn` declarations do not have bodies",
+                ));
+            }
+            return Ok(FnDecl {
+                docs,
+                is_pure,
+                is_unsafe,
+                is_extern,
+                name,
+                generics,
+                params,
+                ret,
+                requires: Vec::new(),
+                ensures: Vec::new(),
+                body: None,
+            });
+        }
+
         let (requires, ensures) = self.parse_contracts()?;
 
         let body = self.parse_block()?;
@@ -598,13 +636,14 @@ impl Parser {
             docs,
             is_pure,
             is_unsafe,
+            is_extern,
             name,
             generics,
             params,
             ret,
             requires,
             ensures,
-            body,
+            body: Some(body),
         })
     }
 

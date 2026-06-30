@@ -259,13 +259,14 @@ fn gen_fn(rng: &mut Rng) -> FnDecl {
         docs: gen_docs(rng),
         is_pure,
         is_unsafe: false,
+        is_extern: false,
         name,
         generics,
         params,
         ret,
         requires: Vec::new(),
         ensures: Vec::new(),
-        body,
+        body: Some(body),
     }
 }
 

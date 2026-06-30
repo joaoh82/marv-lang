@@ -67,7 +67,7 @@ analysis path.
 | `marv/signature` | `{ name, params, ret, effects, errorSet, pure, requires, ensures, hash }`. |
 | `marv/effects` | `{ effects }` — the **inferred** capability row. |
 | `marv/errorSet` | `{ errorSet }` — the **inferred** error set. |
-| `marv/unsafeSites` | `{ sites }` — unsafe audit boundaries as `{ file, def, hash, justification, span }`. |
+| `marv/unsafeSites` | `{ sites }` — unsafe audit boundaries (`unsafe fn` and `unsafe extern fn`) as `{ file, def, hash, justification, span }`. |
 | `marv/callers` / `marv/callees` | `{ callers }` / `{ callees }` — call edges, by qualified name. |
 | `marv/canonical` | `{ text }` — the canonical form of a `def` or `file`. |
 | `marv/core` | `{ hash, core, deps, alphaCanonical }` — the Core IR and content identity (`spec/03` §4.4). |

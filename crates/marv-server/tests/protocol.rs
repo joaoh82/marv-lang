@@ -235,6 +235,9 @@ fn unsafe_sites_lists_source_safety_justifications() {
     let src = "\
 mod demo
 
+/// SAFETY: the host symbol follows the marv i64 ABI.
+unsafe extern fn host_add_one(x: i64) -> i64
+
 /// SAFETY: host boundary validates the raw value before calling this function.
 unsafe fn raw_value(x: i64) -> i64 {
     x
@@ -257,15 +260,27 @@ pure fn safe_value(x: i64) -> i64 {
         json!({ "snapshotId": snapshot }),
     );
     let sites = unsafe_sites["sites"].as_array().unwrap();
-    assert_eq!(sites.len(), 1, "expected one unsafe site: {unsafe_sites:#}");
+    assert_eq!(
+        sites.len(),
+        2,
+        "expected two unsafe sites: {unsafe_sites:#}"
+    );
     assert_eq!(sites[0]["file"], "demo.mv");
-    assert_eq!(sites[0]["def"], "demo.raw_value");
+    assert_eq!(sites[0]["def"], "demo.host_add_one");
     assert!(sites[0]["hash"].as_str().unwrap().starts_with("b3:"));
     assert_eq!(
         sites[0]["justification"],
-        "host boundary validates the raw value before calling this function."
+        "the host symbol follows the marv i64 ABI."
     );
     assert_eq!(sites[0]["span"]["file"], "demo.mv");
+    assert_eq!(sites[1]["file"], "demo.mv");
+    assert_eq!(sites[1]["def"], "demo.raw_value");
+    assert!(sites[1]["hash"].as_str().unwrap().starts_with("b3:"));
+    assert_eq!(
+        sites[1]["justification"],
+        "host boundary validates the raw value before calling this function."
+    );
+    assert_eq!(sites[1]["span"]["file"], "demo.mv");
 }
 
 #[test]

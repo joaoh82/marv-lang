@@ -333,21 +333,31 @@ The interpreter records each `Spawn.start` as a host effect and may execute this
 sequentially. Generic task result handles, channels/message passing, and true parallel host
 scheduling remain future work.
 
-## 11. The escape hatch **[first slice impl]**
+## 11. The escape hatch **[impl, staged runtime]**
 
 `unsafe` is the explicit, auditable boundary (FFI, raw pointers, custom synchronization).
-The first slice supports `unsafe fn` metadata: it is visible in the signature, requires a
-preceding `/// SAFETY:` justification comment, formats canonically, and is queryable through
-`marv/unsafeSites`. The metadata is intentionally outside Core identity, so marking a
-function unsafe changes the audit surface without changing its content hash. Raw pointer/FFI
-operations themselves remain staged follow-ups.
+`unsafe fn` metadata is visible in the signature, requires a preceding `/// SAFETY:`
+justification comment, formats canonically, and is queryable through `marv/unsafeSites`.
+`unsafe extern fn name(args) -> ret` declares a host FFI symbol with no marv body; it must
+also carry a `SAFETY:` justification, cannot be `pure`, and cannot be called directly from a
+safe function. Put raw host calls inside a small audited `unsafe fn` wrapper and expose only
+the wrapper shape you are prepared to justify. The metadata is intentionally outside Core
+identity, so marking a function unsafe or documenting an extern boundary changes the audit
+surface without changing a definition's content hash.
+
+The interpreter and native/WASM backends do not link or execute host FFI symbols yet. A
+program can parse, format, check, query, and store-audit these declarations; attempting to run
+or build a definition that crosses the extern boundary reports unsupported behavior rather
+than fabricating host semantics. Raw pointers and ABI-rich value handles remain staged
+follow-ups.
 
 ---
 
 ## What you can actually write today
 
 The parser accepts: `mod`/`import`, `struct`/`enum`/`fn`/`interface`/`impl` (incl. `pure fn`,
-generic parameter lists with bounds, and capability interfaces whose method calls `perform`),
+`unsafe fn`, `unsafe extern fn`, generic parameter lists with bounds, and capability interfaces
+whose method calls `perform`),
 `let`/`var` bindings, assignment (`x = e`, `p.x = e`), `if`/`else(-if)`, `match`
 (constructor + `_` patterns, payload binding), enum constructor application, struct literals
 (`Name { f: e, … }`), array literals (`[e0, …]`), index reads/stores (`a[i]`, `a[i] = e`),

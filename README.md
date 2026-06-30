@@ -174,7 +174,8 @@ protocol-backed iterator wrapper, `std.bytes` byte-slice and UTF-8 helpers,
 the first `std.http` request/response helper layer over explicit `Http` authority,
 an explicit HTTP listener/router surface (`Net.listen` → `Listener.accept_http` → `Http.respond`),
 the first `std.spawn` scoped task-handle layer over explicit `Spawn` authority,
-`unsafe fn` audit metadata with required `SAFETY:` comments and `unsafeSites`,
+`unsafe fn` audit metadata plus `unsafe extern fn` host FFI declarations with required
+`SAFETY:` comments and `unsafeSites`,
 `while`/`for` loops,
 `let`/`var`, `if`/`else`, arithmetic/boolean ops, the prefix unary
 operators (`-e`, `not e`, `&e`/`&mut e`), calls/recursion,
@@ -183,7 +184,7 @@ lower/check/run/build as module sets, and the content store supports
 lockfile-pinned cross-module builds by hash. MARV-48's first application-language
 wave is complete; the remaining post-MARV-48 roadmap covers richer package
 metadata/query coverage, recursive/materialized JSON, host-backed socket serving beyond the
-deterministic listener harness, raw FFI operations, AOT/component packaging, and deeper verification. The
+deterministic listener harness, executable host FFI bindings, AOT/component packaging, and deeper verification. The
 full backlog (surface growth → backend breadth → verification breadth →
 application runtime → AOT/LLVM → self-hosting) — with phases, ordering, and the
 dependency graph — is in

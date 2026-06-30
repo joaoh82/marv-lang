@@ -240,6 +240,8 @@ pub struct Variant {
 }
 
 /// `[pure] [unsafe] fn name(params) [-> ret] [requires e]* [ensures e]* { body }`.
+/// `unsafe extern fn name(params) [-> ret]` declares a host FFI symbol with no
+/// body; it is always an unsafe audit boundary.
 ///
 /// Contract clauses (`spec/01` §7) sit between the signature and the body, each
 /// on its own line. `requires` expressions may mention the parameters;
@@ -253,6 +255,9 @@ pub struct FnDecl {
     /// Whether this function is an explicit unsafe audit boundary. This is
     /// source metadata, not part of the Core identity.
     pub is_unsafe: bool,
+    /// Whether this is a host FFI declaration. Extern functions have no body and
+    /// must also be unsafe so the audit metadata remains discoverable.
+    pub is_extern: bool,
     pub name: String,
     /// Generic type parameters, e.g. `[T]` (or `[T: Ord]`) for `fn sort[T](...)`.
     /// Empty for a non-generic function.
@@ -263,7 +268,7 @@ pub struct FnDecl {
     pub requires: Vec<Expr>,
     /// Postconditions, in source order (`ensures` clauses; may mention `result`).
     pub ensures: Vec<Expr>,
-    pub body: Block,
+    pub body: Option<Block>,
 }
 
 /// One `name: Type` function parameter.

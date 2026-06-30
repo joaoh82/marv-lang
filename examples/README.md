@@ -14,7 +14,7 @@ fixture source for the test suite. As of M4 the integer/boolean subset is
 | [`http_router.mv`](http_router.mv) | **Runnable (MARV-63):** listener/router shape over explicit `Net` authority. `net.listen` creates a linear `Listener`, `accept_http` yields one `Http` exchange, two routes respond (including a JSON body), and the listener is closed exactly once. `marv run --entry serve_once --grant Net examples/http_router.mv` uses the deterministic interpreter host. |
 | [`spawn.mv`](spawn.mv) | **Runnable (MARV-56):** structured-concurrency first slice over an explicit `Spawn` capability. `std.spawn.spawn_i64` returns linear task handles, `join_i64` consumes them, and `marv run --grant Spawn examples/spawn.mv` records two `Spawn.start` effects before returning `42`. |
 | [`resource_lifecycle.mv`](resource_lifecycle.mv) | **Checks (MARV-64):** linear resource capabilities — `File`, `Listener`, and `Conn` values returned by `Fs`/`Net` operations must be closed exactly once. |
-| [`unsafe_audit.mv`](unsafe_audit.mv) | **Checks (MARV-57):** `unsafe fn` with a required `SAFETY:` doc comment. It appears in `marv/unsafeSites` and contributes unsafe-site metadata to `marv store audit` when committed. |
+| [`unsafe_audit.mv`](unsafe_audit.mv) | **Checks (MARV-65):** `unsafe extern fn` host FFI declarations and audited `unsafe fn` wrappers, both with required `SAFETY:` doc comments. They appear in `marv/unsafeSites` and contribute unsafe-site metadata to `marv store audit` when committed; execution/codegen of host FFI remains honestly unsupported. |
 | [`clamp.mv`](clamp.mv) | **Verifiable (M6):** a `pure` function with `requires`/`ensures` contracts. `marv verify examples/clamp.mv` proves it (Tier 2); `marv run` enforces it at runtime (Tier 1). |
 | [`report.mv`](report.mv) | **Checks (MARV-6):** `struct`/`error` decls, second-class `&` references, a loop `invariant`, an inferred error set, and a real capability `perform` — `load_and_total(fs: Fs, …)` does `fs.read(path)?`. |
 | [`geometry.mv`](geometry.mv) | The **M0 parsed subset** end to end: `struct`/`linear struct`, `pure fn`, `&`/`&mut` params, `if`/`else`, fully-parenthesized binary operators. Round-trips through the real parser. |
@@ -54,7 +54,8 @@ contract arithmetic, and `old(e)`); `color.mv` when `enum`/`match` landed; `gene
 `http_echo.mv` when the first host-provided HTTP request capability landed (MARV-53);
 `http_router.mv` when listener-accepted HTTP exchanges landed (MARV-63);
 `spawn.mv` when scoped `Spawn` task handles landed (MARV-56);
-`unsafe_audit.mv` when `unsafe fn` audit metadata landed (MARV-57).
+`unsafe_audit.mv` when `unsafe fn` audit metadata landed (MARV-57), then host FFI
+declarations behind unsafe audit boundaries landed (MARV-65).
 `factorial.mv`, `arithmetic.mv`, `color.mv`, `mutation.mv`, `loops.mv`,
 `generics.mv`, `arrays.mv`, `slices.mv`, and `optionals.mv` additionally lie inside the
 *executable* subset, so the interpreter runs them (`marv run`); the integer ones

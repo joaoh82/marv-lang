@@ -1,8 +1,11 @@
 mod unsafe_audit
 
-/// SAFETY: this demo has no raw operation; the marker exists to show audit metadata.
-unsafe fn audited_identity(x: i64) -> i64 {
-    x
+/// SAFETY: the host symbol follows the marv i64 ABI and is deterministic for this demo.
+unsafe extern fn host_add_one(x: i64) -> i64
+
+/// SAFETY: this wrapper is the audited boundary around the host_add_one FFI call.
+unsafe fn audited_add_one(x: i64) -> i64 {
+    host_add_one(x)
 }
 
 pure fn main() -> i64 {

@@ -1084,11 +1084,12 @@ impl Program {
         };
         got.push(arg);
         let entry = self.defs.get(&func).ok_or(RunError::UnknownGlobal(func))?;
-        let body = entry
-            .def
-            .body
-            .as_ref()
-            .ok_or(RunError::UnknownGlobal(func))?;
+        let body = entry.def.body.as_ref().ok_or_else(|| {
+            RunError::Unsupported(format!(
+                "function `{}` has no interpreter body (host FFI is unsupported)",
+                entry.qualified
+            ))
+        })?;
         let arity = lam_arity(body);
         if got.len() < arity {
             return Ok(Value::Partial { func, got });
