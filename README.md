@@ -43,6 +43,9 @@ What that means concretely:
 > incremental query server, two execution backends (a tree-walking interpreter and a
 > Cranelift JIT/AOT plus a first LLVM release slice), a WebAssembly backend with a capability-gated browser sandbox, layered
 > verification (runtime contracts + SMT), and a content-addressed store with `commit`.
+> Stage-1 self-hosting has a first tiny compiler-driver milestone in
+> `selfhost/driver.mv`, with Rust Stage 0 still acting as compiler, oracle, and
+> fallback for unsupported language surface.
 > The language *surface* is still a growing subset (see [Status & roadmap](#status--roadmap)).
 
 ---
@@ -189,6 +192,9 @@ and the content store supports
 lockfile-pinned cross-module builds by hash. MARV-48's first application-language
 wave is complete; the remaining post-MARV-48 roadmap covers host-backed socket serving beyond the
 deterministic listener harness, executable host FFI bindings, WASM component packaging, native capability-host runtime coverage, and deeper verification. The
+first Stage-1 self-hosting milestone is also in place: `selfhost/driver.mv`
+sequences marv-written parser and lower/check slices over a documented tiny
+corpus while Rust Stage 0 remains the oracle and fallback. The
 full backlog (surface growth → backend breadth → verification breadth →
 application runtime → packaging/LLVM → self-hosting) — with phases, ordering, and the
 dependency graph — is in

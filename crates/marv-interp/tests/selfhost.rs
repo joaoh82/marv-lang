@@ -272,6 +272,58 @@ fn selfhost_lower_check_program() -> Program {
     Program::new("selfhost.lower_check", defs, world)
 }
 
+fn selfhost_driver_program() -> Program {
+    let root = repo_root();
+    let driver_path = root.join("selfhost/driver.mv");
+    let driver_src = std::fs::read_to_string(&driver_path)
+        .unwrap_or_else(|e| panic!("read {driver_path:?}: {e}"));
+    let driver = marv_syntax::parse(&driver_src).expect("parse driver.mv");
+    assert_eq!(
+        marv_syntax::format_module(&driver),
+        driver_src,
+        "selfhost/driver.mv must be in canonical form"
+    );
+
+    let model = parse_file(root.join("selfhost/model.mv"));
+    let parser = parse_file(root.join("selfhost/parser.mv"));
+    let lower_check = parse_file(root.join("selfhost/lower_check.mv"));
+    let std_io = parse_file(root.join("std/capabilities.mv"));
+    let std_collections = parse_file(root.join("std/collections.mv"));
+    let modules = vec![model, parser, lower_check, driver, std_io, std_collections];
+    let lowered = lower_modules(&modules).expect("lower selfhost driver + passes + std");
+    let world = World::from_modules(&lowered);
+    let driver_lowered = lowered
+        .iter()
+        .find(|module| module.module == ["selfhost".to_string(), "driver".to_string()])
+        .expect("lowered selfhost.driver");
+    let mut errors = Vec::new();
+    for entry in &driver_lowered.defs {
+        errors.extend(
+            check_def(&world, &entry.def, Some(&entry.name))
+                .into_iter()
+                .filter(|d| d.severity == Severity::Error),
+        );
+    }
+    assert!(
+        errors.is_empty(),
+        "selfhost.driver must check clean: {errors:?}"
+    );
+
+    let mut defs = Vec::new();
+    for (module, lowered_module) in modules.iter().zip(lowered.into_iter()) {
+        let prefix = module.name.join(".");
+        for entry in lowered_module.defs {
+            let name = if prefix == "selfhost.driver" {
+                entry.name
+            } else {
+                format!("{prefix}.{}", entry.name)
+            };
+            defs.push((name, entry.def));
+        }
+    }
+    Program::new("selfhost.driver", defs, world)
+}
+
 fn run_model_score(prog: &Program, entry: &str) -> i64 {
     match prog
         .run(entry, &["Alloc".to_string()], &[])
@@ -308,6 +360,71 @@ fn run_lower_check_score(prog: &Program, entry: &str, source: &str) -> i64 {
 fn run_lower_check_nullary(prog: &Program, entry: &str) -> Result<Value, RunError> {
     prog.run(entry, &["Alloc".to_string()], &[])
         .map(|out| out.value)
+}
+
+fn run_driver_score(prog: &Program, entry: &str, source: &str) -> i64 {
+    match prog
+        .run(entry, &["Alloc".to_string()], &[source.to_string()])
+        .unwrap_or_else(|e| panic!("run {entry}: {e:?}"))
+        .value
+    {
+        Value::Int(n) => n,
+        other => panic!("{entry} produced {other:?}"),
+    }
+}
+
+fn run_driver_nullary(prog: &Program, entry: &str) -> Result<Value, RunError> {
+    prog.run(entry, &["Alloc".to_string()], &[])
+        .map(|out| out.value)
+}
+
+fn stage0_tiny_driver_score() -> i64 {
+    let oracle = marv_syntax::parse(TINY_FRONTEND_SRC).expect("stage-0 parses tiny fixture");
+    let lowered = lower_module(&oracle).expect("stage-0 lowers tiny fixture");
+    let def = lowered
+        .defs
+        .iter()
+        .find(|entry| entry.name == "id")
+        .expect("lowered id");
+    let errors: Vec<_> = check_def(&World::new(), &def.def, Some("id"))
+        .into_iter()
+        .filter(|d| d.severity == Severity::Error)
+        .collect();
+    assert!(
+        errors.is_empty(),
+        "stage-0 tiny driver corpus checks clean: {errors:?}"
+    );
+    match &def.def.ty {
+        Type::Arrow {
+            param,
+            ret,
+            effects,
+        } => {
+            assert_eq!(**param, Type::Int(IntTy::I64));
+            assert_eq!(**ret, Type::Int(IntTy::I64));
+            assert!(effects.caps.is_empty());
+        }
+        other => panic!("expected id arrow type, got {other:?}"),
+    }
+    match def.def.body.as_ref().expect("id body") {
+        Core::Lam { param, body, .. } => {
+            assert_eq!(*param, Type::Int(IntTy::I64));
+            assert_eq!(**body, Core::Atom(Atom::Var(0)));
+        }
+        other => panic!("expected id lambda body, got {other:?}"),
+    }
+
+    TINY_FRONTEND_SRC.len() as i64 + 16 + 80 + 1234
+}
+
+fn with_driver_stack(f: impl FnOnce() + Send + 'static) {
+    std::thread::Builder::new()
+        .name("selfhost-driver".to_string())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(f)
+        .expect("spawn selfhost driver test")
+        .join()
+        .expect("selfhost driver test panicked");
 }
 
 /// The Rust Stage-0 oracle: evaluate `Prim{op,[a,b]}` through the real
@@ -527,4 +644,53 @@ fn selfhost_lower_check_reports_diagnostics_and_unsupported_constructs() {
         run_lower_check_nullary(&prog, "unsupported_tiny_lowering"),
         Err(RunError::Uncaught("PassError".to_string()))
     );
+}
+
+#[test]
+fn selfhost_driver_sequences_stage1_passes_over_the_tiny_corpus() {
+    with_driver_stack(|| {
+        let prog = selfhost_driver_program();
+        let want = stage0_tiny_driver_score();
+
+        assert_eq!(
+            run_driver_score(&prog, "compile_tiny_fingerprint", TINY_FRONTEND_SRC),
+            want
+        );
+        assert_eq!(
+            run_driver_score(&prog, "bootstrap_manifest_fingerprint", TINY_FRONTEND_SRC),
+            1_100_000 + want
+        );
+        assert_eq!(
+            run_driver_score(&prog, "compile_tiny_diagnostics", TINY_FRONTEND_SRC),
+            0
+        );
+        match run_driver_nullary(&prog, "supported_driver_corpus_size").expect("corpus size") {
+            Value::Int(n) => assert_eq!(n, 1),
+            other => panic!("supported_driver_corpus_size produced {other:?}"),
+        }
+    });
+}
+
+#[test]
+fn selfhost_driver_reports_diagnostics_and_unsupported_paths() {
+    with_driver_stack(|| {
+        let prog = selfhost_driver_program();
+        let bad_src = "mod demo\n\npure fn id() -> i64 {\n    n\n}\n";
+        assert_eq!(
+            run_driver_score(&prog, "compile_tiny_diagnostics", bad_src),
+            1
+        );
+        let parse_err = prog
+            .run(
+                "unsupported_driver_parse",
+                &["Alloc".to_string()],
+                &["mod demo\n\nstruct Point { x: i64 }\n".to_string()],
+            )
+            .expect_err("unsupported parse path must fail honestly");
+        assert_eq!(parse_err, RunError::Uncaught("FrontendError".to_string()));
+        assert_eq!(
+            run_driver_nullary(&prog, "unsupported_driver_lowering"),
+            Err(RunError::Uncaught("PassError".to_string()))
+        );
+    });
 }

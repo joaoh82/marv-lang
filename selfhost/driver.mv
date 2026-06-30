@@ -1,0 +1,36 @@
+mod selfhost.driver
+import std.io (Alloc)
+import std.collections (len)
+import selfhost.parser (lex_tiny_fingerprint, parse_tiny_fingerprint, unsupported_tiny_parse)
+import selfhost.lower_check (lower_check_tiny_diagnostics, lower_check_tiny_fingerprint, unsupported_tiny_lowering)
+
+/// First Stage-1 compiler-driver score. It is intentionally tiny: the driver
+/// sequences the selfhost parser and lowering/checker slices over the MARV-72
+/// grammar instead of claiming the full compiler is self-hosted.
+fn compile_tiny_fingerprint(alloc: Alloc, source: str) -> !i64 {
+    let token_count: i64 = lex_tiny_fingerprint(alloc, source)?
+    let parse_score: i64 = parse_tiny_fingerprint(alloc, source)?
+    let lower_score: i64 = lower_check_tiny_fingerprint(alloc, source)?
+    ((((len(source) as i64) + token_count) + parse_score) + lower_score)
+}
+
+fn compile_tiny_diagnostics(alloc: Alloc, source: str) -> !i64 {
+    lower_check_tiny_diagnostics(alloc, source)
+}
+
+fn bootstrap_manifest_fingerprint(alloc: Alloc, source: str) -> !i64 {
+    let score: i64 = compile_tiny_fingerprint(alloc, source)?
+    (((len("stage1-tiny") as i64) * 100000) + score)
+}
+
+fn supported_driver_corpus_size() -> i64 {
+    1
+}
+
+fn unsupported_driver_parse(alloc: Alloc, source: str) -> !i64 {
+    unsupported_tiny_parse(alloc, source)
+}
+
+fn unsupported_driver_lowering(alloc: Alloc) -> !i64 {
+    unsupported_tiny_lowering(alloc)
+}

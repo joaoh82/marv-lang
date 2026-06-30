@@ -15,6 +15,7 @@ small enough to test against the Rust compiler.
 | [`model.mv`](model.mv) | Stage-1 data model for source spans, tokens, type syntax, parsed AST nodes, Core nodes, diagnostics, and representative AST/Core samples. |
 | [`parser.mv`](parser.mv) | First lexer/parser slice for a tiny `.mv` grammar, producing the `model.mv` token and AST structures and failing unsupported forms with `FrontendError`. |
 | [`lower_check.mv`](lower_check.mv) | First lowering/checker slice for the same tiny grammar, turning the selfhost AST into `CoreModule` data and reporting tiny-scope diagnostics. |
+| [`driver.mv`](driver.mv) | First compiler-shaped Stage-1 driver: sequences the tiny parser and lowering/checker slices over a documented corpus and exposes reproducible fingerprints. |
 
 `crates/marv-interp/tests/selfhost.rs` runs the marv `eval_prim` through the
 interpreter and asserts it matches the **Rust Stage-0 kernel** (the real
@@ -37,6 +38,11 @@ of being accepted with a misleading partial AST.
 root node, and an integer/local/global atom body. Its harness compares the
 supported fixture against Rust Stage-0's lowered Core shape and keeps an
 explicit tiny-scope diagnostic path plus `PassError` for unsupported AST forms.
+
+`driver.mv` is the first honest self-compile milestone. It does not compile the
+compiler yet; it compiles the **Stage-1 tiny corpus** by running the marv-written
+parser and lower/check passes in sequence, while the Rust Stage-0 compiler
+remains the oracle that builds and tests those Stage-1 passes.
 
 ## Stage-1 model mapping
 
@@ -109,6 +115,45 @@ analysis, contracts, multi-item modules, real name-resolution diagnostics, and
 full type compatibility. Future MARV-73 follow-up slices should widen parser
 coverage first when needed, then add lowering and checker rules for the same
 fixtures so Stage 1 and Stage 0 stay differentially comparable.
+
+## Stage-1 driver milestone
+
+`driver.mv` defines the first self-hosting milestone precisely:
+
+- **Input corpus:** one tiny module shaped like
+  `mod demo; pure fn id(n: i64) -> i64 { n }` (canonical newlines in the test
+  fixture).
+- **Stage-1 pipeline:** `lex_tiny_fingerprint` + `parse_tiny_fingerprint` from
+  `parser.mv`, then `lower_check_tiny_fingerprint` and
+  `lower_check_tiny_diagnostics` from `lower_check.mv`.
+- **Output:** deterministic integer fingerprints and diagnostic counts that the
+  Rust harness compares against Stage-0 parser/lower/check facts.
+- **Bootstrap flow:** Rust Stage 0 compiles and interprets the Stage-1 marv
+  passes; Stage 1 compiles the tiny corpus; Rust Stage 0 remains the oracle and
+  fallback for every unsupported construct.
+- **Store flow:** pin the Stage-1 driver and its transitive source imports with
+  `marv commit --store <store-dir> selfhost/driver.mv`; the lockfile/store are
+  still produced by Rust Stage 0.
+
+Useful smoke commands:
+
+```sh
+cargo run -p marv-cli -- check selfhost/driver.mv
+cargo run -p marv-cli -- run --grant Alloc selfhost/driver.mv --entry compile_tiny_fingerprint 'mod demo
+
+pure fn id(n: i64) -> i64 {
+    n
+}
+'
+cargo run -p marv-cli -- commit --store /tmp/marv-selfhost-store selfhost/driver.mv
+```
+
+The supported corpus fingerprint is `1376`; the bootstrap manifest fingerprint
+is `1101376`; the supported diagnostic count is `0`; the intentionally bad
+nullary body `n` yields diagnostic count `1`. Unsupported parser/lowerer paths
+raise `FrontendError`/`PassError`. This is enough for the docs to say marv has
+its **first tiny self-compile milestone**, and not enough to claim the compiler
+or standard library self-hosts.
 
 ## Why this pass first
 
