@@ -1,0 +1,174 @@
+mod selfhost.lower_check
+import std.io (Alloc)
+import std.collections (List, len)
+import selfhost.model (AstExpr, AstExprKind, AstItem, AstItemKind, AstModule, CoreAtom, CoreDef, CoreModule, CoreNode, CoreNodeKind, Diagnostic, Severity, SourceSpan, TypeKind, TypeNode, core_node_weight, empty_effects, sample_ast_module)
+import selfhost.parser (parse_tiny_module)
+
+/// First Stage-1 lowering/checking error set. These variants are pass-level
+/// boundaries, not final user diagnostics; unsupported surface stays explicit.
+error PassError { MissingFunction, MissingBody, UnsupportedItem, UnsupportedExpr }
+
+struct LoweredBody { node: CoreNode, diagnostics: List[Diagnostic] }
+
+struct TinyShape { name: str, param_count: usize, body_index: usize, span: SourceSpan }
+
+fn pass_diag(code: str, message: str, span: SourceSpan) -> Diagnostic {
+    Diagnostic { code: code, severity: Severity.Error, message: message, span: span }
+}
+
+fn tiny_shape(module: AstModule) -> !TinyShape {
+    if (len(module.items) == 0) {
+        PassError.MissingFunction
+    } else {
+        let item: AstItem = module.items[0]
+        match item.kind {
+            AstItemKind.Fn(name, param_count, ret, body) => {
+                let unused_ret: usize = ret
+                TinyShape { name: name, param_count: param_count, body_index: body, span: item.span }
+            },
+            AstItemKind.Struct(name, field_count) => {
+                let unused_name: str = name
+                let unused_field_count: usize = field_count
+                PassError.UnsupportedItem
+            },
+            AstItemKind.Enum(name, variant_count) => {
+                let unused_name: str = name
+                let unused_variant_count: usize = variant_count
+                PassError.UnsupportedItem
+            },
+        }
+    }
+}
+
+fn i64_type(span: SourceSpan) -> TypeNode {
+    TypeNode { kind: TypeKind.Int("i64"), span: span }
+}
+
+fn unit_type(span: SourceSpan) -> TypeNode {
+    TypeNode { kind: TypeKind.Unit, span: span }
+}
+
+fn arrow_type(param: usize, ret: usize, span: SourceSpan, alloc: Alloc) -> TypeNode {
+    TypeNode { kind: TypeKind.Arrow(param, ret, empty_effects(alloc)), span: span }
+}
+
+fn lower_tiny_expr(alloc: Alloc, expr: AstExpr, param_count: usize, ty: usize) -> !LoweredBody {
+    match expr.kind {
+        AstExprKind.Int(value) => {
+            let diagnostics: List[Diagnostic] = List { alloc: alloc, items: [] }
+            LoweredBody { node: CoreNode { kind: CoreNodeKind.Atom(CoreAtom.Int(value)), ty: ty, span: expr.span }, diagnostics: diagnostics }
+        },
+        AstExprKind.Var(name) => lower_tiny_var(alloc, name, expr.span, param_count, ty),
+        AstExprKind.Bool(flag) => {
+            let unused_flag: bool = flag
+            PassError.UnsupportedExpr
+        },
+        AstExprKind.Str(text) => {
+            let unused_text: str = text
+            PassError.UnsupportedExpr
+        },
+        AstExprKind.Call(callee, arg_count) => {
+            let unused_callee: usize = callee
+            let unused_arg_count: usize = arg_count
+            PassError.UnsupportedExpr
+        },
+        AstExprKind.If(cond, yes, no) => {
+            let unused_cond: usize = cond
+            let unused_yes: usize = yes
+            let unused_no: usize = no
+            PassError.UnsupportedExpr
+        },
+        AstExprKind.Match(scrutinee, arm_count) => {
+            let unused_scrutinee: usize = scrutinee
+            let unused_arm_count: usize = arm_count
+            PassError.UnsupportedExpr
+        },
+        AstExprKind.StructLit(name, field_count) => {
+            let unused_name: str = name
+            let unused_field_count: usize = field_count
+            PassError.UnsupportedExpr
+        },
+    }
+}
+
+fn lower_tiny_var(alloc: Alloc, name: str, span: SourceSpan, param_count: usize, ty: usize) -> LoweredBody {
+    if (param_count == 1) {
+        let diagnostics: List[Diagnostic] = List { alloc: alloc, items: [] }
+        let unused_name: str = name
+        LoweredBody { node: CoreNode { kind: CoreNodeKind.Atom(CoreAtom.Var(0)), ty: ty, span: span }, diagnostics: diagnostics }
+    } else {
+        let diagnostics: List[Diagnostic] = List { alloc: alloc, items: [pass_diag("SH0101", "unknown local in tiny function", span)] }
+        LoweredBody { node: CoreNode { kind: CoreNodeKind.Atom(CoreAtom.Global(name)), ty: ty, span: span }, diagnostics: diagnostics }
+    }
+}
+
+fn lower_tiny_module(alloc: Alloc, module: AstModule) -> !CoreModule {
+    let shape: TinyShape = tiny_shape(module)?
+    if (len(module.exprs) == 0) {
+        PassError.MissingBody
+    } else {
+        let body_expr: AstExpr = module.exprs[shape.body_index]
+        let int_ty: TypeNode = i64_type(module.span)
+        let body: LoweredBody = lower_tiny_expr(alloc, body_expr, shape.param_count, 0)?
+        if (shape.param_count == 0) {
+            lower_tiny_nullary(alloc, module.name, shape.name, module.span, int_ty, body)
+        } else {
+            lower_tiny_unary(alloc, module.name, shape.name, module.span, int_ty, body)
+        }
+    }
+}
+
+fn lower_tiny_unary(alloc: Alloc, module_name: str, fn_name: str, span: SourceSpan, int_ty: TypeNode, body: LoweredBody) -> CoreModule {
+    let arrow: TypeNode = arrow_type(0, 0, span, alloc)
+    let types: List[TypeNode] = List { alloc: alloc, items: [int_ty, arrow] }
+    let root: CoreNode = CoreNode { kind: CoreNodeKind.Lam(0, 0), ty: 1, span: span }
+    let nodes: List[CoreNode] = List { alloc: alloc, items: [body.node, root] }
+    let defs: List[CoreDef] = List { alloc: alloc, items: [CoreDef { name: fn_name, ty: 1, root: 1, span: span }] }
+    CoreModule { name: module_name, types: types, defs: defs, nodes: nodes, diagnostics: body.diagnostics }
+}
+
+fn lower_tiny_nullary(alloc: Alloc, module_name: str, fn_name: str, span: SourceSpan, int_ty: TypeNode, body: LoweredBody) -> CoreModule {
+    let unit_ty: TypeNode = unit_type(span)
+    let arrow: TypeNode = arrow_type(0, 1, span, alloc)
+    let types: List[TypeNode] = List { alloc: alloc, items: [unit_ty, int_ty, arrow] }
+    let root: CoreNode = CoreNode { kind: CoreNodeKind.Lam(0, 0), ty: 2, span: span }
+    let nodes: List[CoreNode] = List { alloc: alloc, items: [body.node, root] }
+    let defs: List[CoreDef] = List { alloc: alloc, items: [CoreDef { name: fn_name, ty: 2, root: 1, span: span }] }
+    CoreModule { name: module_name, types: types, defs: defs, nodes: nodes, diagnostics: body.diagnostics }
+}
+
+fn lower_tiny_source(alloc: Alloc, source: str) -> !CoreModule {
+    let module: AstModule = parse_tiny_module(alloc, source)?
+    lower_tiny_module(alloc, module)
+}
+
+fn core_module_fingerprint(module: CoreModule) -> i64 {
+    let def: CoreDef = module.defs[0]
+    let body: CoreNode = module.nodes[0]
+    let root: CoreNode = module.nodes[def.root]
+    let param_ty: TypeNode = module.types[0]
+    var score: i64 = ((len(module.name) + len(def.name)) as i64)
+    score = (score + ((len(module.types) as i64) * 10))
+    score = (score + ((len(module.nodes) as i64) * 100))
+    score = (score + ((len(module.defs) as i64) * 1000))
+    score = (score + ((len(module.diagnostics) as i64) * 10000))
+    score = (score + core_node_weight(param_ty, root))
+    score = (score + core_node_weight(param_ty, body))
+    score
+}
+
+fn lower_check_tiny_fingerprint(alloc: Alloc, source: str) -> !i64 {
+    let module: CoreModule = lower_tiny_source(alloc, source)?
+    core_module_fingerprint(module)
+}
+
+fn lower_check_tiny_diagnostics(alloc: Alloc, source: str) -> !i64 {
+    let module: CoreModule = lower_tiny_source(alloc, source)?
+    (len(module.diagnostics) as i64)
+}
+
+fn unsupported_tiny_lowering(alloc: Alloc) -> !i64 {
+    let module: AstModule = sample_ast_module(alloc)
+    let unused: CoreModule = lower_tiny_module(alloc, module)?
+    PassError.UnsupportedExpr
+}

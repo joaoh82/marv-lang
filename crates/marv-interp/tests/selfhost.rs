@@ -220,6 +220,58 @@ fn selfhost_parser_program() -> Program {
     Program::new("selfhost.parser", defs, world)
 }
 
+fn selfhost_lower_check_program() -> Program {
+    let root = repo_root();
+    let lower_check_path = root.join("selfhost/lower_check.mv");
+    let lower_check_src = std::fs::read_to_string(&lower_check_path)
+        .unwrap_or_else(|e| panic!("read {lower_check_path:?}: {e}"));
+    let lower_check = marv_syntax::parse(&lower_check_src).expect("parse lower_check.mv");
+    assert_eq!(
+        marv_syntax::format_module(&lower_check),
+        lower_check_src,
+        "selfhost/lower_check.mv must be in canonical form"
+    );
+
+    let model = parse_file(root.join("selfhost/model.mv"));
+    let parser = parse_file(root.join("selfhost/parser.mv"));
+    let std_io = parse_file(root.join("std/capabilities.mv"));
+    let std_collections = parse_file(root.join("std/collections.mv"));
+    let modules = vec![model, parser, lower_check, std_io, std_collections];
+    let lowered =
+        lower_modules(&modules).expect("lower selfhost lower_check + parser + model + std");
+    let world = World::from_modules(&lowered);
+    let pass_lowered = lowered
+        .iter()
+        .find(|module| module.module == ["selfhost".to_string(), "lower_check".to_string()])
+        .expect("lowered selfhost.lower_check");
+    let mut errors = Vec::new();
+    for entry in &pass_lowered.defs {
+        errors.extend(
+            check_def(&world, &entry.def, Some(&entry.name))
+                .into_iter()
+                .filter(|d| d.severity == Severity::Error),
+        );
+    }
+    assert!(
+        errors.is_empty(),
+        "selfhost.lower_check must check clean: {errors:?}"
+    );
+
+    let mut defs = Vec::new();
+    for (module, lowered_module) in modules.iter().zip(lowered.into_iter()) {
+        let prefix = module.name.join(".");
+        for entry in lowered_module.defs {
+            let name = if prefix == "selfhost.lower_check" {
+                entry.name
+            } else {
+                format!("{prefix}.{}", entry.name)
+            };
+            defs.push((name, entry.def));
+        }
+    }
+    Program::new("selfhost.lower_check", defs, world)
+}
+
 fn run_model_score(prog: &Program, entry: &str) -> i64 {
     match prog
         .run(entry, &["Alloc".to_string()], &[])
@@ -240,6 +292,22 @@ fn run_parser_score(prog: &Program, entry: &str, source: &str) -> i64 {
         Value::Int(n) => n,
         other => panic!("{entry} produced {other:?}"),
     }
+}
+
+fn run_lower_check_score(prog: &Program, entry: &str, source: &str) -> i64 {
+    match prog
+        .run(entry, &["Alloc".to_string()], &[source.to_string()])
+        .unwrap_or_else(|e| panic!("run {entry}: {e:?}"))
+        .value
+    {
+        Value::Int(n) => n,
+        other => panic!("{entry} produced {other:?}"),
+    }
+}
+
+fn run_lower_check_nullary(prog: &Program, entry: &str) -> Result<Value, RunError> {
+    prog.run(entry, &["Alloc".to_string()], &[])
+        .map(|out| out.value)
 }
 
 /// The Rust Stage-0 oracle: evaluate `Prim{op,[a,b]}` through the real
@@ -382,4 +450,81 @@ fn selfhost_parser_unsupported_forms_fail_with_frontend_error() {
         )
         .expect_err("unsupported grammar must fail honestly");
     assert_eq!(err, RunError::Uncaught("FrontendError".to_string()));
+}
+
+#[test]
+fn selfhost_lower_check_tiny_slice_matches_stage0_core_shape() {
+    let oracle = marv_syntax::parse(TINY_FRONTEND_SRC).expect("stage-0 parses tiny fixture");
+    let lowered = lower_module(&oracle).expect("stage-0 lowers tiny fixture");
+    let def = lowered
+        .defs
+        .iter()
+        .find(|entry| entry.name == "id")
+        .expect("lowered id");
+    let errors: Vec<_> = check_def(&World::new(), &def.def, Some("id"))
+        .into_iter()
+        .filter(|d| d.severity == Severity::Error)
+        .collect();
+    assert!(
+        errors.is_empty(),
+        "stage-0 tiny fixture checks clean: {errors:?}"
+    );
+    match &def.def.ty {
+        Type::Arrow {
+            param,
+            ret,
+            effects,
+        } => {
+            assert_eq!(**param, Type::Int(IntTy::I64));
+            assert_eq!(**ret, Type::Int(IntTy::I64));
+            assert!(effects.caps.is_empty());
+        }
+        other => panic!("expected id arrow type, got {other:?}"),
+    }
+    match def.def.body.as_ref().expect("id body") {
+        Core::Lam { param, body, .. } => {
+            assert_eq!(*param, Type::Int(IntTy::I64));
+            assert_eq!(**body, Core::Atom(Atom::Var(0)));
+        }
+        other => panic!("expected id lambda body, got {other:?}"),
+    }
+
+    let prog = selfhost_lower_check_program();
+    assert_eq!(
+        run_lower_check_score(&prog, "lower_check_tiny_fingerprint", TINY_FRONTEND_SRC),
+        1234
+    );
+    assert_eq!(
+        run_lower_check_score(&prog, "lower_check_tiny_diagnostics", TINY_FRONTEND_SRC),
+        0
+    );
+}
+
+#[test]
+fn selfhost_lower_check_reports_diagnostics_and_unsupported_constructs() {
+    let bad_src = "mod demo\n\npure fn id() -> i64 {\n    n\n}\n";
+    let oracle = marv_syntax::parse(bad_src).expect("stage-0 parses bad tiny fixture");
+    let lowered = lower_module(&oracle).expect("stage-0 still lowers bad tiny fixture");
+    let def = lowered
+        .defs
+        .iter()
+        .find(|entry| entry.name == "id")
+        .expect("lowered id");
+    match def.def.body.as_ref().expect("id body") {
+        Core::Lam { body, .. } => match &**body {
+            Core::Atom(Atom::Global(_)) => {}
+            other => panic!("expected unresolved name to lower as a global, got {other:?}"),
+        },
+        other => panic!("expected lambda body, got {other:?}"),
+    }
+
+    let prog = selfhost_lower_check_program();
+    assert_eq!(
+        run_lower_check_score(&prog, "lower_check_tiny_diagnostics", bad_src),
+        1
+    );
+    assert_eq!(
+        run_lower_check_nullary(&prog, "unsupported_tiny_lowering"),
+        Err(RunError::Uncaught("PassError".to_string()))
+    );
 }

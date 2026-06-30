@@ -14,6 +14,7 @@ small enough to test against the Rust compiler.
 | [`prim_eval.mv`](prim_eval.mv) | The interpreter's total-primitive kernel (`marv-interp`'s `eval_prim`): given a `PrimOp` tag and two operands, compute the result. |
 | [`model.mv`](model.mv) | Stage-1 data model for source spans, tokens, type syntax, parsed AST nodes, Core nodes, diagnostics, and representative AST/Core samples. |
 | [`parser.mv`](parser.mv) | First lexer/parser slice for a tiny `.mv` grammar, producing the `model.mv` token and AST structures and failing unsupported forms with `FrontendError`. |
+| [`lower_check.mv`](lower_check.mv) | First lowering/checker slice for the same tiny grammar, turning the selfhost AST into `CoreModule` data and reporting tiny-scope diagnostics. |
 
 `crates/marv-interp/tests/selfhost.rs` runs the marv `eval_prim` through the
 interpreter and asserts it matches the **Rust Stage-0 kernel** (the real
@@ -30,6 +31,12 @@ tiny source with Rust Stage 0, checks the expected module/function/type/body
 shape, then runs the marv lexer/parser fingerprints through the interpreter.
 The harness also asserts that out-of-slice syntax raises `FrontendError` instead
 of being accepted with a misleading partial AST.
+
+`lower_check.mv` consumes that tiny AST and builds the first marv-native
+`CoreModule`: one function definition, an `i64`/`() -> i64` arrow type, a lambda
+root node, and an integer/local/global atom body. Its harness compares the
+supported fixture against Rust Stage-0's lowered Core shape and keeps an
+explicit tiny-scope diagnostic path plus `PassError` for unsupported AST forms.
 
 ## Stage-1 model mapping
 
@@ -74,6 +81,34 @@ the complete Stage-0 grammar. The path to full coverage is incremental: widen
 the lexer token set, add parser routines one grammar family at a time, keep
 unsupported forms typed and explicit, and extend the differential fixtures until
 the marv parser can round-trip the same corpus as Rust Stage 0.
+
+## Stage-1 lowering/checker slice
+
+`lower_check.mv` intentionally tracks the parser slice rather than jumping ahead
+of it. Supported today:
+
+- Lower a parsed tiny module containing one function item.
+- Represent nullary functions as a synthetic unit-parameter lambda, matching
+  Stage 0's curried `fn() -> T` convention.
+- Represent one-parameter `i64 -> i64` functions as a `TypeKind.Arrow` and
+  `CoreNodeKind.Lam`.
+- Lower integer tail expressions to `CoreAtom.Int`, parameter references to
+  `CoreAtom.Var(0)`, and unresolved tiny-scope names to `CoreAtom.Global`.
+- Return `Diagnostic` values for the tiny checker rule it owns, currently an
+  unknown local in a nullary function body.
+
+The differential test checks that `pure fn id(n: i64) -> i64 { n }` has the same
+Stage-0 Core shape: `i64 -> i64`, lambda parameter `i64`, and body `Var(0)`.
+The selfhost fingerprint for that fixture is `1234`, and the diagnostic count
+is zero. A nullary body `n` produces one selfhost diagnostic while preserving the
+observed Stage-0 lowering behavior (`n` is an unresolved global at Core level).
+
+Unsupported AST forms raise `PassError`: structs, enums, bool/string/call/if/
+match/struct-literal expressions, effects/capabilities, error sets, linear-use
+analysis, contracts, multi-item modules, real name-resolution diagnostics, and
+full type compatibility. Future MARV-73 follow-up slices should widen parser
+coverage first when needed, then add lowering and checker rules for the same
+fixtures so Stage 1 and Stage 0 stay differentially comparable.
 
 ## Why this pass first
 
