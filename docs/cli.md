@@ -15,7 +15,7 @@ marv <command> [args]
 |---------|--------|-------------|
 | `fmt`    | **working** (M0+, parse-and-reprint for the implemented surface) | Canonicalize marv source. |
 | `check`  | **working** (M2) | Type / effect / capability / error-set / reference / linearity checking. |
-| `build`  | **working** (M4 `native-cranelift`, M5 `wasm-component`, MARV-14 pinned store, MARV-68 native AOT, MARV-69 LLVM first slice) | Compile a target: Cranelift JIT/AOT, LLVM/clang native release-slice output, or a WebAssembly module. |
+| `build`  | **working** (M4 `native-cranelift`, M5 `wasm-core`, MARV-14 pinned store, MARV-68 native AOT, MARV-69 LLVM first slice, MARV-70 `wasm-component`) | Compile a target: Cranelift JIT/AOT, LLVM/clang native release-slice output, a WebAssembly component+WIT package, or a core WebAssembly module. |
 | `run`    | **working** (M4, MARV-14 pinned store) | Interpret an entry point with an explicit capability grant set. |
 | `resolve-impl` | **working** (MARV-5) | Report each generic instantiation and which coherent `impl` its bounded type arguments select. |
 | `verify` | **working** (M6, Tier 2) | Discharge `requires`/`ensures` contracts via SMT. |
@@ -179,8 +179,9 @@ The entry resolves as for `run`: `--entry NAME` (bare or qualified), else
 `commit`/audit flows always operate on every discovered definition; pruning is a
 `build` behavior only.
 
-- **`--target`** — `native-cranelift` (default), `native-llvm`, or
-  `wasm-component`. Unknown targets are rejected.
+- **`--target`** — `native-cranelift` (default), `native-llvm`,
+  `wasm-component`, or `wasm-core`. Unknown targets are rejected. `wasm` remains
+  an alias for `wasm-core`.
 - **`--run`** *(native only)* — after compiling, JIT-executes the entry point and
   prints its integer result. It cannot be combined with native AOT output flags.
   Without `--run`, `--out`, or `--emit`, `build` reports success and the arity.
@@ -255,21 +256,38 @@ defined for `native-llvm` yet.
 
 ### `--target wasm-component`
 
-Emits a WebAssembly module (`marv-codegen-wasm`) and reports its **capability
-manifest** — the host imports it requires. A pure module imports nothing; a
-module that `perform`s a capability imports one function per operation
-(`spec/01` §9). The host (a wasmtime embedding or a browser page) grants a
-capability by supplying that import, and withholds it by not.
+Emits a WebAssembly **component** (`marv-codegen-wasm`) and a deterministic WIT
+sidecar next to it (`out.wasm` → `out.wit`). The component embeds the existing
+core module, lowers typed component imports into the core capability imports,
+and lifts reachable core exports back out as component functions. It also
+reports its **capability manifest** — the host imports it requires. A pure
+component imports nothing; a module that `perform`s a capability imports one
+typed function per operation (`spec/01` §9). The host grants a capability by
+supplying that import, and withholds it by not.
 
 ```sh
 marv build --target wasm-component examples/factorial.mv -o factorial.wasm
-#   → wrote factorial.wasm … capabilities required: none (pure — imports nothing)
+#   → wrote factorial.wasm … WIT: factorial.wit
+#   → capabilities required: none (pure — imports nothing)
 marv build --target wasm-component web/fetcher.core.json -o fetcher.wasm
 #   → capabilities required (host imports): Net::op0
 ```
 
-(Today the artifact is a core wasm module — the component model's substrate —
-with capabilities as host imports; full component/WIT packaging is a later step.)
+The current component ABI maps Marv scalar/boolean/string-handle values to
+one-word `s64` component parameters/results. Aggregates and strings still live
+inside the embedded core module's linear-memory layout; richer named
+component-model records/resources are staged follow-ups.
+
+### `--target wasm-core`
+
+Emits the core WebAssembly module substrate directly. This is still the artifact
+used by the wasmtime differential tests and the dependency-free browser demo,
+where `WebAssembly.Module.imports` inspects capability imports directly.
+
+```sh
+marv build --target wasm-core examples/factorial.mv -o factorial.wasm
+marv build --target wasm-core web/fetcher.core.json -o fetcher.wasm
+```
 
 All three backends — interpreter, Cranelift, and WASM — are differentially tested
 for agreement on a corpus under [`../tests/run/`](../tests/run); the WASM sandbox

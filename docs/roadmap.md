@@ -56,7 +56,7 @@ where each one sits and what must land first. Each task references back here.
 | ~~**MARV-67** package manifest, dependency resolution, package-aware agent queries~~ ✅ done — adds a minimal deterministic `marv.toml` manifest (`[package] name`, `roots`, local `[dependencies.NAME] path`), a shared `marv-package` loader, CLI package-root discovery with transitive local path deps, `marv/openPackage` / MCP `marv_open_package`, a multi-package example, and docs for package bootstrap plus commit/build lockfile behavior. Pinned store deps remain the existing `--store` lockfile flow: package source graphs are loaded first, then known names are rewritten to dag hashes. | 7 · Packages | ~~MARV-49~~ ✅, ~~MARV-14~~ ✅ | 71–74 | medium |
 | ~~**MARV-68** Cranelift AOT object/executable builds~~ ✅ done — `marv build --emit object` now writes deterministic Cranelift object files for the entry's reachable closure, while native `--out app` links a standalone value-entry executable with the current runtime hooks. Reachable unsupported constructs, including capability `perform`, still fail clearly before artifact emission. Production capability-hosted native runtimes remain MARV-69+ work. | 7 · Backends | ~~MARV-8~~ ✅, ~~MARV-9~~ ✅ | 69 | medium |
 | ~~**MARV-69** LLVM optimized release backend~~ ✅ done — `native-llvm` emits deterministic LLVM IR and runs/links through `clang -O2` for scalar/calls/recursion/conditionals/loops, boxed structs/enums, arrays, runtime slice updates, `List[T]`, string ops, iterator loops, bytes/UTF-8, JSON serializer-safe paths, and current map/set/app corpus paths. Debug bounds checks abort and `--release` omits them. `raise`, capability `perform`, unsafe/resource host integration, and parser/error paths remain honest unsupported follow-ups. | 7 · Backends | ~~MARV-68~~ ✅ | — | medium |
-| **MARV-70** WASM component model and WIT packaging | 7 · Backends | ~~MARV-53~~ ✅ | 63 | medium |
+| ~~**MARV-70** WASM component model and WIT packaging~~ ✅ done — `marv build --target wasm-component` now emits a validating WebAssembly component that embeds the existing core module, lowers typed component imports into the core capability imports, lifts reachable core exports, and writes a deterministic `.wit` sidecar. `wasm-core` remains available for wasmtime/browser core-module embeddings. The current component ABI exposes scalar/boolean/string-handle slots as `s64`; richer component-model records/resources and listener/resource imports remain honest follow-ups. | 7 · Backends | ~~MARV-53~~ ✅ | 63 | medium |
 | **MARV-71** Stage-1 AST/Core data model in marv | 7 · Self-hosting | 67 *(nice-to-have package workflow)* | 72, 73, 74 | high |
 | **MARV-72** Stage-1 lexer/parser slices in marv | 7 · Self-hosting | 71 | 73, 74 | high |
 | **MARV-73** Stage-1 lowering/checker slices in marv | 7 · Self-hosting | 71, 72 | 74 | high |
@@ -313,8 +313,7 @@ they unblock the rest. Then:
   bytes/UTF-8, HTTP request capability/host ABI, JSON, `Spawn`, unsafe audit
   metadata, loop early return, generic non-recursive ADT verification, and the
   scalar hash-backed Map/Set path.
-- **Longer horizon:** MARV-71 through MARV-74 self-hosting; MARV-68 through MARV-70
-  AOT/LLVM/component packaging; MARV-39 trap-freedom verification;
+- **Longer horizon:** MARV-71 through MARV-74 self-hosting; MARV-39 trap-freedom verification;
   richer package/version metadata on top of MARV-67 package manifests and the
   MARV-14 pinned store.
 

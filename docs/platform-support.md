@@ -11,7 +11,7 @@ property (`spec/01` §9).
 |---------|-------|------|--------|
 | Tree-walking interpreter | `marv-interp` | in-process; the oracle | **working** — full Core IR (arithmetic, `if`/`match`, recursion, currying, aggregates, `perform`/effects, contracts/Tier-1) plus a deterministic `Http` request/response test host |
 | Cranelift (native) | `marv-codegen-cl` | **JIT** (in-process), AOT `.o`, linked executable | **working** for the integer/boolean subset + heap-boxed aggregates/enums (MARV-9) + `List[T]` growable storage (MARV-42) + string manipulation (MARV-43) + arena reclamation for scalar-carried loop temporaries; AOT object/executable builds are working for backend-supported reachable closures (MARV-68) |
-| WebAssembly | `marv-codegen-wasm` | core `.wasm` module | **working** for the integer/boolean subset + growable linear-memory aggregates/enums (MARV-9) + `List[T]` growable storage (MARV-42) + string manipulation (MARV-43) + arena reclamation for scalar-carried loop temporaries + capabilities-as-host-imports; component/WIT packaging is roadmap |
+| WebAssembly | `marv-codegen-wasm` | component `.wasm` + `.wit`, or core `.wasm` substrate | **working** for the integer/boolean subset + growable linear-memory aggregates/enums (MARV-9) + `List[T]` growable storage (MARV-42) + string manipulation (MARV-43) + arena reclamation for scalar-carried loop temporaries + capabilities-as-host-imports; `wasm-component` now wraps the core module in a validating component with deterministic WIT (MARV-70) |
 | LLVM (release) | `marv-codegen-llvm` | textual LLVM IR compiled/linked by `clang` | **working release slice** for scalar arithmetic/casts, calls/recursion, `if`/`match`, `while`, early `return`, boxed structs/enums, arrays, runtime-length slice updates, `List[T]`, strings, iterator loops, bytes/UTF-8, JSON serializer-safe paths, and current map/set/app corpus paths; `raise`, capability `perform`, unsafe/resource host integration remain honest `unsupported` |
 
 The interpreter executes the whole Core IR. The Cranelift and WASM backends today compile the
@@ -42,15 +42,19 @@ optimized executable. The WASM backend additionally lowers `perform` to a host-i
   interpreter includes a deterministic test host (`POST /echo`, body `marv-http-echo`).
   `Net.listen`/`Listener.accept_http` can drive one listener-accepted HTTP exchange against
   that same deterministic host; real OS socket scheduling remains host runtime work.
-- **WebAssembly**: each capability operation is a module **import**. A pure module imports
-  nothing (no slot through which authority could be handed to it); a module that wants the
-  network or HTTP request access imports `Net`/`Http` and **cannot be instantiated** unless
-  the host supplies it. The current core-WASM backend still reports an honest `unsupported`
-  for listener operations that return linear resource capabilities, such as `Net.listen`.
-  Scalar, boolean, and string values cross the current core-WASM ABI as
-  one-word slots; component/WIT packaging will make those names/types explicit. The import list
-  is the capability manifest, statically inspectable
-  (`WebAssembly.Module.imports` / the `marv build` output). See [`web/`](../web).
+- **WebAssembly**: each capability operation is a module/component **import**. A pure
+  artifact imports nothing (no slot through which authority could be handed to it); a module
+  that wants the network or HTTP request access imports `Net`/`Http` operations and **cannot
+  be instantiated** unless the host supplies them. `marv build --target wasm-component`
+  wraps the core module in a validating component and writes WIT that exposes those imports
+  as typed functions. `marv build --target wasm-core` emits the core module substrate
+  directly for wasmtime/browser core-module embeddings. Listener operations that return
+  linear resource capabilities, such as `Net.listen`, still report honest `unsupported`.
+  Scalar, boolean, and string-handle values cross the current component/core ABI as
+  one-word `s64` slots; richer component-model records/resources are staged follow-ups.
+  The import list is the capability manifest, statically inspectable through WIT,
+  component imports, `WebAssembly.Module.imports` for `wasm-core`, and the `marv build`
+  output. See [`web/`](../web).
 
 ## Hosts & targets
 
@@ -58,7 +62,8 @@ optimized executable. The WASM backend additionally lowers `perform` to a host-i
 |---|---|---|
 | macOS (arm64, x86_64) | ✅ supported | primary dev platform |
 | Linux (x86_64) | ✅ supported | CI |
-| WASM (`wasm32`, core module) | ✅ produced by `marv build --target wasm-component` | runs under wasmtime and in the browser |
+| WASM (`wasm32`, component) | ✅ produced by `marv build --target wasm-component` | validates as a component and ships WIT |
+| WASM (`wasm32`, core module) | ✅ produced by `marv build --target wasm-core` | runs under wasmtime and in the browser |
 | Windows | untested | should build (pure-Rust workspace); not in CI yet |
 
 ## Tooling prerequisites

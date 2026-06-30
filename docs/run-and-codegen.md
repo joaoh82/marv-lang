@@ -335,12 +335,14 @@ marv run --grant Spawn examples/spawn.mv                     # 42 + two Spawn ef
 
 ## The WebAssembly backend (M5)
 
-`marv-codegen-wasm` is the third backend, emitting a WebAssembly module with
-`wasm-encoder`. It compiles the same subset as Cranelift — including aggregates
-and enums over a linear-memory heap (MARV-9) and arrays with `len`/index/store
-(MARV-30) — plus `Core::Perform`, and every scalar is an `i64`, so it stays in
-lockstep with the oracle. `marv build --target wasm-component <file> -o out.wasm`
-writes the module and prints its capability manifest.
+`marv-codegen-wasm` is the third backend, emitting either a WebAssembly
+component (`--target wasm-component`) or the core module substrate
+(`--target wasm-core`) with `wasm-encoder`. It compiles the same subset as
+Cranelift — including aggregates and enums over a linear-memory heap (MARV-9)
+and arrays with `len`/index/store (MARV-30) — plus `Core::Perform`, and every
+scalar is an `i64`, so it stays in lockstep with the oracle. `marv build
+--target wasm-component <file> -o out.wasm` writes a validating component plus a
+deterministic `out.wit` sidecar and prints its capability manifest.
 
 ### Capabilities are host imports
 
@@ -363,16 +365,17 @@ lowers to a **call to an imported function** — one import per
 - String results from an import use the same one-word handle shape. The core-WASM
   backend can model this today for `Http.method/path/body_text`. Listener operations that
   return linear resource capabilities, such as `Net.listen`, still report honest
-  `unsupported`; component/WIT
-  packaging remains the place where those handles become named host-level string
-  types.
+  `unsupported`. The MARV-70 component wrapper exposes current scalar/handle-shaped
+  imports and exports as `s64` in WIT; named component-model records/resources remain
+  staged follow-ups.
 
 ### The differential gate and the browser demo
 
 `crates/marv-codegen-wasm/tests/differential.rs` runs the same `tests/run/*.mv`
-corpus through **wasmtime** and asserts it matches the interpreter, and checks
-that a pure module imports nothing, a `Net`-performing module imports exactly
-`Net`, and string-returning `Http` operations validate as host imports.
+corpus through **wasmtime** and asserts the core module matches the interpreter,
+then checks that the component wrapper validates, pure modules import nothing,
+a `Net`-performing module imports exactly `Net`, and string-returning `Http`
+operations validate as host imports.
 
 [`../web/`](../web) is a dependency-free browser demo (serve it with any static
 server) proving the sandbox live:
@@ -383,8 +386,8 @@ server) proving the sandbox live:
   with it checked the page supplies `Net` and `fetch()` runs through it.
 
 ```sh
-marv build --target wasm-component examples/factorial.mv -o web/factorial.wasm
-marv build --target wasm-component web/fetcher.core.json -o web/fetcher.wasm
+marv build --target wasm-core examples/factorial.mv -o web/factorial.wasm
+marv build --target wasm-core web/fetcher.core.json -o web/fetcher.wasm
 cd web && python3 -m http.server 8087   # then open http://localhost:8087/
 ```
 

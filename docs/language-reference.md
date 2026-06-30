@@ -318,7 +318,8 @@ definitions into the store. See [store.md](store.md).
 
 Native via **Cranelift** (JIT plus AOT object/executable output), a first
 **LLVM** release slice (`native-llvm`, optimized through `clang`), and
-**WebAssembly** (capabilities as host imports; component/WIT packaging is roadmap). The
+**WebAssembly** (`wasm-component` with WIT packaging, or `wasm-core` for the core
+module substrate; capabilities remain explicit host imports). The
 tree-walking **interpreter** is the reference semantics oracle every backend is differentially
 tested against. See [run-and-codegen.md](run-and-codegen.md) and [platform-support.md](platform-support.md).
 

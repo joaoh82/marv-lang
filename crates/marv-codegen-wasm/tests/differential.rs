@@ -587,6 +587,15 @@ fn a_pure_module_imports_nothing() {
     let engine = Engine::default();
     let module = Module::new(&engine, &artifact.bytes).unwrap();
     assert!(Instance::new(&mut Store::new(&engine, ()), &module, &[]).is_ok());
+
+    assert_component_artifact(&artifact);
+    assert!(
+        artifact
+            .wit
+            .contains("export demo-factorial: func(arg0: s64) -> s64;"),
+        "pure component WIT should expose the exported entry, got:\n{}",
+        artifact.wit
+    );
 }
 
 /// A `fetch(net: Net)` that performs `Net` op 0 must surface exactly one host
@@ -648,6 +657,29 @@ fn a_capability_using_module_imports_that_capability() {
         .map(|i| (i.module().to_string(), i.name().to_string()))
         .collect();
     assert_eq!(imports, vec![("Net".to_string(), "op0".to_string())]);
+
+    assert_component_artifact(&artifact);
+    assert!(
+        artifact.wit.contains("import net-op0: func();"),
+        "capability component WIT should expose typed capability imports, got:\n{}",
+        artifact.wit
+    );
+}
+
+fn assert_component_artifact(artifact: &marv_codegen_wasm::WasmArtifact) {
+    assert_eq!(
+        &artifact.component_bytes[..8],
+        &[0x00, 0x61, 0x73, 0x6d, 0x0d, 0x00, 0x01, 0x00],
+        "component artifact should use the component-model header"
+    );
+    assert_eq!(
+        &artifact.bytes[..8],
+        &[0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00],
+        "core artifact should remain available for wasmtime/browser core-module execution"
+    );
+    wasmparser::Validator::new()
+        .validate_all(&artifact.component_bytes)
+        .expect("component validates");
 }
 
 #[test]

@@ -57,9 +57,9 @@ COMMANDS:
                                executable; --emit object writes a relocatable
                                object), `native-llvm` (uses clang/LLVM for
                                optimized release-style native run/exe output),
-                               and `wasm-component` (writes a
-                               .wasm module to --out, default <file>.wasm, and
-                               reports the host imports = capabilities it needs).
+                               `wasm-component` (writes a component .wasm plus
+                               sibling .wit), and `wasm-core` (writes the core
+                               module substrate and reports host imports).
                                Only definitions reachable from the entry
                                (--entry, else `main`, else the sole function)
                                are compiled, so an unreferenced sibling the
@@ -739,8 +739,9 @@ fn qualify_name(module_path: &str, name: &str) -> String {
 ///
 /// Targets: `native-cranelift` (Cranelift JIT; `--run` executes it; `--out` /
 /// `--emit` writes AOT artifacts), `native-llvm` (LLVM IR via `clang` for the
-/// release slice), and `wasm-component` (a WebAssembly module written to `--out`,
-/// default `<file>.wasm`). All refuse code that fails `check`, and all compile
+/// release slice), `wasm-component` (a WebAssembly component plus sibling WIT),
+/// and `wasm-core` (the core module substrate written to `--out`, default
+/// `<file>.wasm`). All refuse code that fails `check`, and all compile
 /// only the definitions reachable from the entry (MARV-8) — `commit`/audit flows
 /// keep operating on every definition.
 fn cmd_build(args: &[String]) -> ExitCode {
@@ -784,11 +785,12 @@ fn cmd_build(args: &[String]) -> ExitCode {
         return match inv.target.as_str() {
             "native-cranelift" => build_native_pinned(&inv, &file, &pinned),
             "native-llvm" | "llvm" => build_llvm_pinned(&inv, &file, &pinned),
-            "wasm-component" | "wasm" => build_wasm_pinned(&inv, &file, &pinned),
+            "wasm-component" => build_wasm_pinned(&inv, &file, &pinned, WasmEmit::Component),
+            "wasm-core" | "wasm" => build_wasm_pinned(&inv, &file, &pinned, WasmEmit::Core),
             other => {
                 eprintln!(
                     "marv build: unsupported target `{other}` (have `native-cranelift`, \
-                     `native-llvm`, `wasm-component`)"
+                     `native-llvm`, `wasm-component`, `wasm-core`)"
                 );
                 ExitCode::FAILURE
             }
@@ -798,14 +800,12 @@ fn cmd_build(args: &[String]) -> ExitCode {
     match inv.target.as_str() {
         "native-cranelift" => build_native(&inv, &file, &loaded),
         "native-llvm" | "llvm" => build_llvm(&inv, &file, &loaded),
-        // `wasm-component` is the spec's name for the WASM target; today the
-        // artifact is a core module (the component's substrate), with
-        // capabilities as host imports per the component model (`spec/01` §9).
-        "wasm-component" | "wasm" => build_wasm(&inv, &file, &loaded),
+        "wasm-component" => build_wasm(&inv, &file, &loaded, WasmEmit::Component),
+        "wasm-core" | "wasm" => build_wasm(&inv, &file, &loaded, WasmEmit::Core),
         other => {
             eprintln!(
                 "marv build: unsupported target `{other}` (have `native-cranelift`, \
-                 `native-llvm`, `wasm-component`)"
+                 `native-llvm`, `wasm-component`, `wasm-core`)"
             );
             ExitCode::FAILURE
         }
@@ -885,7 +885,12 @@ fn build_native_pinned(inv: &Invocation, file: &str, pinned: &PinnedProgram) -> 
     }
 }
 
-fn build_wasm_pinned(inv: &Invocation, file: &str, pinned: &PinnedProgram) -> ExitCode {
+fn build_wasm_pinned(
+    inv: &Invocation,
+    file: &str,
+    pinned: &PinnedProgram,
+    emit: WasmEmit,
+) -> ExitCode {
     let opts = wasm::Options {
         bounds_checks: !inv.release,
     };
@@ -904,13 +909,23 @@ fn build_wasm_pinned(inv: &Invocation, file: &str, pinned: &PinnedProgram) -> Ex
     };
 
     let out = inv.out.clone().unwrap_or_else(|| default_wasm_out(file));
-    if let Err(e) = std::fs::write(&out, &artifact.bytes) {
+    let bytes = emit.bytes(&artifact);
+    if let Err(e) = std::fs::write(&out, bytes) {
         eprintln!("marv build: {out}: {e}");
         return ExitCode::FAILURE;
     }
+    if emit == WasmEmit::Component {
+        let wit_out = default_wit_out(&out);
+        if let Err(e) = std::fs::write(&wit_out, &artifact.wit) {
+            eprintln!("marv build: {wit_out}: {e}");
+            return ExitCode::FAILURE;
+        }
+        eprintln!("  WIT: {wit_out}");
+    }
     eprintln!(
-        "marv build: {file}: wrote {out} ({} bytes) from pinned hashes via wasm-component",
-        artifact.bytes.len()
+        "marv build: {file}: wrote {out} ({} bytes) from pinned hashes via {}",
+        bytes.len(),
+        emit.label()
     );
     if artifact.imports.is_empty() {
         eprintln!("  capabilities required: none (pure — imports nothing)");
@@ -1093,9 +1108,9 @@ fn build_llvm_inner(
     }
 }
 
-/// WebAssembly backend: emit a `.wasm` module and report its capability
+/// WebAssembly backend: emit a `.wasm` artifact and report its capability
 /// manifest (the host imports it requires; a pure module requires none).
-fn build_wasm(inv: &Invocation, file: &str, loaded: &Loaded) -> ExitCode {
+fn build_wasm(inv: &Invocation, file: &str, loaded: &Loaded, emit: WasmEmit) -> ExitCode {
     let opts = wasm::Options {
         bounds_checks: !inv.release,
     };
@@ -1116,14 +1131,24 @@ fn build_wasm(inv: &Invocation, file: &str, loaded: &Loaded) -> ExitCode {
     };
 
     let out = inv.out.clone().unwrap_or_else(|| default_wasm_out(file));
-    if let Err(e) = std::fs::write(&out, &artifact.bytes) {
+    let bytes = emit.bytes(&artifact);
+    if let Err(e) = std::fs::write(&out, bytes) {
         eprintln!("marv build: {out}: {e}");
         return ExitCode::FAILURE;
     }
+    if emit == WasmEmit::Component {
+        let wit_out = default_wit_out(&out);
+        if let Err(e) = std::fs::write(&wit_out, &artifact.wit) {
+            eprintln!("marv build: {wit_out}: {e}");
+            return ExitCode::FAILURE;
+        }
+        eprintln!("  WIT: {wit_out}");
+    }
 
     eprintln!(
-        "marv build: {file}: wrote {out} ({} bytes) via wasm-component",
-        artifact.bytes.len()
+        "marv build: {file}: wrote {out} ({} bytes) via {}",
+        bytes.len(),
+        emit.label()
     );
     if artifact.imports.is_empty() {
         eprintln!("  capabilities required: none (pure — imports nothing)");
@@ -1135,6 +1160,28 @@ fn build_wasm(inv: &Invocation, file: &str, loaded: &Loaded) -> ExitCode {
     }
     eprintln!("  exports: {}", join_exports(&artifact.exports));
     ExitCode::SUCCESS
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WasmEmit {
+    Component,
+    Core,
+}
+
+impl WasmEmit {
+    fn bytes(self, artifact: &wasm::WasmArtifact) -> &[u8] {
+        match self {
+            WasmEmit::Component => &artifact.component_bytes,
+            WasmEmit::Core => &artifact.bytes,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            WasmEmit::Component => "wasm-component",
+            WasmEmit::Core => "wasm-core",
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -1337,6 +1384,13 @@ fn unique_temp_dir(prefix: &str) -> Result<PathBuf, String> {
 fn default_wasm_out(file: &str) -> String {
     let base = input_base(file);
     format!("{base}.wasm")
+}
+
+fn default_wit_out(wasm_out: &str) -> String {
+    Path::new(wasm_out)
+        .with_extension("wit")
+        .to_string_lossy()
+        .into_owned()
 }
 
 fn default_object_out(file: &str) -> String {

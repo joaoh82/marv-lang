@@ -70,7 +70,7 @@ marv build --run examples/factorial.mv --entry factorial 6   # 720  (Cranelift J
 marv build examples/factorial.mv --entry factorial --out factorial && ./factorial 6
 marv build --emit object examples/factorial.mv --entry factorial -o factorial.o
 marv build --target native-llvm --run examples/factorial.mv --entry factorial 6
-marv build --target wasm-component examples/factorial.mv -o factorial.wasm
+marv build --target wasm-component examples/factorial.mv -o factorial.wasm  # + factorial.wit
 marv verify examples/clamp.mv                       # proved  (Tier-2 SMT) — or a counterexample
 marv commit examples/clamp.mv                       # freeze into the content-addressed store
 ```
@@ -84,7 +84,7 @@ nothing, while a module that wants the network imports `Net` and **cannot be ins
 unless the page grants it.
 
 ```sh
-make build && marv build --target wasm-component examples/factorial.mv -o web/factorial.wasm
+make build && marv build --target wasm-core examples/factorial.mv -o web/factorial.wasm
 cd web && python3 -m http.server 8087   # open http://localhost:8087/
 ```
 
@@ -99,7 +99,7 @@ cd web && python3 -m http.server 8087   # open http://localhost:8087/
 | `marv fmt [--write\|--check] [files…]` | Canonicalize source. The formatter is the parser's inverse — exactly one form per program. |
 | `marv check <file>` | Type / effect / capability / error-set / reference / linearity checks over the discovered source module set; fix-carrying diagnostics. |
 | `marv run [--grant CAP,…] [--entry NAME] <file> [args…]` | Interpret an entry point (the semantics oracle), including discovered source imports. Capabilities enter only via `--grant`. |
-| `marv build [--target native-cranelift\|native-llvm\|wasm-component] [--run] [--release] [--emit object\|exe] [--store DIR] [--out PATH] [--entry NAME] <file>` | Compile via Cranelift (JIT `--run`, AOT object/executable output), LLVM/clang (`native-llvm` run/executable output for the release slice), or to a WebAssembly module. Only definitions reachable from the entry are compiled (MARV-8). With `--store`, imports/deps are fetched from pinned dag hashes. Debug builds (default) carry the Tier-1 bounds check; `--release` omits it. |
+| `marv build [--target native-cranelift\|native-llvm\|wasm-component\|wasm-core] [--run] [--release] [--emit object\|exe] [--store DIR] [--out PATH] [--entry NAME] <file>` | Compile via Cranelift (JIT `--run`, AOT object/executable output), LLVM/clang (`native-llvm` run/executable output for the release slice), to a WebAssembly component plus WIT sidecar, or to the core WebAssembly module substrate. Only definitions reachable from the entry are compiled (MARV-8). With `--store`, imports/deps are fetched from pinned dag hashes. Debug builds (default) carry the Tier-1 bounds check; `--release` omits it. |
 | `marv verify [--def NAME] <file>` | Discharge `requires`/`ensures` contracts via SMT: `proved` / `failed` (with a counterexample) / `unsupported` (→ runtime fallback). |
 | `marv commit [--store DIR] <file>` | Freeze discovered definitions into the content-addressed store; report the lockfile delta (new vs. already-reviewed). |
 | `marv store audit/gc [--store DIR]` | Inspect provenance/reachability or remove blobs unreachable from the lockfile. |
