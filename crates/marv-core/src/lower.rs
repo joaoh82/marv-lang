@@ -644,6 +644,8 @@ struct MonoReg {
     cap_ifaces: HashMap<String, CapIface>,
     /// Fully-qualified source names of host FFI declarations.
     ffi_externs: HashSet<String>,
+    /// Fully-qualified struct declarations across the lowered module set.
+    structs: HashMap<String, LocalStruct>,
 }
 
 /// A capability interface in the registry: its methods, in declaration order, so
@@ -689,6 +691,15 @@ impl MonoReg {
                 match item {
                     Item::Fn(f) if f.is_extern => {
                         reg.ffi_externs.insert(format!("{mp}.{}", f.name));
+                    }
+                    Item::Struct(s) => {
+                        reg.structs.insert(
+                            format!("{mp}.{}", s.name),
+                            LocalStruct {
+                                fields: s.fields.clone(),
+                                linear: s.linear,
+                            },
+                        );
                     }
                     Item::Fn(f) if !f.generics.is_empty() => {
                         reg.generics.insert(
@@ -838,7 +849,7 @@ impl Builder {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct LocalStruct {
     fields: Vec<Field>,
     linear: bool,
@@ -2649,17 +2660,16 @@ impl Lowerer {
         b: &mut Builder,
     ) -> Result<Core, LowerError> {
         let sname = path.join(".");
-        let decl = self
-            .structs
-            .get(&sname)
-            .ok_or_else(|| LowerError::UnknownStruct {
-                name: sname.clone(),
-            })?;
+        let (qualified, decl) =
+            self.resolve_struct(&sname)
+                .ok_or_else(|| LowerError::UnknownStruct {
+                    name: sname.clone(),
+                })?;
         // Reject any initializer naming a field the struct does not declare.
         for init in inits {
             if !decl.fields.iter().any(|f| f.name == init.name) {
                 return Err(LowerError::UnknownField {
-                    ty: sname.clone(),
+                    ty: qualified.clone(),
                     field: init.name.clone(),
                 });
             }
@@ -2671,14 +2681,14 @@ impl Lowerer {
         for fname in &field_names {
             let init = inits.iter().find(|i| &i.name == fname).ok_or_else(|| {
                 LowerError::MissingStructField {
-                    ty: sname.clone(),
+                    ty: qualified.clone(),
                     field: fname.clone(),
                 }
             })?;
             fields.push(self.emit_atom(&init.value, env, b)?);
         }
         Ok(Core::Ctor {
-            ty: self.struct_ty_hash(&sname),
+            ty: symbol_hash(&qualified),
             tag: 0,
             fields,
         })
@@ -2757,22 +2767,21 @@ impl Lowerer {
                 let sname = struct_name(&bt).ok_or_else(|| LowerError::UnresolvedProjection {
                     field: field.clone(),
                 })?;
-                let decl =
-                    self.structs
-                        .get(&sname)
-                        .ok_or_else(|| LowerError::UnresolvedProjection {
-                            field: field.clone(),
-                        })?;
+                let (qualified, decl) = self.resolve_struct(&sname).ok_or_else(|| {
+                    LowerError::UnresolvedProjection {
+                        field: field.clone(),
+                    }
+                })?;
                 let idx = decl
                     .fields
                     .iter()
                     .position(|f| &f.name == field)
                     .ok_or_else(|| LowerError::UnknownField {
-                        ty: sname.clone(),
+                        ty: qualified.clone(),
                         field: field.clone(),
                     })? as u32;
                 let n = decl.fields.len();
-                let ty_hash = self.struct_ty_hash(&sname);
+                let ty_hash = symbol_hash(&qualified);
 
                 // The current value of the aggregate being updated.
                 let base_atom = self.emit_atom(&base_expr, env.as_slice(), b)?;
@@ -3362,16 +3371,20 @@ impl Lowerer {
         }
     }
 
-    /// The nominal content hash of an in-module struct by source name — the same
-    /// hash [`Self::lower_named`] commits to, so a literal/field-rebuild `Ctor`
-    /// and a type reference to the struct agree.
-    fn struct_ty_hash(&self, sname: &str) -> Hash {
-        let qualified = if self.structs.contains_key(sname) {
-            format!("{}.{}", self.module_path, sname)
-        } else {
+    fn resolve_struct(&self, sname: &str) -> Option<(String, &LocalStruct)> {
+        if let Some(decl) = self.structs.get(sname) {
+            return Some((format!("{}.{}", self.module_path, sname), decl));
+        }
+        let qualified = if sname.contains('.') {
             sname.to_string()
+        } else {
+            let module = self.imports.get(sname)?;
+            format!("{module}.{sname}")
         };
-        symbol_hash(&qualified)
+        self.mono
+            .structs
+            .get(&qualified)
+            .map(|decl| (qualified, decl))
     }
 
     /// Resolve the function atom and the effective argument list of a call,
@@ -3524,9 +3537,8 @@ impl Lowerer {
                         return Type::Var(i as u32);
                     }
                     if self
-                        .structs
-                        .get(&path[0])
-                        .map(|s| s.linear)
+                        .resolve_struct(&path[0])
+                        .map(|(_, s)| s.linear)
                         .unwrap_or(false)
                         || self
                             .mono
@@ -3545,9 +3557,8 @@ impl Lowerer {
                     args.iter().map(|a| self.lower_type(a, generics)).collect();
                 if path.len() == 1
                     && (self
-                        .structs
-                        .get(&path[0])
-                        .map(|s| s.linear)
+                        .resolve_struct(&path[0])
+                        .map(|(_, s)| s.linear)
                         .unwrap_or(false)
                         || self
                             .mono
@@ -3602,8 +3613,8 @@ impl Lowerer {
                     return builtin;
                 }
             }
-            let qualified = if self.structs.contains_key(&path[0]) {
-                format!("{}.{}", self.module_path, path[0])
+            let qualified = if let Some((qualified, _)) = self.resolve_struct(&path[0]) {
+                qualified
             } else if let Some(q) = self.reg.enum_qualified(&path[0]) {
                 q.clone()
             } else if self
@@ -3641,19 +3652,18 @@ impl Lowerer {
         let sname = struct_name(&bt).ok_or_else(|| LowerError::UnresolvedProjection {
             field: field.to_string(),
         })?;
-        let fields = self
-            .structs
-            .get(&sname)
-            .ok_or_else(|| LowerError::UnresolvedProjection {
-                field: field.to_string(),
-            })?;
+        let (qualified, fields) =
+            self.resolve_struct(&sname)
+                .ok_or_else(|| LowerError::UnresolvedProjection {
+                    field: field.to_string(),
+                })?;
         fields
             .fields
             .iter()
             .position(|f| f.name == field)
             .map(|i| i as u32)
             .ok_or_else(|| LowerError::UnknownField {
-                ty: sname,
+                ty: qualified,
                 field: field.to_string(),
             })
     }
@@ -3672,7 +3682,7 @@ impl Lowerer {
             Expr::Field(base, field) => {
                 let bt = self.type_of_expr(base, env)?;
                 let sname = struct_name(&bt)?;
-                let fields = self.structs.get(&sname)?;
+                let (_qualified, fields) = self.resolve_struct(&sname)?;
                 fields
                     .fields
                     .iter()

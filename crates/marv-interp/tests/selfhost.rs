@@ -14,7 +14,7 @@ use std::path::PathBuf;
 
 use marv_core::ir::*;
 use marv_core::{lower_module, lower_modules};
-use marv_interp::{Program, Value};
+use marv_interp::{Program, RunError, Value};
 use marv_syntax::Module;
 use marv_types::{check_def, Severity, World};
 
@@ -170,9 +170,70 @@ fn selfhost_model_program() -> Program {
     Program::new("selfhost.model", defs, world)
 }
 
+fn selfhost_parser_program() -> Program {
+    let root = repo_root();
+    let parser_path = root.join("selfhost/parser.mv");
+    let parser_src = std::fs::read_to_string(&parser_path)
+        .unwrap_or_else(|e| panic!("read {parser_path:?}: {e}"));
+    let parser = marv_syntax::parse(&parser_src).expect("parse parser.mv");
+    assert_eq!(
+        marv_syntax::format_module(&parser),
+        parser_src,
+        "selfhost/parser.mv must be in canonical form"
+    );
+
+    let model = parse_file(root.join("selfhost/model.mv"));
+    let std_io = parse_file(root.join("std/capabilities.mv"));
+    let std_collections = parse_file(root.join("std/collections.mv"));
+    let modules = vec![model, parser, std_io, std_collections];
+    let lowered = lower_modules(&modules).expect("lower selfhost parser + model + std");
+    let world = World::from_modules(&lowered);
+    let parser_lowered = lowered
+        .iter()
+        .find(|module| module.module == ["selfhost".to_string(), "parser".to_string()])
+        .expect("lowered selfhost.parser");
+    let mut errors = Vec::new();
+    for entry in &parser_lowered.defs {
+        errors.extend(
+            check_def(&world, &entry.def, Some(&entry.name))
+                .into_iter()
+                .filter(|d| d.severity == Severity::Error),
+        );
+    }
+    assert!(
+        errors.is_empty(),
+        "selfhost.parser must check clean: {errors:?}"
+    );
+
+    let mut defs = Vec::new();
+    for (module, lowered_module) in modules.iter().zip(lowered.into_iter()) {
+        let prefix = module.name.join(".");
+        for entry in lowered_module.defs {
+            let name = if prefix == "selfhost.parser" {
+                entry.name
+            } else {
+                format!("{prefix}.{}", entry.name)
+            };
+            defs.push((name, entry.def));
+        }
+    }
+    Program::new("selfhost.parser", defs, world)
+}
+
 fn run_model_score(prog: &Program, entry: &str) -> i64 {
     match prog
         .run(entry, &["Alloc".to_string()], &[])
+        .unwrap_or_else(|e| panic!("run {entry}: {e:?}"))
+        .value
+    {
+        Value::Int(n) => n,
+        other => panic!("{entry} produced {other:?}"),
+    }
+}
+
+fn run_parser_score(prog: &Program, entry: &str, source: &str) -> i64 {
+    match prog
+        .run(entry, &["Alloc".to_string()], &[source.to_string()])
         .unwrap_or_else(|e| panic!("run {entry}: {e:?}"))
         .value
     {
@@ -270,4 +331,55 @@ fn selfhost_model_constructs_and_traverses_representative_ast_and_core_values() 
     assert_eq!(run_model_score(&prog, "representative_ast_score"), 37);
     assert_eq!(run_model_score(&prog, "representative_core_score"), 22);
     assert_eq!(run_model_score(&prog, "selfhost_model_score"), 59);
+}
+
+const TINY_FRONTEND_SRC: &str = "mod demo\n\npure fn id(n: i64) -> i64 {\n    n\n}\n";
+
+#[test]
+fn selfhost_parser_tiny_slice_matches_stage0_for_supported_fixture() {
+    let oracle = marv_syntax::parse(TINY_FRONTEND_SRC).expect("stage-0 parses tiny fixture");
+    assert_eq!(oracle.name, ["demo".to_string()]);
+    assert!(oracle.imports.is_empty());
+    let f = match oracle.items.as_slice() {
+        [marv_syntax::Item::Fn(f)] => f,
+        other => panic!("expected one function, got {other:?}"),
+    };
+    assert!(f.is_pure);
+    assert_eq!(f.name, "id");
+    assert_eq!(f.params.len(), 1);
+    assert_eq!(f.params[0].name, "n");
+    assert_eq!(
+        f.params[0].ty,
+        marv_syntax::Type::Named(vec!["i64".to_string()])
+    );
+    assert_eq!(
+        f.ret,
+        Some(marv_syntax::Type::Named(vec!["i64".to_string()]))
+    );
+    let body = f.body.as_ref().expect("function body");
+    match body.tail.as_ref().expect("body tail") {
+        marv_syntax::Tail::Expr(marv_syntax::Expr::Var(name)) => assert_eq!(name, "n"),
+        other => panic!("expected `n` tail expression, got {other:?}"),
+    }
+
+    let prog = selfhost_parser_program();
+    let token_count = run_parser_score(&prog, "lex_tiny_fingerprint", TINY_FRONTEND_SRC);
+    assert_eq!(token_count, 16);
+    assert_eq!(
+        run_parser_score(&prog, "parse_tiny_fingerprint", TINY_FRONTEND_SRC),
+        4 + 2 + token_count + 10 + 2 + TINY_FRONTEND_SRC.len() as i64
+    );
+}
+
+#[test]
+fn selfhost_parser_unsupported_forms_fail_with_frontend_error() {
+    let prog = selfhost_parser_program();
+    let err = prog
+        .run(
+            "unsupported_tiny_parse",
+            &["Alloc".to_string()],
+            &["mod demo\n\nstruct Point { x: i64 }\n".to_string()],
+        )
+        .expect_err("unsupported grammar must fail honestly");
+    assert_eq!(err, RunError::Uncaught("FrontendError".to_string()));
 }

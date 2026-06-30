@@ -13,6 +13,7 @@ small enough to test against the Rust compiler.
 |------|----------|
 | [`prim_eval.mv`](prim_eval.mv) | The interpreter's total-primitive kernel (`marv-interp`'s `eval_prim`): given a `PrimOp` tag and two operands, compute the result. |
 | [`model.mv`](model.mv) | Stage-1 data model for source spans, tokens, type syntax, parsed AST nodes, Core nodes, diagnostics, and representative AST/Core samples. |
+| [`parser.mv`](parser.mv) | First lexer/parser slice for a tiny `.mv` grammar, producing the `model.mv` token and AST structures and failing unsupported forms with `FrontendError`. |
 
 `crates/marv-interp/tests/selfhost.rs` runs the marv `eval_prim` through the
 interpreter and asserts it matches the **Rust Stage-0 kernel** (the real
@@ -23,6 +24,12 @@ The same test target parses, canonically formats, lowers, checks, and runs
 `model.mv`'s representative AST/Core scoring helpers. This is not a parser,
 lowerer, checker, or self-compile claim yet; it is the data shape MARV-72 and
 MARV-73 can build on.
+
+`parser.mv` starts the next layer up. Its differential harness parses the same
+tiny source with Rust Stage 0, checks the expected module/function/type/body
+shape, then runs the marv lexer/parser fingerprints through the interpreter.
+The harness also asserts that out-of-slice syntax raises `FrontendError` instead
+of being accepted with a misleading partial AST.
 
 ## Stage-1 model mapping
 
@@ -41,6 +48,32 @@ The representative helpers construct a parsed-module sample and a lowered-Core
 sample, then score/traverse concrete nodes. They deliberately avoid claiming
 generic list-pool indexing for user-defined node types until that surface is
 needed and checked directly by later tickets.
+
+## Stage-1 lexer/parser slice
+
+`parser.mv` is intentionally small and executable. It proves the pass boundary:
+source text enters marv code, the lexer emits `TokenKind`/`Token` values, the
+parser constructs `AstModule`/`AstItem`/`AstExpr` values from `model.mv`, and the
+result is compared against the Rust Stage-0 parser on a supported fixture.
+
+Supported today:
+
+- ASCII identifiers, keywords, integer literals, whitespace skipping, `->`, and
+  the punctuation needed by the tiny function grammar.
+- A module header: `mod name`.
+- One `pure fn` or `fn`, with zero or one `i64` parameter and an `-> i64`
+  return type.
+- A body whose tail expression is either an integer literal or an identifier.
+- Byte-offset spans over the original source.
+
+Known unsupported forms fail honestly with `FrontendError`: imports, comments
+and doc comments, strings/chars, structs/enums/errors/interfaces/impls, multiple
+items, generics, effects/capability rows, statements, `if`/`match`/loops,
+operators, calls, field/index/slice syntax, full line/column diagnostics, and
+the complete Stage-0 grammar. The path to full coverage is incremental: widen
+the lexer token set, add parser routines one grammar family at a time, keep
+unsupported forms typed and explicit, and extend the differential fixtures until
+the marv parser can round-trip the same corpus as Rust Stage 0.
 
 ## Why this pass first
 

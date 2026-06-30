@@ -1,0 +1,367 @@
+mod selfhost.parser
+import std.io (Alloc)
+import std.collections (List, len, push)
+import selfhost.model (AstExpr, AstExprKind, AstItem, AstItemKind, AstModule, ImportDecl, SourceSpan, Token, TokenKind, TypeKind, TypeNode, empty_effects, span_width)
+
+/// First Stage-1 front-end error set. Each variant is intentionally broad:
+/// MARV-72 proves the pass boundary and differential harness before carrying
+/// full parser diagnostics/fixes.
+error FrontendError { Unsupported, ExpectedModule, ExpectedFn, ExpectedIdent, ExpectedType, ExpectedLParen, ExpectedRParen, ExpectedColon, ExpectedArrow, ExpectedLBrace, ExpectedRBrace, ExpectedExpr, ExpectedEof }
+
+struct ParsedName { name: str, next: usize }
+
+struct ParsedInt { value: i64, next: usize }
+
+struct ParsedExpr { expr: AstExpr, next: usize, weight: i64 }
+
+struct ParsedParts { module: AstModule, fn_name: str, param_count: usize, body_weight: i64 }
+
+pure fn is_whitespace(c: char) -> bool {
+    ((((c == ' ') or (c == '\n')) or (c == '\t')) or (c == '\r'))
+}
+
+pure fn is_digit(c: char) -> bool {
+    (((c as i64) >= ('0' as i64)) and ((c as i64) <= ('9' as i64)))
+}
+
+pure fn is_alpha(c: char) -> bool {
+    ((((c as i64) >= ('a' as i64)) and ((c as i64) <= ('z' as i64))) or (((c as i64) >= ('A' as i64)) and ((c as i64) <= ('Z' as i64))))
+}
+
+pure fn is_ident_start(c: char) -> bool {
+    (is_alpha(c) or (c == '_'))
+}
+
+pure fn is_ident_continue(c: char) -> bool {
+    (is_ident_start(c) or is_digit(c))
+}
+
+pure fn digit_value(c: char) -> i64 {
+    ((c as i64) - ('0' as i64))
+}
+
+pure fn tiny_span(start: usize, end: usize) -> SourceSpan {
+    SourceSpan { file: "selfhost/tiny.mv", start_byte: start, end_byte: end }
+}
+
+pure fn char_at_or_nul(source: str, index: usize) -> char {
+    if (index < len(source)) {
+        source[index]
+    } else {
+        '\0'
+    }
+}
+
+pure fn skip_ws(source: str, index: usize) -> usize {
+    var i: usize = index
+    while is_whitespace(char_at_or_nul(source, i)) {
+        i = (i + 1)
+    }
+    i
+}
+
+pure fn word_boundary(source: str, index: usize) -> bool {
+    if (index >= len(source)) {
+        true
+    } else {
+        not is_ident_continue(char_at_or_nul(source, index))
+    }
+}
+
+pure fn starts_word(source: str, index: usize, word: str) -> bool {
+    if ((index + len(word)) > len(source)) {
+        false
+    } else {
+        ((source[index..(index + len(word))] == word) and word_boundary(source, (index + len(word))))
+    }
+}
+
+pure fn starts_symbol(source: str, index: usize, symbol: str) -> bool {
+    if ((index + len(symbol)) > len(source)) {
+        false
+    } else {
+        (source[index..(index + len(symbol))] == symbol)
+    }
+}
+
+pure fn is_keyword(word: str) -> bool {
+    (((word == "mod") or (word == "pure")) or ((word == "fn") or (word == "i64")))
+}
+
+pure fn is_tiny_symbol_char(c: char) -> bool {
+    (((c == '(') or (c == ')')) or ((c == ':') or ((c == '{') or (c == '}'))))
+}
+
+fn push_token(alloc: Alloc, tokens: List[Token], kind: TokenKind, start: usize, end: usize) -> List[Token] {
+    push(alloc, tokens, Token { kind: kind, span: tiny_span(start, end) })
+}
+
+fn lex_tiny(alloc: Alloc, source: str) -> !List[Token] {
+    var tokens: List[Token] = List { alloc: alloc, items: [] }
+    var i: usize = 0
+    while (skip_ws(source, i) < len(source)) {
+        i = skip_ws(source, i)
+        let start: usize = i
+        let c: char = source[i]
+        if is_ident_start(c) {
+            i = (i + 1)
+            while is_ident_continue(char_at_or_nul(source, i)) {
+                i = (i + 1)
+            }
+            let word: str = source[start..i]
+            if is_keyword(word) {
+                tokens = push_token(alloc, tokens, TokenKind.Keyword(word), start, i)
+            } else {
+                tokens = push_token(alloc, tokens, TokenKind.Ident(word), start, i)
+            }
+        } else {
+            if is_digit(c) {
+                let parsed: ParsedInt = parse_int_at(source, i)?
+                i = parsed.next
+                tokens = push_token(alloc, tokens, TokenKind.IntLit(parsed.value), start, i)
+            } else {
+                if starts_symbol(source, i, "->") {
+                    i = (i + 2)
+                    tokens = push_token(alloc, tokens, TokenKind.Symbol("->"), start, i)
+                } else {
+                    if is_tiny_symbol_char(c) {
+                        i = (i + 1)
+                        tokens = push_token(alloc, tokens, TokenKind.Symbol(source[start..i]), start, i)
+                    } else {
+                        FrontendError.Unsupported
+                    }
+                }
+            }
+        }
+    }
+    tokens = push_token(alloc, tokens, TokenKind.Eof, len(source), len(source))
+    tokens
+}
+
+fn count_tiny_tokens(source: str) -> !i64 {
+    var count: i64 = 1
+    var i: usize = 0
+    while (skip_ws(source, i) < len(source)) {
+        i = skip_ws(source, i)
+        let c: char = source[i]
+        if is_ident_start(c) {
+            i = (i + 1)
+            while is_ident_continue(char_at_or_nul(source, i)) {
+                i = (i + 1)
+            }
+            count = (count + 1)
+        } else {
+            if is_digit(c) {
+                let parsed: ParsedInt = parse_int_at(source, i)?
+                i = parsed.next
+                count = (count + 1)
+            } else {
+                if starts_symbol(source, i, "->") {
+                    i = (i + 2)
+                    count = (count + 1)
+                } else {
+                    if is_tiny_symbol_char(c) {
+                        i = (i + 1)
+                        count = (count + 1)
+                    } else {
+                        FrontendError.Unsupported
+                    }
+                }
+            }
+        }
+    }
+    count
+}
+
+fn parse_int_at(source: str, index: usize) -> !ParsedInt {
+    var i: usize = index
+    var value: i64 = 0
+    if not is_digit(char_at_or_nul(source, i)) {
+        FrontendError.ExpectedExpr
+    } else {
+        while is_digit(char_at_or_nul(source, i)) {
+            value = ((value * 10) + digit_value(source[i]))
+            i = (i + 1)
+        }
+        ParsedInt { value: value, next: i }
+    }
+}
+
+fn read_name(source: str, index: usize) -> !ParsedName {
+    var i: usize = skip_ws(source, index)
+    if not is_ident_start(char_at_or_nul(source, i)) {
+        FrontendError.ExpectedIdent
+    } else {
+        let start: usize = i
+        i = (i + 1)
+        while is_ident_continue(char_at_or_nul(source, i)) {
+            i = (i + 1)
+        }
+        ParsedName { name: source[start..i], next: i }
+    }
+}
+
+fn expect_word(source: str, index: usize, word: str, error_code: i64) -> !usize {
+    let i: usize = skip_ws(source, index)
+    if starts_word(source, i, word) {
+        (i + len(word))
+    } else {
+        expected_error(error_code)
+    }
+}
+
+fn expected_error(error_code: i64) -> !usize {
+    if (error_code == 1) {
+        FrontendError.ExpectedModule
+    } else {
+        if (error_code == 2) {
+            FrontendError.ExpectedFn
+        } else {
+            if (error_code == 3) {
+                FrontendError.ExpectedType
+            } else {
+                FrontendError.Unsupported
+            }
+        }
+    }
+}
+
+fn expect_symbol(source: str, index: usize, symbol: str, error_code: i64) -> !usize {
+    let i: usize = skip_ws(source, index)
+    if starts_symbol(source, i, symbol) {
+        (i + len(symbol))
+    } else {
+        expected_symbol_error(error_code)
+    }
+}
+
+fn expected_symbol_error(error_code: i64) -> !usize {
+    if (error_code == 1) {
+        FrontendError.ExpectedLParen
+    } else {
+        if (error_code == 2) {
+            FrontendError.ExpectedRParen
+        } else {
+            if (error_code == 3) {
+                FrontendError.ExpectedColon
+            } else {
+                if (error_code == 4) {
+                    FrontendError.ExpectedArrow
+                } else {
+                    if (error_code == 5) {
+                        FrontendError.ExpectedLBrace
+                    } else {
+                        if (error_code == 6) {
+                            FrontendError.ExpectedRBrace
+                        } else {
+                            FrontendError.ExpectedEof
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn parse_type_i64(source: str, index: usize) -> !usize {
+    expect_word(source, index, "i64", 3)
+}
+
+fn parse_tiny_expr(source: str, index: usize) -> !ParsedExpr {
+    let i: usize = skip_ws(source, index)
+    let span: SourceSpan = tiny_span(i, i)
+    if (i >= len(source)) {
+        FrontendError.ExpectedExpr
+    } else {
+        if is_digit(char_at_or_nul(source, i)) {
+            let parsed: ParsedInt = parse_int_at(source, i)?
+            ParsedExpr { expr: AstExpr { kind: AstExprKind.Int(parsed.value), span: tiny_span(i, parsed.next) }, next: parsed.next, weight: (1 + parsed.value) }
+        } else {
+            if is_ident_start(char_at_or_nul(source, i)) {
+                let name: ParsedName = read_name(source, i)?
+                ParsedExpr { expr: AstExpr { kind: AstExprKind.Var(name.name), span: tiny_span(i, name.next) }, next: name.next, weight: (1 + (len(name.name) as i64)) }
+            } else {
+                let unused: SourceSpan = span
+                FrontendError.ExpectedExpr
+            }
+        }
+    }
+}
+
+fn parse_optional_param(source: str, index: usize) -> !ParsedName {
+    let i: usize = skip_ws(source, index)
+    if starts_symbol(source, i, ")") {
+        ParsedName { name: "", next: i }
+    } else {
+        let name: ParsedName = read_name(source, i)?
+        let after_colon: usize = expect_symbol(source, name.next, ":", 3)?
+        let after_type: usize = parse_type_i64(source, after_colon)?
+        ParsedName { name: name.name, next: after_type }
+    }
+}
+
+pure fn skip_optional_pure(source: str, index: usize) -> usize {
+    if starts_word(source, index, "pure") {
+        (index + 4)
+    } else {
+        index
+    }
+}
+
+pure fn param_count_from_name(name: str) -> usize {
+    if (len(name) == 0) {
+        0
+    } else {
+        1
+    }
+}
+
+fn parse_tiny_parts(alloc: Alloc, source: str) -> !ParsedParts {
+    let module_kw: usize = expect_word(source, 0, "mod", 1)?
+    let module_name: ParsedName = read_name(source, module_kw)?
+    let i: usize = skip_optional_pure(source, skip_ws(source, module_name.next))
+    let fn_kw: usize = expect_word(source, i, "fn", 2)?
+    let fn_name: ParsedName = read_name(source, fn_kw)?
+    let after_lparen: usize = expect_symbol(source, fn_name.next, "(", 1)?
+    let param: ParsedName = parse_optional_param(source, after_lparen)?
+    let after_rparen: usize = expect_symbol(source, param.next, ")", 2)?
+    let after_arrow: usize = expect_symbol(source, after_rparen, "->", 4)?
+    let after_type: usize = parse_type_i64(source, after_arrow)?
+    let after_lbrace: usize = expect_symbol(source, after_type, "{", 5)?
+    let expr: ParsedExpr = parse_tiny_expr(source, after_lbrace)?
+    let after_rbrace: usize = expect_symbol(source, expr.next, "}", 6)?
+    let eof: usize = skip_ws(source, after_rbrace)
+    if (eof < len(source)) {
+        FrontendError.ExpectedEof
+    } else {
+        let span: SourceSpan = tiny_span(0, len(source))
+        let ret_type: TypeNode = TypeNode { kind: TypeKind.Int("i64"), span: span }
+        let types: List[TypeNode] = List { alloc: alloc, items: [ret_type] }
+        let imports: List[ImportDecl] = List { alloc: alloc, items: [] }
+        let exprs: List[AstExpr] = List { alloc: alloc, items: [expr.expr] }
+        let param_count: usize = param_count_from_name(param.name)
+        let items: List[AstItem] = List { alloc: alloc, items: [AstItem { kind: AstItemKind.Fn(fn_name.name, param_count, 0, 0), span: span }] }
+        ParsedParts { module: AstModule { name: module_name.name, imports: imports, types: types, items: items, exprs: exprs, span: span }, fn_name: fn_name.name, param_count: param_count, body_weight: expr.weight }
+    }
+}
+
+fn parse_tiny_module(alloc: Alloc, source: str) -> !AstModule {
+    let parsed: ParsedParts = parse_tiny_parts(alloc, source)?
+    parsed.module
+}
+
+fn lex_tiny_fingerprint(alloc: Alloc, source: str) -> !i64 {
+    let unused: List[Token] = lex_tiny(alloc, source)?
+    count_tiny_tokens(source)
+}
+
+fn parse_tiny_fingerprint(alloc: Alloc, source: str) -> !i64 {
+    let parsed: ParsedParts = parse_tiny_parts(alloc, source)?
+    let token_count: i64 = lex_tiny_fingerprint(alloc, source)?
+    ((((((len(parsed.module.name) + len(parsed.fn_name)) as i64) + token_count) + ((parsed.param_count as i64) * 10)) + parsed.body_weight) + span_width(parsed.module.span))
+}
+
+fn unsupported_tiny_parse(alloc: Alloc, source: str) -> !i64 {
+    let unused: AstModule = parse_tiny_module(alloc, source)?
+    FrontendError.Unsupported
+}
