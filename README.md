@@ -58,9 +58,10 @@ without it, `verify` honestly falls back to runtime checks.
 
 For application projects, prefer a **release toolchain**: download the GitHub
 Release tarball for your platform, unpack it, and put the unpacked directory on
-`PATH`. The archive contains `marv`, `marv-mcp`, and `std/`; the CLI finds that
-sibling `std/` automatically, so app repositories do not need to copy this
-compiler repository.
+`PATH`. The archive contains `marv`, `marv-mcp`, `std/`, `docs/`, `spec/`, and
+`examples/`; the CLI finds the sibling `std/` automatically, and agents can read
+`docs/agents.md` from the installed toolchain. App repositories do not need to
+copy this compiler repository.
 
 ```text
 my-marv-app/

@@ -11,6 +11,25 @@ an agent. If you are a human, it's also the shortest path to "how do I drive thi
 > Codex/Cursor and other harnesses. This document is about *using the language*, not editing
 > the compiler.
 
+## Fresh app prompt
+
+For a new application project, the human prompt should be short:
+
+```md
+Use the installed Marv v0.10.x toolchain. Read the Marv agent docs at
+`$(dirname $(which marv))/docs/agents.md`, then create a clean Marv app here
+that does: <app goal>.
+
+Do not clone, vendor, or copy the `marv-lang` compiler repository. Create only
+app files such as `marv.toml`, `src/*.mv`, `README.md`, and optional `.marv/`
+store data. Use `marv fmt`, `marv check`, `marv run`, and `marv build` to
+verify the app, and report the exact commands/results.
+```
+
+If the installed toolchain does not include this `docs/` directory, upgrade to a
+newer Marv release. The application workspace itself should stay small; the
+toolchain carries the compiler, standard library, docs, specs, and examples.
+
 ## The mental model
 
 - The compiler is a **service**, not just a CLI: a salsa-backed incremental query engine
