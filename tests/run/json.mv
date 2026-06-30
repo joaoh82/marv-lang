@@ -1,0 +1,56 @@
+mod json
+import std.io (Alloc)
+import std.json (JsonScalar, JsonObject, parse_scalar, parse_object, serialize_scalar, serialize_object, object_len, object_get_or, as_bool, as_number, as_string)
+
+fn choose(cond: bool, yes: i64, no: i64) -> i64 {
+    if cond {
+        yes
+    } else {
+        no
+    }
+}
+
+fn parse_config(alloc: Alloc) -> !i64 {
+    let config: JsonObject = parse_object(alloc, "{\"enabled\":true,\"limit\":7,\"name\":\"api\"}")?
+    let enabled: bool = as_bool(object_get_or(alloc, config, "enabled", JsonScalar.Bool(false))?, false)
+    let limit: i64 = as_number(object_get_or(alloc, config, "limit", JsonScalar.Number(0))?, 0)
+    let name: str = as_string(object_get_or(alloc, config, "name", JsonScalar.String(""))?, "")
+    var score: i64 = ((object_len(config) as i64) * 10)
+    score = choose(enabled, (score + 100), score)
+    score = (score + limit)
+    score = (score + (len(name) as i64))
+    score = (score + (name[0] as i64))
+    score
+}
+
+fn parse_scalar_score(alloc: Alloc) -> !i64 {
+    let value: JsonScalar = parse_scalar(alloc, " -12 ")?
+    as_number(value, 0)
+}
+
+fn invalid_scalar(alloc: Alloc) -> !i64 {
+    let value: JsonScalar = parse_scalar(alloc, "tru")?
+    as_number(value, 0)
+}
+
+fn serialize_score(alloc: Alloc) -> i64 {
+    let bool_text: str = serialize_scalar(alloc, JsonScalar.Bool(true))
+    let num_text: str = serialize_scalar(alloc, JsonScalar.Number(-12))
+    let str_text: str = serialize_scalar(alloc, JsonScalar.String("hi"))
+    var score: i64 = ((len(bool_text) as i64) * 10)
+    score = (score + ((num_text[0] as i64) + (num_text[(len(num_text) - 1)] as i64)))
+    score = (score + (len(num_text) as i64))
+    score = (score + ((str_text[0] as i64) + (str_text[1] as i64)))
+    score = (score + (len(str_text) as i64))
+    score
+}
+
+fn serialize_object_score(alloc: Alloc) -> !i64 {
+    let config: JsonObject = parse_object(alloc, "{\"enabled\":true,\"limit\":7}")?
+    let text: str = serialize_object(config)
+    (((text[0] as i64) + (text[(len(text) - 1)] as i64)) + (len(text) as i64))
+}
+
+fn exercise(alloc: Alloc) -> i64 {
+    serialize_score(alloc)
+}

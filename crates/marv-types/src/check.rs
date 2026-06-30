@@ -922,11 +922,19 @@ impl<'a> Checker<'a> {
                 vec![Vec::new(), Vec::new()],
                 vec!["false".into(), "true".into()],
             ),
-            Ty::Known(Type::Nominal { def, .. }) => {
+            Ty::Known(Type::Nominal { def, args }) => {
                 if let Some(e) = self.world.enum_decl(def) {
                     (
                         Some(e.variants.len()),
-                        e.variants.iter().map(|v| v.fields.clone()).collect(),
+                        e.variants
+                            .iter()
+                            .map(|v| {
+                                v.fields
+                                    .iter()
+                                    .map(|t| substitute_type_vars(t, args))
+                                    .collect()
+                            })
+                            .collect(),
                         e.variants.iter().map(|v| v.name.clone()).collect(),
                     )
                 } else {
@@ -1336,11 +1344,12 @@ impl<'a> Checker<'a> {
             _ => return Ty::Unknown,
         };
         match peel(t) {
-            Type::Nominal { def, .. } => self
+            Type::Nominal { def, args } => self
                 .world
                 .struct_decl(def)
                 .and_then(|s| s.fields.get(idx as usize))
                 .cloned()
+                .map(|t| substitute_type_vars(&t, args))
                 .map(Ty::Known)
                 .unwrap_or(Ty::Unknown),
             Type::Tuple(elems) => elems
@@ -1500,7 +1509,7 @@ fn value_prov(value: &Core) -> Prov {
 }
 
 fn is_linear(t: &Ty) -> bool {
-    matches!(t, Ty::Known(Type::Linear(_)))
+    matches!(t, Ty::Known(ty) if matches!(peel_eu(ty), Type::Linear(_)))
 }
 
 fn is_ref(t: &Ty) -> bool {
@@ -1685,6 +1694,47 @@ fn ctor_erased_nominal_eq(a: &Type, b: &Type) -> bool {
             d1 == d2 && (a1.is_empty() != a2.is_empty())
         }
         _ => false,
+    }
+}
+
+/// Substitute concrete nominal type arguments into declaration field types.
+/// Generic structs/enums store their fields as `Type::Var(0)`, `Type::Var(1)`,
+/// etc.; a use site like `Maybe[i64]` carries the concrete `args`.
+fn substitute_type_vars(t: &Type, args: &[Type]) -> Type {
+    match t {
+        Type::Var(i) => args.get(*i as usize).cloned().unwrap_or_else(|| t.clone()),
+        Type::Array(elem, n) => Type::Array(Box::new(substitute_type_vars(elem, args)), *n),
+        Type::Slice(elem) => Type::Slice(Box::new(substitute_type_vars(elem, args))),
+        Type::Tuple(items) => Type::Tuple(
+            items
+                .iter()
+                .map(|item| substitute_type_vars(item, args))
+                .collect(),
+        ),
+        Type::Arrow {
+            param,
+            ret,
+            effects,
+        } => Type::Arrow {
+            param: Box::new(substitute_type_vars(param, args)),
+            ret: Box::new(substitute_type_vars(ret, args)),
+            effects: effects.clone(),
+        },
+        Type::Nominal { def, args: inner } => Type::Nominal {
+            def: *def,
+            args: inner
+                .iter()
+                .map(|item| substitute_type_vars(item, args))
+                .collect(),
+        },
+        Type::Ref { mutable, of } => Type::Ref {
+            mutable: *mutable,
+            of: Box::new(substitute_type_vars(of, args)),
+        },
+        Type::Linear(inner) => Type::Linear(Box::new(substitute_type_vars(inner, args))),
+        Type::Unit | Type::Bool | Type::Int(_) | Type::Float(_) | Type::Str | Type::Char => {
+            t.clone()
+        }
     }
 }
 

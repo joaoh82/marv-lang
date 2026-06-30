@@ -177,10 +177,14 @@ monomorphization, **capabilities & `perform` from source** (capability method ca
 `Perform`, `io.fs()` narrowing, inferred-and-checked effect rows), and `requires`/`ensures`
 contracts. Local source imports are discoverable by the CLI, and source-only
 JSON-RPC snapshots can be checked as a module set. `std.bytes` provides UTF-8
-helpers, and `std.http` exposes the first host-provided request/response capability.
-The remaining MARV-48 roadmap wave includes collection literals, `linear` resource
-capabilities, JSON, production listener/resource lifecycle safety, structured concurrency,
-`unsafeSites`, richer package metadata, and package-aware read queries. For
+helpers, `std.json` provides the first scalar/source-backed flat-object parsing and
+serialization slice, `std.http` exposes the first host-provided request/response capability,
+`std.spawn` exposes scoped linear task handles over explicit `Spawn`, `unsafe fn` audit metadata is
+queryable through `marv/unsafeSites`, and
+explicit-allocation `List`/`Set`/`Map` collection literals plus `std.iter.IndexIter[T]` are
+implemented. The remaining MARV-48 roadmap wave includes `linear` resource capabilities,
+recursive/materialized JSON, production listener/resource lifecycle safety, raw FFI operations,
+richer package metadata, and package-aware read queries. For
 anything not yet expressible, construct a `*.core.json` snapshot (see
 [`store.md`](store.md) and the `tests/run/*.core.json` fixtures) or check
 [`roadmap.md`](roadmap.md).

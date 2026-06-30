@@ -88,13 +88,18 @@ and `tests/run/map_set.mv` differentially test interpreter, Cranelift, and WASM 
   fixed-length-array store with a runtime index is a memory-safe no-op, not a trap).
 - **List/Map/Set**. `std.collections.List[T]` is growable and value-semantic:
   `new`/`with_capacity` allocate through explicit `Alloc`, while `push`/`pop`/`set` return
-  the updated list value for rebinding. `std.collections.Map[K, V]` and `Set[T]` now exist
-  as std types with a first runnable string slice: `map_new`, `map_with_capacity`,
-  `map_insert`, `map_get_or`, `map_contains`, `map_remove`, `map_len`, and the matching
-  `set_*` operations for `Set[str]`. This slice is list-backed and insertion-ordered so it
-  runs on the interpreter, Cranelift, and WASM today; general hash-backed keys await
-  `Hash`/`Eq` interfaces. Differential-tested in `tests/run/list.mv` and
-  `tests/run/map_set.mv`.
+  the updated list value for rebinding. Explicit-allocation collection literals are
+  **[impl, MARV-51]**: `List { alloc: alloc, items: [e0, e1, …] }`,
+  `Set { alloc: alloc, items: ["red", "blue"] }`, and
+  `Map { alloc: alloc, keys: ["red"], values: [1] }`. Each form requires the visible
+  `alloc` field, so growable allocation is still explicit at the call site.
+  `std.collections.Map[K, V]` and `Set[T]` now exist as std types. String operations
+  (`map_new`, `map_insert`, `map_get_or`, `map_contains`, `map_remove`, `map_len`, and the
+  matching `set_*` functions) remain source-compatible with the first runnable slice,
+  including dynamically built strings. MARV-61 adds stored hashes plus a first `Hash[T]`
+  interface (`hash_key`/`key_eq`) and scalar `Map[i64, V]` / `Set[i64]` operations through
+  `map_i64_*` and `set_i64_*`. Differential-tested in `tests/run/list.mv`,
+  `tests/run/list_literals.mv`, and `tests/run/map_set.mv`.
 - **optional** `?T` = `Option[T]` — the only way to express absence. `Option`/`Result` are
   written in marv (`std/`) and parse + lower **[impl]**; the `?T`/`!T` *sugar* and the postfix
   `?` propagation operator now parse and lower too **[impl]** (`!T` → `Result[T, error-union]`;
@@ -168,13 +173,15 @@ threaded functionally: they enter the loop as its `state`, the body computes the
 and the loop evaluates to their final values, which the enclosing scope rebinds. There are no
 mutable cells in Core; this is the cross-iteration form of mutable value semantics (§4).
 
-A `while` head carries zero or more `invariant` clauses. `for x in xs { … }` desugars to an
-index-driven loop (`spec/02` §D) and runs end to end on all three backends: over a fixed-length
-array via the array `len`/index codegen (MARV-30, `tests/run/arrays.mv::sum_for`), and over a
-runtime-length slice via the slice codegen (MARV-33 + MARV-20, `tests/run/slices.mv::sum_for`).
-The differential corpus also pins `for` over a slice of structs, nested `for`s (the desugar
-keys each index name on the builder depth, so inner and outer indices never collide), and two
-sequential `for`s in one block.
+A `while` head carries zero or more `invariant` clauses. `for x in xs { … }` desugars to a
+loop that either uses the preserved direct `len`/index fast path or the MARV-52 iterator
+protocol. Arrays, slices, strings, and `List[T]` still use direct `len`/index lowering and run
+end to end on all three backends. A value typed as `std.iter.IndexIter[T]` lowers through
+`iter_len` / `iter_get`, whose specialized bodies dispatch via `Iter[T]`; the first shipped
+implementation is `IndexIter[i64]` over `List[i64]` (`tests/run/iter.mv`). The differential
+corpus also pins `for` over a slice of structs, nested `for`s (the desugar keys each index name
+on the builder depth, so inner and outer indices never collide), and two sequential `for`s in
+one block.
 
 A loop body may also end in an **`if`/`match`** (MARV-21): the carried `var`s are threaded
 through the branch join, so each branch produces their next values and the loop continues with
@@ -221,12 +228,12 @@ may narrow, never construct — capabilities are **unforgeable**), and `fs.read(
 checked against the function's capability parameters, where a held capability authorizes its
 **narrowing closure** (holding `Io` authorizes `Fs`/`Net`/`Http`/… ). A `pure fn` — or a function that
 reaches a capability it never received — that performs is `MissingCapability` (E0110). Standard
-capabilities: `Io` (root) and narrower `Fs`, `Net`, `Http`, `Clock`, `Rand`, `Alloc` (see
+capabilities: `Io` (root) and narrower `Fs`, `Net`, `Http`, `Spawn`, `Clock`, `Rand`, `Alloc` (see
 [`std/`](../std)). `Http` represents one host-provided server request/response exchange;
 without it a handler cannot read request data or send a response. On WebAssembly a capability
 is a host import the page chooses to provide — see [platform support](platform-support.md).
-(Generic interfaces like `Ord[T]` are bounded polymorphism, not capabilities; `linear`
-capabilities and production listener/resource lifecycle safety are roadmap.)
+(Generic interfaces like `Ord[T]` are bounded polymorphism, not capabilities; production
+listener/resource lifecycle safety is roadmap.)
 
 ## 6. Errors: inferred sets **[impl]**
 
@@ -286,12 +293,14 @@ Three tiers, and the toolchain is honest about which gave an answer:
   values (quantifiers by iterating their range), and every loop `invariant` each time the
   condition is tested (loop entry and every re-entry); violations abort with a structured
   report showing the offending concrete values.
-- **Tier 2** — SMT proof for the verified subset (MARV-11): pure functions over ints/bools
-  (with sound truncate-toward-zero `/` `%`), arrays/slices of scalars, non-recursive
-  structs/enums, `while` loops via their `invariant`s (MARV-22), and bounded quantifiers.
-  `marv verify` returns `proved`, `failed` with a **counterexample**, or `unsupported`
-  (→ falls back to Tier 1). See [verification.md](verification.md) and
-  [`examples/quantifiers.mv`](../examples/quantifiers.mv).
+- **Tier 2** — SMT proof for the verified subset (MARV-11/MARV-59): pure functions over
+  ints/bools (with sound truncate-toward-zero `/` `%`), arrays/slices of scalars,
+  non-recursive structs/enums including generic instantiations such as `Box[i64]`,
+  `while` loops via their `invariant`s (MARV-22), and bounded quantifiers. Recursive ADTs
+  still return `unsupported` and fall back to Tier 1. `marv verify` returns `proved`,
+  `failed` with a **counterexample**, or `unsupported` (→ falls back to Tier 1). See
+  [verification.md](verification.md), [`examples/quantifiers.mv`](../examples/quantifiers.mv),
+  and [`examples/adt_verify.mv`](../examples/adt_verify.mv).
 
 ## 8. Modules & content-addressed reuse **[impl]**
 
@@ -309,18 +318,26 @@ Native via **Cranelift** (JIT today; AOT + an LLVM release backend are roadmap) 
 tree-walking **interpreter** is the reference semantics oracle every backend is differentially
 tested against. See [run-and-codegen.md](run-and-codegen.md) and [platform-support.md](platform-support.md).
 
-## 10. Concurrency **[design]**
+## 10. Concurrency **[first slice impl]**
 
-Structured and capability-gated: tasks spawned through a `Spawn` capability within a scope
-that joins children before returning; message-passing channels of `linear`/value types; data
-races excluded by the same no-shared-mutable-aliasing rule. Deferred past the current
-milestones.
+Structured concurrency is capability-gated. `std.io.Spawn` is a standard capability, so a
+function with no `Spawn` parameter cannot create task handles. The first std slice lives in
+`std.spawn`: `spawn_i64(spawn, value)` performs `Spawn.start` and returns a `linear TaskI64`,
+and `join_i64(task)` consumes the handle. Because the handle is linear, a spawned task must be
+joined exactly once before the scope exits; dropping or duplicating it is a checker error.
 
-## 11. The escape hatch **[design]**
+The interpreter records each `Spawn.start` as a host effect and may execute this first slice
+sequentially. Generic task result handles, channels/message passing, and true parallel host
+scheduling remain future work.
 
-`unsafe` is the explicit, auditable boundary (FFI, raw pointers, custom synchronization). It
-is visible in the signature, requires a `SAFETY:` justification comment, and is greppable
-(`marv/unsafeSites`).
+## 11. The escape hatch **[first slice impl]**
+
+`unsafe` is the explicit, auditable boundary (FFI, raw pointers, custom synchronization).
+The first slice supports `unsafe fn` metadata: it is visible in the signature, requires a
+preceding `/// SAFETY:` justification comment, formats canonically, and is queryable through
+`marv/unsafeSites`. The metadata is intentionally outside Core identity, so marking a
+function unsafe changes the audit surface without changing its content hash. Raw pointer/FFI
+operations themselves remain staged follow-ups.
 
 ---
 
@@ -339,11 +356,11 @@ operators (`+ - * / % == != < <= > >= and or`), the prefix unary operators
 function calls and recursion, field
 projection, and `requires`/`ensures` contracts. That is enough for the
 [`examples/`](../examples) that run end to end (`factorial`, `arithmetic`, `clamp`, `color`,
-`mutation`, `loops`, `casts`, `hello`, `read_file`, `http_echo`, …), the `std/` prelude
-(`option`, `result`, `ord`, `capabilities`, `collections`, `bytes`, `http`), and the M4/M6 gates.
+`mutation`, `loops`, `casts`, `hello`, `read_file`, `http_echo`, `spawn`, …), the `std/` prelude
+(`option`, `result`, `ord`, `capabilities`, `collections`, `bytes`, `json`, `http`, `spawn`), and the M4/M6 gates.
 Everything still marked **[core]**/**[design]** above is tracked in the project
 tracker. Local source imports already lower/check/run/build as module sets; the
 remaining MARV-48 application-language wave covers richer collections, collection
-literals, iterators, JSON/serialization, production listener/resource lifecycle
-safety, `linear` resource capabilities, structured concurrency, `unsafeSites`,
+semantics, recursive/materialized JSON, production listener/resource lifecycle
+safety, `linear` resource capabilities, `unsafeSites`,
 richer package metadata/query coverage, and broader verification.

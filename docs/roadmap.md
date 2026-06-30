@@ -29,24 +29,25 @@ where each one sits and what must land first. Each task references back here.
 | ~~**MARV-33** runtime-length slices `[]T` (construct, `len`/index, element store)~~ ✅ done | 2 · Backends | ~~MARV-30~~ ✅ | 20 | medium |
 | ~~**MARV-34** Tier-1 debug bounds check on runtime array/slice indexing~~ ✅ done | 2 · Backends | ~~MARV-33~~ ✅ | — | medium |
 | **MARV-10** AOT native + LLVM + WASM component/WIT | 2 · Backends | MARV-9 | — | low |
-| ~~**MARV-11** verified-subset expansion + loop invariants + `old`/quantifiers~~ ✅ done — loop-invariant slice landed as **MARV-22** (Hoare-style initiation/consecution/use VCs); the rest extends the contract language to expressions (arithmetic, `len`, indexing, `p.x`), adds surface + Tier-1/Tier-2 `forall`/`exists` over `lo..hi` and `old(e)` in `ensures`, encodes truncate-toward-zero `/` `%` soundly over SMT's Euclidean ops, and encodes arrays/slices (SMT arrays + length) and non-recursive structs/enums (unpacked tag + fields, havocked from the `World`); `examples/quantifiers.mv` proves end to end. Honest residue: calls, floats, casts, recursive/generic ADTs are `unsupported`; fixed-width integer wrapping landed as **MARV-38** | 3 · Verification | ~~MARV-2~~ ✅, ~~MARV-1~~ ✅ | 22 | medium |
+| ~~**MARV-11** verified-subset expansion + loop invariants + `old`/quantifiers~~ ✅ done — loop-invariant slice landed as **MARV-22** (Hoare-style initiation/consecution/use VCs); the rest extends the contract language to expressions (arithmetic, `len`, indexing, `p.x`), adds surface + Tier-1/Tier-2 `forall`/`exists` over `lo..hi` and `old(e)` in `ensures`, encodes truncate-toward-zero `/` `%` soundly over SMT's Euclidean ops, and encodes arrays/slices (SMT arrays + length) and non-recursive structs/enums (unpacked tag + fields, havocked from the `World`); `examples/quantifiers.mv` proves end to end. Honest residue: calls, floats, casts, and recursive ADTs are `unsupported`; fixed-width integer wrapping landed as **MARV-38** and generic non-recursive ADTs landed as **MARV-59** | 3 · Verification | ~~MARV-2~~ ✅, ~~MARV-1~~ ✅ | 22 | medium |
 | ~~**MARV-38** Tier-2 fixed-width integer wraparound (close the mathematical-integers soundness gap)~~ ✅ done — every `+ - * / %` and unary `-` is reduced through a two's-complement `wrap64` over SMT `Int`s (a bitvector sort was ruled out: nonlinear `div`/`mul` is intractable — the division identity times out as a 64-bit bitvector but discharges in well under a second as wrapped `Int`s), and every havocked int/length is range-constrained to `[i64::MIN, i64::MAX]`; `ensures result > x` for `x + 1` is now refuted at `x = i64::MAX`. Tier 2 is *correctly stricter*: an accumulator claimed `>= 0` whose running sum can overflow (`examples/loops.mv`'s `sum_to`) no longer proves; the bounded `count_down_sum` does | 3 · Verification | ~~MARV-11~~ ✅ | — | medium |
 | ~~**MARV-12** formatter doc-comments + real source spans~~ ✅ done | 5 · Infra/polish | — *(independent)* | — | medium |
 | **MARV-13** port more compiler passes to marv (self-hosting) | 4 · Self-hosting | Phase-1 surface *(incremental now)* | — | low |
 | ~~**MARV-14** persistent on-disk store + cross-module resolution~~ ✅ done | 4 · Store | — *(std linking wants Phase 1)* | — | low |
-| **MARV-48** full application language surface + runtime epic | 6 · Application language | MARV-40 | 49–60 | medium |
+| **MARV-48** full application language surface + runtime epic | 6 · Application language | MARV-40 | 49–61 | medium |
 | ~~**MARV-49** project/source-module discovery beyond `std`~~ ✅ done | 6 · Application language | MARV-14 | package metadata/query polish, 53, 60 | high |
-| **MARV-50** `Map[K, V]` and `Set[T]` in `std` — first slice landed as string-keyed/string-set, list-backed value-semantic std collections with explicit `Alloc` and interpreter/Cranelift/WASM parity; remaining work is true hash-backed general keys through `Hash`/`Eq` interfaces | 6 · Std collections | MARV-42 | 51, 55 | medium |
-| **MARV-51** collection literals for `List`/`Map`/`Set` | 6 · Surface ergonomics | MARV-42, 50 for map/set forms | — | medium |
-| **MARV-52** real `Iter[T]` protocol | 6 · Surface/stdlib | MARV-42 | 50 | medium |
+| ~~**MARV-50** `Map[K, V]` and `Set[T]` in `std`~~ ✅ done — landed a first string-keyed/string-set, list-backed value-semantic slice with explicit `Alloc` and interpreter/Cranelift/WASM parity; the scalar hash-backed follow-up landed in MARV-61 | 6 · Std collections | ~~MARV-42~~ ✅ | 51, 55, 61 | medium |
+| ~~**MARV-51** collection literals for `List`/`Map`/`Set`~~ ✅ done — explicit `alloc` forms for `List { alloc, items }`, `Set { alloc, items }`, and `Map { alloc, keys, values }` lower/run across interpreter, Cranelift, and WASM | 6 · Surface ergonomics | ~~MARV-42~~ ✅, ~~MARV-50~~ ✅ | — | medium |
+| ~~**MARV-52** real `Iter[T]` protocol~~ ✅ done — adds `std.iter.IndexIter[T]`, `Iter[T]`, generic `iter_len`/`iter_get` wrappers, and a protocol-backed `for` path for `IndexIter[i64]` while preserving direct indexed fast paths | 6 · Surface/stdlib | ~~MARV-42~~ ✅ | ~~MARV-50~~ ✅ | medium |
 | ~~**MARV-53** HTTP/server runtime capability + host ABI~~ ✅ done — adds an explicit `Http` request capability, `std.http` `Request`/`Response` helpers, a deterministic interpreter request host (`POST /echo`, body `marv-http-echo`), a `http_echo` example, and core-WASM capability imports that can return string handles. Honest residue: production listener/accept loops, streaming/raw bodies, and exact close-once lifecycle safety remain tied to MARV-27/MARV-10 and later std work. | 6 · Runtime/capabilities | ~~MARV-49~~ ✅, ~~MARV-54~~ ✅, MARV-27 *(for linear resource safety)* | MARV-10, MARV-27, 55 | high |
 | ~~**MARV-54** bytes + UTF-8 stdlib utilities~~ ✅ done | 6 · Std/runtime | ~~MARV-42~~ ✅, ~~MARV-43~~ ✅ | 53, 55 | high |
-| **MARV-55** JSON + serialization stdlib | 6 · Std/app data | 54, 50 *(or list-of-pairs first)* | 53 | medium |
-| **MARV-56** capability-gated structured concurrency (`Spawn`) | 6 · Runtime/capabilities | MARV-27 *(if task/channel handles become linear)* | — | medium |
-| **MARV-57** `unsafe`/FFI surface + `unsafeSites` audit query | 6 · Audit/escape hatch | MARV-12 | — | medium |
+| ~~**MARV-55** JSON + serialization stdlib~~ ✅ done — first scalar/source-backed flat-object slice with typed `JsonError`, explicit-`Alloc` scalar/string serialization, interpreter parse/error smoke coverage, and backend parity for serializer-safe paths; recursive/materialized JSON remains tied to MARV-59/MARV-61 | 6 · Std/app data | ~~MARV-54~~ ✅, ~~MARV-50~~ ✅ | 53, 59, 61 | medium |
+| ~~**MARV-56** capability-gated structured concurrency (`Spawn`)~~ ✅ done — first slice adds `std.io.Spawn`, `std.spawn.TaskI64` as a linear scoped handle, `spawn_i64`/`join_i64`, interpreter host-effect recording, boundary grant enforcement, and checker rejection for detached/unjoined task handles; channels/generic task results/true parallel scheduling remain follow-ups | 6 · Runtime/capabilities | — | — | medium |
+| ~~**MARV-57** `unsafe`/FFI surface + `unsafeSites` audit query~~ ✅ done — first slice adds `unsafe fn` parsing/formatting, required `/// SAFETY:` justifications, `marv/unsafeSites`, MCP exposure, and store-audit unsafe-site metadata outside Core identity; raw pointer/FFI operations remain staged follow-ups | 6 · Audit/escape hatch | ~~MARV-12~~ ✅ | — | medium |
 | ~~**MARV-58** early `return` inside loop bodies~~ ✅ done | 6 · Surface/control flow | ~~MARV-21~~ ✅ | — | low |
-| **MARV-59** Tier-2 recursive/generic ADTs | 6 · Verification | MARV-11, MARV-38 | 13 | medium |
+| ~~**MARV-59** Tier-2 recursive/generic ADTs~~ ✅ done — first sound slice supports generic, non-recursive ADTs by substituting concrete type arguments before havocking struct/enum fields; false claims over generic enum payloads still produce counterexamples, and recursive ADTs remain honest `unsupported`/Tier-1 fallback. `examples/adt_verify.mv` proves the supported shape. | 6 · Verification | ~~MARV-11~~ ✅, ~~MARV-38~~ ✅ | 13 | medium |
 | **MARV-60** roadmap/docs cleanup for MARV-48 | 5 · Infra/polish | MARV-48 | 49–59 | low |
+| ~~**MARV-61** hash-backed general-key `Map`/`Set` with `Hash`/`Eq` interfaces~~ ✅ done — adds stored hashes to the std map/set entry layout, a first `Hash[T]` interface carrying explicit `hash_key` + `key_eq`, and scalar-key `map_i64_*` / `set_i64_*` operations for `Map[i64, V]` and `Set[i64]` while preserving dynamic string-key behavior and collection literals across interpreter, Cranelift, and WASM | 6 · Std collections | ~~MARV-50~~ ✅, ~~MARV-5~~ ✅ | 55 | medium |
 
 Done (Phase 0 · Infra/agent): **MARV-15** repo housekeeping · **MARV-16** CI/CD + release ·
 **MARV-17** agent enablement (AGENTS.md, MCP server, skill).
@@ -253,10 +254,10 @@ differential corpus, and the checker still checks every definition — pruning i
 heap-backed application logic possible by landing `Alloc`, `List[T]`, string
 manipulation, List/string verification, and three app-shaped examples. MARV-48
 tracks the remaining pieces needed for ordinary application boundaries: package
-discovery, bytes/UTF-8, and the first HTTP request capability/host ABI slice are
-now done; remaining pieces include richer std collections, JSON, production
-server/network resource lifecycles, structured concurrency, `unsafe`/FFI
-auditability, and deeper verification.
+discovery, bytes/UTF-8, the first HTTP request capability/host ABI slice, JSON,
+and the first scoped `Spawn` task-handle slice are now done; remaining pieces include
+production server/network resource lifecycles, `unsafe`/FFI
+auditability, hash-backed general-key collections, and deeper verification.
 
 The first implementation wave kept scope narrow and is now complete except for
 the linear-resource safety it intentionally left to MARV-27:
@@ -270,10 +271,12 @@ the linear-resource safety it intentionally left to MARV-27:
 4. ~~**MARV-53**~~ ✅ — add the HTTP/server capability and host ABI story, coordinating
    with **MARV-27** for linear connection/listener lifecycle.
 
-The rest can proceed in parallel where dependencies allow: **MARV-50** maps/sets,
-**MARV-51** collection literals, **MARV-52** iterators, **MARV-55** JSON,
-**MARV-56** `Spawn`, **MARV-57** `unsafeSites`, and **MARV-59** recursive/generic
-ADT verification. ~~**MARV-58**~~ ✅ loop early return is already landed.
+The rest can proceed in parallel where dependencies allow: **MARV-59**
+recursive/generic ADT verification and **MARV-61** hash-backed general-key
+maps/sets. ~~**MARV-50**~~ ✅ first-slice maps/sets, ~~**MARV-51**~~ ✅
+collection literals, ~~**MARV-52**~~ ✅ iterators, ~~**MARV-55**~~ ✅ JSON,
+~~**MARV-56**~~ ✅ `Spawn`, ~~**MARV-57**~~ ✅ unsafe audit metadata, and ~~**MARV-58**~~ ✅ loop
+early return are already landed.
 
 ## Recommended order
 
@@ -291,8 +294,9 @@ they unblock the rest. Then:
 - **Compounds on the surface:** ~~MARV-9 aggregate codegen~~ ✅ → MARV-10; and
   ~~MARV-11 verification expansion~~ ✅.
 - **Application/runtime wave:** MARV-48; MARV-60 docs cleanup, MARV-49
-  project/source-module discovery, MARV-54 bytes/UTF-8, MARV-53 HTTP request
-  capability/host ABI, and MARV-58 loop early return are done.
+  project/source-module discovery, MARV-50 first-slice maps/sets, MARV-54
+  bytes/UTF-8, MARV-53 HTTP request capability/host ABI, and MARV-58 loop early
+  return are done. MARV-61 tracks the hash-backed general-key Map/Set follow-up.
 - **Longer horizon:** MARV-13 more self-hosting; MARV-10 AOT/LLVM/component
   packaging; MARV-27 linear capabilities; MARV-39 trap-freedom verification;
   richer package metadata and package-aware agent queries on top of the MARV-49
@@ -326,10 +330,10 @@ builds)~~ ✅ and ~~MARV-12 (doc-comments + spans)~~ ✅ are both done — the t
   repo/CI/agent enablement — is also done.)
 - **Phase 6 · Full application language.** MARV-48 tracks the next practical layer:
   project/package discovery beyond the special-cased `std` loader, bytes/UTF-8, the first
-  HTTP request capability/host ABI slice, and loop-body early returns are done. Remaining
-  work covers `Map`/`Set`, collection literals, a real `Iter[T]` protocol,
-  JSON/serialization, production listener/resource lifecycle safety, structured concurrency,
-  `unsafe`/FFI auditability, and broader Tier-2 ADT verification.
+  HTTP request capability/host ABI slice, JSON/serialization, loop-body early returns, and
+  the first scoped `Spawn` task-handle slice are done. Remaining work covers hash-backed
+  `Map`/`Set`, production listener/resource lifecycle safety, raw FFI operations, and broader
+  Tier-2 ADT verification.
 
 ## How a task is meant to be picked up
 

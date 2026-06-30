@@ -299,8 +299,10 @@ marv store audit [--store DIR]
 ```
 
 Prints every stored blob with its hash, last-seen name, reviewed flag, lockfile
-reachability, dependency count, and unsafe-site count. `unsafe` is still
-future surface syntax, so current blobs report zero unsafe sites.
+reachability, dependency count, and unsafe-site count. `unsafe fn` metadata is
+source-level audit data outside Core identity; committed unsafe definitions
+therefore show a nonzero unsafe-site count even when their Core body dedups with
+an already-reviewed safe definition.
 
 ## `marv store gc`
 

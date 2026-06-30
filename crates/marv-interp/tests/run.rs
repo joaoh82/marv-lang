@@ -380,6 +380,44 @@ fn main(http: Http) -> !str {
     );
 }
 
+#[test]
+fn spawn_capability_from_source_runs_and_records_scoped_starts() {
+    let src = "\
+mod demo
+
+interface Spawn {
+    fn start(spawn: &Spawn) -> !
+}
+
+linear struct TaskI64 { value: i64 }
+
+fn spawn_i64(spawn: Spawn, value: i64) -> !TaskI64 {
+    let started: () = spawn.start()?
+    TaskI64 { value: value }
+}
+
+fn join_i64(task: TaskI64) -> i64 {
+    task.value
+}
+
+fn exercise(spawn: Spawn) -> !i64 {
+    let left = spawn_i64(spawn, 20)?
+    let right = spawn_i64(spawn, 22)?
+    (join_i64(left) + join_i64(right))
+}
+";
+    let prog = program_from_source(src);
+    let out = prog
+        .run("exercise", &["Spawn".to_string()], &[])
+        .expect("run with Spawn granted");
+    assert_eq!(out.value, Value::Int(42));
+    assert_eq!(out.effects.len(), 2);
+    assert_eq!(out.effects[0].cap, "Spawn");
+    assert_eq!(out.effects[0].op, 0);
+    assert_eq!(out.effects[1].cap, "Spawn");
+    assert_eq!(out.effects[1].op, 0);
+}
+
 /// Granting only the narrowed capability (not the root it is narrowed *from*)
 /// cannot satisfy an entry that receives the root: the value is never created.
 #[test]

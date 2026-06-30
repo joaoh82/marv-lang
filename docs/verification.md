@@ -157,7 +157,10 @@ the Alloc capability used by built-in list operations, over:
 - **Structs and enums** — construction, `match` (branches joined per variant),
   struct field access (in bodies and contracts); parameters of nominal type
   are havocked from their declaration: an enum is an arbitrary tag in range
-  with arbitrary per-variant fields.
+  with arbitrary per-variant fields. Generic, non-recursive declarations are
+  supported by substituting their concrete type arguments first, so contracts
+  over `Box[i64]`-style structs and `Maybe[i64]`-style enums prove or fail with
+  counterexamples like their concrete equivalents.
 - **Bounded quantifiers** in contracts and loop invariants, e.g. a fill loop's
   `invariant (forall k in 0..i: (out[k] == 7))`.
 
@@ -165,8 +168,9 @@ Outside that subset, `verify` returns `unsupported` with a reason and the
 **fallback** to Tier-1 runtime checks — it never guesses. Notable current
 exclusions and caveats (each honest, never an unsound `proved`):
 
-- **Function calls, non-Alloc effects, floats, casts, references,
-  recursive/generic ADTs** — out-of-subset (`unsupported`). The exception is the
+- **Function calls, non-Alloc effects, floats, casts, references, and recursive
+  ADTs** — out-of-subset (`unsupported`). The exceptions are generic
+  non-recursive ADTs (modeled by concrete type-argument substitution) and the
   built-in lowering of `std.collections` list operations, whose Alloc capability
   is ignored for proof because Tier 2 models only the returned value.
 - **List capacity, allocation effects, and aliasing** are not modeled. Contracts

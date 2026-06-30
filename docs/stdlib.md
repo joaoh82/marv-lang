@@ -15,9 +15,10 @@ the capability interfaces every program links against (`spec/01` §§3, 5, 6).
 > pinned hash linking are done (MARV-14); the remaining module work is broader project/package
 > source discovery beyond `std` (MARV-49). `std.collections` now includes `Map[K, V]`
 > and `Set[T]` types with a first string-keyed/string-set operation slice over explicit
-> `Alloc` (MARV-50); true hash-backed general keys are tracked separately. `std.http`
+> `Alloc` (MARV-50); true hash-backed general keys are tracked by MARV-61. `std.http`
 > now exposes host-provided request/response structs over an explicit `Http` capability
-> (MARV-53). Still pending:
+> (MARV-53). `std.spawn` now exposes the first scoped `Spawn` task-handle slice
+> (MARV-56). Still pending:
 > `linear` capabilities, so a `Conn`/listener/request lifecycle must be `close`d or
 > completed exactly once (MARV-27). The capability *model* is also exercised over the
 > Core IR and on WebAssembly (host imports).
@@ -65,13 +66,19 @@ capability; `push`, `pop`, and `set` return the updated list value, so callers r
 `var`. `len(list)`, `list[i]`, `get`, `set`, and `for x in list` run on the interpreter,
 Cranelift, and WASM backends. The runtime layout is `[len, cap, e0, …]`; `len` is a
 header load and index loads skip the two-word header. Backends update the backing block in
-place when capacity allows and allocate-copy only on growth.
+place when capacity allows and allocate-copy only on growth. MARV-51 adds explicit-allocation
+collection literals: `List { alloc: alloc, items: [e0, e1, …] }`,
+`Set { alloc: alloc, items: ["red", "blue"] }`, and
+`Map { alloc: alloc, keys: ["red"], values: [1] }`. The missing-`alloc` forms are rejected
+during lowering with targeted diagnostics rather than hiding allocation.
 
-`Map[K, V]` and `Set[T]` are present as std collection types. The first runnable slice is
-constrained to `str` keys/elements and is list-backed/insertion-ordered, which keeps value
-semantics and backend parity today while reserving the generic type shape for the later
-hash-backed `Hash`/`Eq` design. Allocation remains explicit: operations that can grow or
-rebuild storage take `Alloc`.
+`Map[K, V]` and `Set[T]` are present as std collection types. String-key operations
+(`map_insert`, `map_get_or`, `map_contains`, `map_remove`, and the matching `set_*`) stay
+source-compatible with the MARV-50 slice, including dynamically built strings and collection
+literals. MARV-61 adds the first scalar hash-backed path: entries carry a stored hash beside
+the key/value, `Hash[T]` provides explicit `hash_key`/`key_eq` semantics, and `map_i64_*` /
+`set_i64_*` exercise `Map[i64, V]` and `Set[i64]` across the interpreter, Cranelift, and
+WASM. Allocation remains explicit: operations that can grow or rebuild storage take `Alloc`.
 
 ```marv
 struct List[T] { … }
@@ -84,6 +91,7 @@ fn set[T](list: List[T], index: usize, value: T) -> List[T]
 pure fn len[T](list: List[T]) -> usize
 
 struct Map[K, V] { … }
+interface Hash[T] { fn hash_key(value: T) -> i64; fn key_eq(a: T, b: T) -> bool }
 fn map_new[V](alloc: Alloc) -> Map[str, V]
 fn map_with_capacity[V](alloc: Alloc, capacity: usize) -> Map[str, V]
 fn map_insert[V](alloc: Alloc, map: Map[str, V], key: str, value: V) -> Map[str, V]
@@ -91,6 +99,12 @@ fn map_get_or[V](map: Map[str, V], key: str, fallback: V) -> V
 fn map_contains[V](map: Map[str, V], key: str) -> bool
 fn map_remove[V](alloc: Alloc, map: Map[str, V], key: str) -> Map[str, V]
 pure fn map_len[V](map: Map[str, V]) -> usize
+fn map_i64_new[V](alloc: Alloc) -> Map[i64, V]
+fn map_i64_insert[V](alloc: Alloc, map: Map[i64, V], key: i64, value: V) -> Map[i64, V]
+fn map_i64_get_or[V](map: Map[i64, V], key: i64, fallback: V) -> V
+fn map_i64_contains[V](map: Map[i64, V], key: i64) -> bool
+fn map_i64_remove[V](alloc: Alloc, map: Map[i64, V], key: i64) -> Map[i64, V]
+pure fn map_i64_len[V](map: Map[i64, V]) -> usize
 
 struct Set[T] { … }
 fn set_new(alloc: Alloc) -> Set[str]
@@ -99,6 +113,27 @@ fn set_insert(alloc: Alloc, set: Set[str], value: str) -> Set[str]
 fn set_contains(set: Set[str], value: str) -> bool
 fn set_remove(alloc: Alloc, set: Set[str], value: str) -> Set[str]
 pure fn set_len(set: Set[str]) -> usize
+fn set_i64_new(alloc: Alloc) -> Set[i64]
+fn set_i64_insert(alloc: Alloc, set: Set[i64], value: i64) -> Set[i64]
+fn set_i64_contains(set: Set[i64], value: i64) -> bool
+fn set_i64_remove(alloc: Alloc, set: Set[i64], value: i64) -> Set[i64]
+pure fn set_i64_len(set: Set[i64]) -> usize
+```
+
+### `std/iter.mv` — `Iter[T]` and `IndexIter[T]`
+`std.iter` adds MARV-52's first real iterator protocol slice. Existing `for` loops over
+arrays, slices, strings, and `List[T]` keep their direct `len`/index lowering. A value typed as
+`IndexIter[T]` instead lowers through the generic `iter_len` / `iter_get` wrappers, whose
+specialized bodies dispatch via the `Iter[T]` interface implementation. The first concrete
+implementation is `IndexIter[i64]` over a `List[i64]`; construction with `from_list` does not
+allocate and carries the list by value.
+
+```marv
+struct IndexIter[T] { … }
+interface Iter[T] { … }
+fn from_list[T](items: List[T]) -> IndexIter[T]
+fn iter_len[T: Iter](iter: IndexIter[T]) -> usize
+fn iter_get[T: Iter](iter: IndexIter[T], index: usize) -> T
 ```
 
 ### `std/str.mv` — string building
@@ -130,6 +165,27 @@ fn decode_utf8(alloc: Alloc, bytes: []u8) -> !str
 fn encode_utf8(alloc: Alloc, text: str) -> List[u8]
 ```
 
+### `std/json.mv` — JSON scalar and flat-object support
+MARV-55 adds a first JSON/serialization slice in ordinary marv source. `JsonScalar` covers
+`null`, booleans, integer numbers, and strings. `JsonObject` is currently a validated
+source-backed flat object: parsing checks object syntax and scalar field values, field lookup
+re-parses the requested scalar value, and `serialize_object` returns the validated source.
+This avoids pretending recursive `Json.Array` / materialized nested `Json.Object` values exist
+before the recursive-ADT and general map work lands. Parsing failures are typed `JsonError`
+values; string/number serialization takes explicit `Alloc` when it builds output text.
+
+```marv
+error JsonError { UnexpectedEnd, UnexpectedChar, ExpectedColon, ... }
+enum JsonScalar { Null, Bool(bool), Number(i64), String(str) }
+struct JsonObject { source: str }
+fn parse_scalar(alloc: Alloc, text: str) -> !JsonScalar
+fn parse_object(alloc: Alloc, text: str) -> !JsonObject
+fn object_get_or(alloc: Alloc, object: JsonObject, key: str, fallback: JsonScalar) -> !JsonScalar
+pure fn object_len(object: JsonObject) -> usize
+fn serialize_scalar(alloc: Alloc, value: JsonScalar) -> str
+pure fn serialize_object(object: JsonObject) -> str
+```
+
 ### `std/http.mv` — request/response
 `Http` is declared in `std/capabilities.mv`; `std.http` layers normal app-level
 types over it. A host hands a function an `Http` capability for one request.
@@ -147,6 +203,22 @@ fn receive(http: Http) -> !Request
 fn send(http: Http, response: Response) -> !
 ```
 
+### `std/spawn.mv` — scoped task handles
+MARV-56 adds the first structured-concurrency slice. A function must receive `Spawn` to start
+work; `spawn_i64` performs the host operation and returns a `linear TaskI64`. Callers must
+consume the handle with `join_i64` before the scope exits, so detached tasks are rejected by
+the linearity checker. The interpreter records each `Spawn.start` effect; hosts may execute
+the first slice sequentially while the surface/effect/linearity contract is established.
+
+```marv
+linear struct TaskI64 { value: i64 }
+fn spawn_i64(spawn: Spawn, value: i64) -> !TaskI64
+fn join_i64(task: TaskI64) -> i64
+```
+
+Generic task result handles, channels/message passing, and true parallel host scheduling are
+not part of this first slice.
+
 ## Capabilities
 
 `std/capabilities.mv` declares the standard capability types as interfaces — the operations a
@@ -162,6 +234,7 @@ supplies the implementations the process/page chooses to grant.
 | `Net` | Network | `get(url) -> ![]u8`, `connect(host, port) -> !Conn` |
 | `Http` | One server request/response exchange | `method()`, `path()`, `body_text()`, `respond(status, body)` |
 | `Conn` | Open connection | `send`, `recv`, `close` |
+| `Spawn` | Structured-concurrency authority | `start() -> !` |
 | `Clock` | Monotonic time | `now() -> i64` |
 | `Rand` | Randomness | `next_u64() -> u64` |
 | `Alloc` | Allocator | `alloc(bytes: usize) -> ![]u8` |

@@ -26,6 +26,17 @@ const CANONICAL: &[&str] = &[
     // Index assignment and a chained index/field lvalue (parses even though
     // lowering defers index-store to MARV-9).
     "mod demo\n\npure fn run(xs: []i64) -> () {\n    xs[0] = 1\n    return\n}\n",
+    // MARV-51: a List literal is canonicalized as explicit allocation plus an
+    // array-shaped item list. The `alloc` field stays visible so the literal
+    // never hides user-visible growable allocation.
+    "mod demo\nimport std.io (Alloc)\nimport std.collections (List)\n\nfn run(alloc: Alloc) -> List[i64] {\n    List { alloc: alloc, items: [1, 2, 3] }\n}\n",
+    // The parser keeps the missing-alloc form as a List literal too; lowering
+    // turns it into a targeted diagnostic instead of misreading it as a struct.
+    "mod demo\nimport std.collections (List)\n\nfn run() -> List[i64] {\n    List { items: [1] }\n}\n",
+    // Set literals use the same explicit-allocation story.
+    "mod demo\nimport std.io (Alloc)\nimport std.collections (Set)\n\nfn run(alloc: Alloc) -> Set[str] {\n    Set { alloc: alloc, items: [\"red\", \"blue\"] }\n}\n",
+    // Map literals avoid tuple syntax by using parallel key/value arrays.
+    "mod demo\nimport std.io (Alloc)\nimport std.collections (Map)\n\nfn run(alloc: Alloc) -> Map[str, i64] {\n    Map { alloc: alloc, keys: [\"red\", \"blue\"], values: [1, 2] }\n}\n",
 ];
 
 #[test]

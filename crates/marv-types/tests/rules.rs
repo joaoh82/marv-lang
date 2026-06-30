@@ -15,7 +15,7 @@ mod common;
 
 use common::*;
 use marv_core::ir::*;
-use marv_core::{lower_module, symbol_hash};
+use marv_core::{lower_module, lower_modules, symbol_hash};
 use marv_syntax::parse;
 use marv_types::{check_def, check_module, Code, Diagnostic, World, WorldBuilder};
 
@@ -27,6 +27,33 @@ fn check_src(src: &str) -> Vec<Diagnostic> {
     let module = parse(src).unwrap_or_else(|e| panic!("parse failed: {e}\n{src}"));
     let lowered = lower_module(&module).unwrap_or_else(|e| panic!("lower failed: {e}\n{src}"));
     check_module(&lowered)
+}
+
+/// Parse the real `std.io`/`std.spawn` pair plus a source module, then check
+/// only the source module against the full declaration world.
+fn check_spawn_src(src: &str) -> Vec<Diagnostic> {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .unwrap()
+        .to_path_buf();
+    let caps = parse(&std::fs::read_to_string(root.join("std/capabilities.mv")).unwrap())
+        .expect("parse std.capabilities");
+    let spawn = parse(&std::fs::read_to_string(root.join("std/spawn.mv")).unwrap())
+        .expect("parse std.spawn");
+    let app = parse(src).unwrap_or_else(|e| panic!("parse failed: {e}\n{src}"));
+    let app_module = app.name.join(".");
+    let lowered = lower_modules(&[caps, spawn, app]).expect("lower std.spawn + app");
+    let world = World::from_modules(&lowered);
+    let app = lowered
+        .iter()
+        .find(|m| m.module.join(".") == app_module)
+        .expect("lowered app module");
+    let mut diags = Vec::new();
+    for entry in &app.defs {
+        diags.extend(check_def(&world, &entry.def, Some(&entry.name)));
+    }
+    diags
 }
 
 /// Assert exactly one diagnostic, with the given code, and return it.
@@ -78,6 +105,47 @@ fn e0103_bad_prim_operand() {
         Code::BadPrimOperand,
     );
     assert!(d.message.contains('<'), "{}", d.message);
+}
+
+#[test]
+fn source_generic_adt_fields_substitute_concrete_args() {
+    let src = "\
+mod m
+
+struct Box[T] { value: T }
+
+enum Maybe[T] {
+    None,
+    Some(T),
+}
+
+pure fn unwrap_box(b: Box[i64]) -> i64
+    requires b.value >= 0
+    ensures result >= 0
+{
+    b.value
+}
+
+pure fn get_or_zero(m: Maybe[i64]) -> i64
+    ensures result >= 0
+{
+    match m {
+        Maybe.None => 0,
+        Maybe.Some(v) => {
+            if v >= 0 {
+                v
+            } else {
+                0
+            }
+        },
+    }
+}
+";
+    let diags = check_src(src);
+    assert!(
+        diags.is_empty(),
+        "generic ADT fields should type as their concrete args: {diags:#?}"
+    );
 }
 
 #[test]
@@ -327,6 +395,43 @@ fn e0142_linear_value_not_on_all_paths() {
         body,
     );
     one(check_def(&world, &def, Some("f")), Code::LinearNotAllPaths);
+}
+
+#[test]
+fn source_spawn_task_handle_must_be_joined() {
+    let diags = check_spawn_src(
+        r#"
+mod app
+import std.io (Spawn)
+import std.spawn (spawn_i64)
+
+fn bad(spawn: Spawn) -> !i64 {
+    let task = spawn_i64(spawn, 42)?
+    0
+}
+"#,
+    );
+    one(diags, Code::LinearUnused);
+}
+
+#[test]
+fn source_spawn_task_handle_join_checks_clean() {
+    let diags = check_spawn_src(
+        r#"
+mod app
+import std.io (Spawn)
+import std.spawn (spawn_i64, join_i64)
+
+fn good(spawn: Spawn) -> !i64 {
+    let task = spawn_i64(spawn, 42)?
+    join_i64(task)
+}
+"#,
+    );
+    assert!(
+        diags.is_empty(),
+        "joined task handle should check clean, got: {diags:#?}"
+    );
 }
 
 // ============================ references =================================

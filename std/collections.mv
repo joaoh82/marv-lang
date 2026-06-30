@@ -5,17 +5,45 @@ import std.io (Alloc)
 /// mutating operations return the updated list value for rebinding.
 struct List[T] { raw: [0]T }
 
-/// A string-keyed map. This first `Map[K, V]` slice stores entries in insertion
-/// order on top of `List`, so it has value semantics and backend parity today;
-/// `K` is present in the type while the public operations are currently
-/// constrained to `str` keys until `Hash`/`Eq` interfaces land.
-struct Map[K, V] { entries: List[StrEntry[V]] }
+/// First hash/equality interface for hash-backed collections. The current
+/// generic surface supports one bound per type parameter, so `Hash[T]` carries
+/// both the hash and equality operation in this slice.
+interface Hash[T] {
+    fn hash_key(value: T) -> i64
+    fn key_eq(a: T, b: T) -> bool
+}
 
-/// A set value. The public operations are currently constrained to `str`
-/// elements and preserve insertion order.
-struct Set[T] { items: List[str] }
+impl Hash[i64] {
+    fn hash_key(value: i64) -> i64 {
+        hash_i64(value)
+    }
 
-struct StrEntry[V] { key: str, value: V }
+    fn key_eq(a: i64, b: i64) -> bool {
+        eq_i64(a, b)
+    }
+}
+
+impl Hash[str] {
+    fn hash_key(value: str) -> i64 {
+        hash_str(value)
+    }
+
+    fn key_eq(a: str, b: str) -> bool {
+        (a == b)
+    }
+}
+
+/// A map value. Entries store a precomputed hash beside the key/value pair so
+/// lookup can use explicit hash/equality semantics while preserving value
+/// semantics and explicit allocation.
+struct Map[K, V] { entries: List[Entry[K, V]] }
+
+/// A set value, backed by hashed elements.
+struct Set[T] { items: List[SetItem[T]] }
+
+struct Entry[K, V] { hash: i64, key: K, value: V }
+
+struct SetItem[T] { hash: i64, value: T }
 
 fn new[T](alloc: Alloc) -> List[T] {
     List { raw: [] }
@@ -45,13 +73,39 @@ pure fn len[T](list: List[T]) -> usize {
     len(list.raw)
 }
 
+fn hash_str(value: str) -> i64 {
+    var h: i64 = 5381
+    var i: usize = 0
+    while (i < len(value)) {
+        h = ((h * 33) + (value[i] as i64))
+        i = (i + 1)
+    }
+    if (h < 0) {
+        (0 - h)
+    } else {
+        h
+    }
+}
+
+fn hash_i64(value: i64) -> i64 {
+    if (value < 0) {
+        (0 - value)
+    } else {
+        value
+    }
+}
+
+fn eq_i64(a: i64, b: i64) -> bool {
+    (a == b)
+}
+
 fn map_new[V](alloc: Alloc) -> Map[str, V] {
-    var entries: List[StrEntry[V]] = new(alloc)
+    var entries: List[Entry[str, V]] = new(alloc)
     Map { entries: entries }
 }
 
 fn map_with_capacity[V](alloc: Alloc, capacity: usize) -> Map[str, V] {
-    var entries: List[StrEntry[V]] = with_capacity(alloc, capacity)
+    var entries: List[Entry[str, V]] = with_capacity(alloc, capacity)
     Map { entries: entries }
 }
 
@@ -60,23 +114,25 @@ pure fn map_len[V](map: Map[str, V]) -> usize {
 }
 
 fn map_contains[V](map: Map[str, V], key: str) -> bool {
+    let h: i64 = hash_str(key)
     var i: usize = 0
     var found: bool = false
     while ((i < len(map.entries)) and not found) {
-        let entry: StrEntry[V] = map.entries[i]
-        found = (entry.key == key)
+        let entry: Entry[str, V] = map.entries[i]
+        found = (((entry.hash == 0) or (entry.hash == h)) and (entry.key == key))
         i = (i + 1)
     }
     found
 }
 
 fn map_get_or[V](map: Map[str, V], key: str, fallback: V) -> V {
+    let h: i64 = hash_str(key)
     var i: usize = 0
     var out: V = fallback
     var found: bool = false
     while ((i < len(map.entries)) and not found) {
-        let entry: StrEntry[V] = map.entries[i]
-        if (entry.key == key) {
+        let entry: Entry[str, V] = map.entries[i]
+        if (((entry.hash == 0) or (entry.hash == h)) and (entry.key == key)) {
             out = entry.value
             found = true
         } else {
@@ -87,13 +143,14 @@ fn map_get_or[V](map: Map[str, V], key: str, fallback: V) -> V {
 }
 
 fn map_insert[V](alloc: Alloc, map: Map[str, V], key: str, value: V) -> Map[str, V] {
-    var entries: List[StrEntry[V]] = map.entries
+    let h: i64 = hash_str(key)
+    var entries: List[Entry[str, V]] = map.entries
     var i: usize = 0
     var found: bool = false
     while ((i < len(entries)) and not found) {
-        let entry: StrEntry[V] = entries[i]
-        if (entry.key == key) {
-            entries = set(entries, i, StrEntry { key: key, value: value })
+        let entry: Entry[str, V] = entries[i]
+        if (((entry.hash == 0) or (entry.hash == h)) and (entry.key == key)) {
+            entries = set(entries, i, Entry { hash: h, key: key, value: value })
             found = true
         } else {
             i = (i + 1)
@@ -102,19 +159,100 @@ fn map_insert[V](alloc: Alloc, map: Map[str, V], key: str, value: V) -> Map[str,
     if found {
         Map { entries: entries }
     } else {
-        Map { entries: push(alloc, entries, StrEntry { key: key, value: value }) }
+        Map { entries: push(alloc, entries, Entry { hash: h, key: key, value: value }) }
     }
 }
 
 fn map_remove[V](alloc: Alloc, map: Map[str, V], key: str) -> Map[str, V] {
-    var entries: List[StrEntry[V]] = with_capacity(alloc, len(map.entries))
+    let h: i64 = hash_str(key)
+    var entries: List[Entry[str, V]] = with_capacity(alloc, len(map.entries))
     var i: usize = 0
     while (i < len(map.entries)) {
-        let entry: StrEntry[V] = map.entries[i]
-        if (entry.key == key) {
+        let entry: Entry[str, V] = map.entries[i]
+        if (((entry.hash == 0) or (entry.hash == h)) and (entry.key == key)) {
             i = (i + 1)
         } else {
-            entries = push(alloc, entries, StrEntry { key: entry.key, value: entry.value })
+            entries = push(alloc, entries, Entry { hash: entry.hash, key: entry.key, value: entry.value })
+            i = (i + 1)
+        }
+    }
+    Map { entries: entries }
+}
+
+fn map_i64_new[V](alloc: Alloc) -> Map[i64, V] {
+    var entries: List[Entry[i64, V]] = new(alloc)
+    Map { entries: entries }
+}
+
+fn map_i64_with_capacity[V](alloc: Alloc, capacity: usize) -> Map[i64, V] {
+    var entries: List[Entry[i64, V]] = with_capacity(alloc, capacity)
+    Map { entries: entries }
+}
+
+pure fn map_i64_len[V](map: Map[i64, V]) -> usize {
+    len(map.entries)
+}
+
+fn map_i64_contains[V](map: Map[i64, V], key: i64) -> bool {
+    let h: i64 = hash_i64(key)
+    var i: usize = 0
+    var found: bool = false
+    while ((i < len(map.entries)) and not found) {
+        let entry: Entry[i64, V] = map.entries[i]
+        found = ((entry.hash == h) and eq_i64(entry.key, key))
+        i = (i + 1)
+    }
+    found
+}
+
+fn map_i64_get_or[V](map: Map[i64, V], key: i64, fallback: V) -> V {
+    let h: i64 = hash_i64(key)
+    var i: usize = 0
+    var out: V = fallback
+    var found: bool = false
+    while ((i < len(map.entries)) and not found) {
+        let entry: Entry[i64, V] = map.entries[i]
+        if ((entry.hash == h) and eq_i64(entry.key, key)) {
+            out = entry.value
+            found = true
+        } else {
+            i = (i + 1)
+        }
+    }
+    out
+}
+
+fn map_i64_insert[V](alloc: Alloc, map: Map[i64, V], key: i64, value: V) -> Map[i64, V] {
+    let h: i64 = hash_i64(key)
+    var entries: List[Entry[i64, V]] = map.entries
+    var i: usize = 0
+    var found: bool = false
+    while ((i < len(entries)) and not found) {
+        let entry: Entry[i64, V] = entries[i]
+        if ((entry.hash == h) and eq_i64(entry.key, key)) {
+            entries = set(entries, i, Entry { hash: h, key: key, value: value })
+            found = true
+        } else {
+            i = (i + 1)
+        }
+    }
+    if found {
+        Map { entries: entries }
+    } else {
+        Map { entries: push(alloc, entries, Entry { hash: h, key: key, value: value }) }
+    }
+}
+
+fn map_i64_remove[V](alloc: Alloc, map: Map[i64, V], key: i64) -> Map[i64, V] {
+    let h: i64 = hash_i64(key)
+    var entries: List[Entry[i64, V]] = with_capacity(alloc, len(map.entries))
+    var i: usize = 0
+    while (i < len(map.entries)) {
+        let entry: Entry[i64, V] = map.entries[i]
+        if ((entry.hash == h) and eq_i64(entry.key, key)) {
+            i = (i + 1)
+        } else {
+            entries = push(alloc, entries, Entry { hash: entry.hash, key: entry.key, value: entry.value })
             i = (i + 1)
         }
     }
@@ -122,12 +260,12 @@ fn map_remove[V](alloc: Alloc, map: Map[str, V], key: str) -> Map[str, V] {
 }
 
 fn set_new(alloc: Alloc) -> Set[str] {
-    var items: List[str] = new(alloc)
+    var items: List[SetItem[str]] = new(alloc)
     Set { items: items }
 }
 
 fn set_with_capacity(alloc: Alloc, capacity: usize) -> Set[str] {
-    var items: List[str] = with_capacity(alloc, capacity)
+    var items: List[SetItem[str]] = with_capacity(alloc, capacity)
     Set { items: items }
 }
 
@@ -136,10 +274,12 @@ pure fn set_len(set: Set[str]) -> usize {
 }
 
 fn set_contains(set: Set[str], value: str) -> bool {
+    let h: i64 = hash_str(value)
     var i: usize = 0
     var found: bool = false
     while ((i < len(set.items)) and not found) {
-        found = (get(set.items, i) == value)
+        let item: SetItem[str] = set.items[i]
+        found = (((item.hash == 0) or (item.hash == h)) and (item.value == value))
         i = (i + 1)
     }
     found
@@ -149,19 +289,70 @@ fn set_insert(alloc: Alloc, set: Set[str], value: str) -> Set[str] {
     if set_contains(set, value) {
         set
     } else {
-        Set { items: push(alloc, set.items, value) }
+        Set { items: push(alloc, set.items, SetItem { hash: hash_str(value), value: value }) }
     }
 }
 
 fn set_remove(alloc: Alloc, set: Set[str], value: str) -> Set[str] {
-    var items: List[str] = with_capacity(alloc, len(set.items))
+    let h: i64 = hash_str(value)
+    var items: List[SetItem[str]] = with_capacity(alloc, len(set.items))
     var i: usize = 0
     while (i < len(set.items)) {
-        let item: str = set.items[i]
-        if (item == value) {
+        let item: SetItem[str] = set.items[i]
+        if (((item.hash == 0) or (item.hash == h)) and (item.value == value)) {
             i = (i + 1)
         } else {
-            items = push(alloc, items, item)
+            items = push(alloc, items, SetItem { hash: item.hash, value: item.value })
+            i = (i + 1)
+        }
+    }
+    Set { items: items }
+}
+
+fn set_i64_new(alloc: Alloc) -> Set[i64] {
+    var items: List[SetItem[i64]] = new(alloc)
+    Set { items: items }
+}
+
+fn set_i64_with_capacity(alloc: Alloc, capacity: usize) -> Set[i64] {
+    var items: List[SetItem[i64]] = with_capacity(alloc, capacity)
+    Set { items: items }
+}
+
+pure fn set_i64_len(set: Set[i64]) -> usize {
+    len(set.items)
+}
+
+fn set_i64_contains(set: Set[i64], value: i64) -> bool {
+    let h: i64 = hash_i64(value)
+    var i: usize = 0
+    var found: bool = false
+    while ((i < len(set.items)) and not found) {
+        let item: SetItem[i64] = set.items[i]
+        found = ((item.hash == h) and eq_i64(item.value, value))
+        i = (i + 1)
+    }
+    found
+}
+
+fn set_i64_insert(alloc: Alloc, set: Set[i64], value: i64) -> Set[i64] {
+    if set_i64_contains(set, value) {
+        set
+    } else {
+        Set { items: push(alloc, set.items, SetItem { hash: hash_i64(value), value: value }) }
+    }
+}
+
+fn set_i64_remove(alloc: Alloc, set: Set[i64], value: i64) -> Set[i64] {
+    let h: i64 = hash_i64(value)
+    var items: List[SetItem[i64]] = with_capacity(alloc, len(set.items))
+    var i: usize = 0
+    while (i < len(set.items)) {
+        let item: SetItem[i64] = set.items[i]
+        if ((item.hash == h) and eq_i64(item.value, value)) {
+            i = (i + 1)
+        } else {
+            items = push(alloc, items, SetItem { hash: item.hash, value: item.value })
             i = (i + 1)
         }
     }

@@ -1,0 +1,27 @@
+mod json
+import std.io (Alloc)
+import std.json (JsonScalar, JsonObject, parse_object, serialize_scalar, object_get_or, as_bool, as_number, as_string)
+
+fn choose(cond: bool, yes: i64, no: i64) -> i64 {
+    if cond {
+        yes
+    } else {
+        no
+    }
+}
+
+fn summarize_payload(alloc: Alloc) -> !i64 {
+    let payload: JsonObject = parse_object(alloc, "{\"enabled\":true,\"limit\":7,\"name\":\"api\"}")?
+    let enabled: bool = as_bool(object_get_or(alloc, payload, "enabled", JsonScalar.Bool(false))?, false)
+    let limit: i64 = as_number(object_get_or(alloc, payload, "limit", JsonScalar.Number(0))?, 0)
+    let name: str = as_string(object_get_or(alloc, payload, "name", JsonScalar.String(""))?, "")
+    var score: i64 = limit
+    score = choose(enabled, (score + 100), score)
+    score = (score + (len(name) as i64))
+    score
+}
+
+fn serialize_payload(alloc: Alloc) -> i64 {
+    let text: str = serialize_scalar(alloc, JsonScalar.String("ok"))
+    (len(text) as i64)
+}

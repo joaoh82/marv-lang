@@ -1,0 +1,18 @@
+mod iter
+import std.io (Alloc)
+import std.collections (List)
+import std.iter (IndexIter, from_list)
+
+fn exercise(alloc: Alloc) -> i64 {
+    let xs: List[i64] = List { alloc: alloc, items: [2, 4, 6] }
+    let it: IndexIter[i64] = from_list(xs)
+    var total: i64 = 0
+    for x in it {
+        total = (total + x)
+    }
+    total
+}
+
+fn main(alloc: Alloc) -> i64 {
+    exercise(alloc)
+}

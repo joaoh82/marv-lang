@@ -253,6 +253,7 @@ impl Parser {
                 self.bump();
                 Ok(Item::Fn(self.parse_fn(true, docs)?))
             }
+            Tok::Unsafe => Ok(Item::Fn(self.parse_fn(false, docs)?)),
             Tok::Fn => Ok(Item::Fn(self.parse_fn(false, docs)?)),
             Tok::Linear => {
                 self.bump();
@@ -264,8 +265,8 @@ impl Parser {
             Tok::Interface => Ok(Item::Interface(self.parse_interface(docs)?)),
             Tok::Impl => Ok(Item::Impl(self.parse_impl(docs)?)),
             other => Err(ParseError::new(format!(
-                "expected an item (`fn`, `pure fn`, `struct`, `linear struct`, `enum`, `error`, \
-                 `interface`, `impl`), found {other:?}"
+                "expected an item (`fn`, `pure fn`, `unsafe fn`, `struct`, `linear struct`, \
+                 `enum`, `error`, `interface`, `impl`), found {other:?}"
             ))),
         }
     }
@@ -409,10 +410,12 @@ impl Parser {
                     self.bump();
                     methods.push(self.parse_fn(true, mdocs)?);
                 }
+                Tok::Unsafe => methods.push(self.parse_fn(false, mdocs)?),
                 Tok::Fn => methods.push(self.parse_fn(false, mdocs)?),
                 other => {
                     return Err(ParseError::new(format!(
-                        "expected a method (`fn` or `pure fn`) or `}}` in `impl`, found {other:?}"
+                        "expected a method (`fn`, `pure fn`, or `unsafe fn`) or `}}` in `impl`, \
+                         found {other:?}"
                     )))
                 }
             }
@@ -542,6 +545,12 @@ impl Parser {
     }
 
     fn parse_fn(&mut self, is_pure: bool, docs: Vec<String>) -> PResult<FnDecl> {
+        let is_unsafe = self.eat(&Tok::Unsafe);
+        if is_unsafe && !docs.iter().any(|d| d.trim_start().starts_with("SAFETY:")) {
+            return Err(ParseError::new(
+                "`unsafe fn` requires a preceding `/// SAFETY:` justification",
+            ));
+        }
         self.expect(Tok::Fn)?;
         let name_hi = self.cur_span().1;
         let name = self.ident()?;
@@ -576,6 +585,7 @@ impl Parser {
         Ok(FnDecl {
             docs,
             is_pure,
+            is_unsafe,
             name,
             generics,
             params,
@@ -1225,6 +1235,26 @@ impl Parser {
         }
         self.skip_nl();
         self.expect(Tok::RBrace)?;
+        if path.len() == 1 {
+            match path[0].as_str() {
+                "List" => {
+                    if let Some(lit) = list_literal_from_fields(&fields) {
+                        return Ok(lit);
+                    }
+                }
+                "Set" => {
+                    if let Some(lit) = set_literal_from_fields(&fields) {
+                        return Ok(lit);
+                    }
+                }
+                "Map" => {
+                    if let Some(lit) = map_literal_from_fields(&fields) {
+                        return Ok(lit);
+                    }
+                }
+                _ => {}
+            }
+        }
         Ok(Expr::Struct { path, fields })
     }
 
@@ -1251,5 +1281,65 @@ fn expr_to_lvalue(e: Expr) -> PResult<LValue> {
             "invalid assignment target: an `lvalue` is a name optionally followed by `.field` \
              and `[index]` accesses",
         )),
+    }
+}
+
+fn list_literal_from_fields(fields: &[FieldInit]) -> Option<Expr> {
+    let mut alloc = None;
+    let mut items = None;
+    for field in fields {
+        match field.name.as_str() {
+            "alloc" if alloc.is_none() => alloc = Some(Box::new(field.value.clone())),
+            "items" if items.is_none() => match &field.value {
+                Expr::Array(elems) => items = Some(elems.clone()),
+                _ => return None,
+            },
+            _ => return None,
+        }
+    }
+    items.map(|items| Expr::ListLiteral { alloc, items })
+}
+
+fn set_literal_from_fields(fields: &[FieldInit]) -> Option<Expr> {
+    let mut alloc = None;
+    let mut items = None;
+    for field in fields {
+        match field.name.as_str() {
+            "alloc" if alloc.is_none() => alloc = Some(Box::new(field.value.clone())),
+            "items" if items.is_none() => match &field.value {
+                Expr::Array(elems) => items = Some(elems.clone()),
+                _ => return None,
+            },
+            _ => return None,
+        }
+    }
+    items.map(|items| Expr::SetLiteral { alloc, items })
+}
+
+fn map_literal_from_fields(fields: &[FieldInit]) -> Option<Expr> {
+    let mut alloc = None;
+    let mut keys = None;
+    let mut values = None;
+    for field in fields {
+        match field.name.as_str() {
+            "alloc" if alloc.is_none() => alloc = Some(Box::new(field.value.clone())),
+            "keys" if keys.is_none() => match &field.value {
+                Expr::Array(elems) => keys = Some(elems.clone()),
+                _ => return None,
+            },
+            "values" if values.is_none() => match &field.value {
+                Expr::Array(elems) => values = Some(elems.clone()),
+                _ => return None,
+            },
+            _ => return None,
+        }
+    }
+    match (keys, values) {
+        (Some(keys), Some(values)) => Some(Expr::MapLiteral {
+            alloc,
+            keys,
+            values,
+        }),
+        _ => None,
     }
 }

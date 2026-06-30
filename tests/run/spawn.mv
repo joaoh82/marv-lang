@@ -1,0 +1,13 @@
+mod spawn
+import std.io (Spawn)
+import std.spawn (spawn_i64, join_i64)
+
+fn exercise(spawn: Spawn) -> !i64 {
+    let left = spawn_i64(spawn, 20)?
+    let right = spawn_i64(spawn, 22)?
+    (join_i64(left) + join_i64(right))
+}
+
+fn main(spawn: Spawn) -> !i64 {
+    exercise(spawn)
+}

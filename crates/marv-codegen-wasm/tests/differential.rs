@@ -118,9 +118,12 @@ fn interp_i64(
     let grant = if matches!(
         file,
         "list.mv"
+            | "list_literals.mv"
+            | "iter.mv"
             | "strings.mv"
             | "map_set.mv"
             | "bytes_utf8.mv"
+            | "json.mv"
             | "app_tokenizer.mv"
             | "app_router.mv"
             | "app_invoice_summary.mv"
@@ -295,6 +298,35 @@ fn corpus_cases() -> Vec<(&'static str, &'static str, Vec<i64>, i64)> {
         ("generics.mv", "max_of", vec![7, 3], 7),
         ("generics.mv", "max_of", vec![5, 5], 5),
         ("generics.mv", "max_of", vec![-4, -9], -4),
+        // MARV-32 broadens the monomorphization corpus: a generic that calls
+        // other generics, multiple concrete instantiations in one entry, and a
+        // two-type-parameter generic whose bounds dispatch at i64 and i32.
+        ("generics_broad.mv", "nested_clamp", vec![1, 5, 3], 3),
+        ("generics_broad.mv", "nested_clamp", vec![1, -2, 3], 1),
+        (
+            "generics_broad.mv",
+            "mixed_instantiations",
+            vec![7, 3, 10, 4],
+            33,
+        ),
+        (
+            "generics_broad.mv",
+            "mixed_instantiations",
+            vec![-2, 5, 8, 12],
+            11,
+        ),
+        (
+            "generics_broad.mv",
+            "mixed_pair_score",
+            vec![1, 2, 5, 3],
+            13,
+        ),
+        (
+            "generics_broad.mv",
+            "mixed_pair_score",
+            vec![4, 4, -1, -1],
+            22,
+        ),
         // Arrays (MARV-30): array literals box to `[len, e0, …]`; `len` reads the
         // header word and `index` loads `[i + 1]`; an index *store* is a functional
         // element update (unrolled over the static length). interp == cranelift == wasm.
@@ -351,10 +383,16 @@ fn corpus_cases() -> Vec<(&'static str, &'static str, Vec<i64>, i64)> {
         // Growable lists: explicit Alloc construction/growth, get/set/pop, and
         // `for x in xs` over the list's len/index surface.
         ("list.mv", "exercise", vec![6], 53),
-        // Map/Set first slice (MARV-50): string-keyed/value-semantics std
-        // collections built from `List`, including content equality for
-        // dynamically-built string keys.
-        ("map_set.mv", "exercise", vec![], 361),
+        // Explicit-allocation list literal sugar (MARV-51), lowered to
+        // ListNew/ListPush and run across all backends.
+        ("list_literals.mv", "exercise", vec![], 51),
+        // Real Iter[T] protocol first slice (MARV-52): `for` over IndexIter
+        // lowers through iter_len/iter_get instead of direct len/index.
+        ("iter.mv", "exercise", vec![], 12),
+        // Map/Set first slice (MARV-50) plus MARV-61 scalar-key hash-backed
+        // paths: string behavior stays compatible, and i64 map/set operations
+        // store explicit hashes beside their keys.
+        ("map_set.mv", "exercise", vec![], 1208),
         // Strings: literal concat, slice, char access, `for c in s`, and
         // explicit-Alloc building from `List[char]`.
         ("strings.mv", "exercise", vec![], 324),
@@ -363,6 +401,9 @@ fn corpus_cases() -> Vec<(&'static str, &'static str, Vec<i64>, i64)> {
         // stays interpreter/check covered until result-value codegen lands.
         ("bytes_utf8.mv", "encode_multibyte", vec![], 435),
         ("bytes_utf8.mv", "compare_bytes", vec![], 3),
+        // JSON first slice (MARV-55): deterministic scalar serialization with
+        // explicit Alloc; parser/error paths are interpreter-smoked separately.
+        ("json.mv", "exercise", vec![], 280),
         // MARV-40 app examples: app-shaped string/list programs with explicit
         // Alloc, pinned across interpreter, Cranelift, and WASM.
         ("app_tokenizer.mv", "main", vec![], 310),
@@ -373,26 +414,33 @@ fn corpus_cases() -> Vec<(&'static str, &'static str, Vec<i64>, i64)> {
 
 #[test]
 fn wasm_agrees_with_interpreter() {
-    for (file, entry, args, expected) in corpus_cases() {
-        let (module_path, defs, aliases, world) = load_source_hashed(file);
-        let interp = interp_i64(
-            defs.clone(),
-            aliases.clone(),
-            world.clone(),
-            entry,
-            &args,
-            file,
-        );
-        let wasm = wasm_i64(&module_path, &defs, &aliases, &world, entry, &args);
-        assert_eq!(
-            interp, wasm,
-            "interp/wasm disagree on {file}:{entry}({args:?}): interp={interp}, wasm={wasm}"
-        );
-        assert_eq!(
-            interp, expected,
-            "{file}:{entry}({args:?}) = {interp}, expected {expected}"
-        );
-    }
+    std::thread::Builder::new()
+        .stack_size(32 * 1024 * 1024)
+        .spawn(|| {
+            for (file, entry, args, expected) in corpus_cases() {
+                let (module_path, defs, aliases, world) = load_source_hashed(file);
+                let interp = interp_i64(
+                    defs.clone(),
+                    aliases.clone(),
+                    world.clone(),
+                    entry,
+                    &args,
+                    file,
+                );
+                let wasm = wasm_i64(&module_path, &defs, &aliases, &world, entry, &args);
+                assert_eq!(
+                    interp, wasm,
+                    "interp/wasm disagree on {file}:{entry}({args:?}): interp={interp}, wasm={wasm}"
+                );
+                assert_eq!(
+                    interp, expected,
+                    "{file}:{entry}({args:?}) = {interp}, expected {expected}"
+                );
+            }
+        })
+        .expect("spawn larger-stack differential test")
+        .join()
+        .expect("larger-stack differential test panicked");
 }
 
 /// The out-of-bounds corpus (MARV-34): `(file, entry, args)` whose runtime
@@ -646,6 +694,43 @@ fn capability_imports_can_return_string_handles() {
 
     let engine = Engine::default();
     Module::new(&engine, &artifact.bytes).expect("string-returning import module validates");
+}
+
+#[test]
+fn let_bound_capability_narrowing_imports_narrowed_ops() {
+    let (_module_path, defs, aliases, world) = load_source_hashed("cap_narrow.mv");
+    let artifact = marv_codegen_wasm::compile_hashed_reachable(
+        &defs,
+        &aliases,
+        &world,
+        &marv_codegen_wasm::Options::default(),
+        "main",
+    )
+    .unwrap();
+
+    assert_eq!(artifact.imports.len(), 2);
+    assert_eq!(artifact.imports[0].cap, "Io");
+    assert_eq!(artifact.imports[0].op, 5);
+    assert_eq!(artifact.imports[0].params, 0);
+    assert!(!artifact.imports[0].returns_value);
+    assert_eq!(artifact.imports[1].cap, "Stream");
+    assert_eq!(artifact.imports[1].op, 0);
+    assert_eq!(artifact.imports[1].params, 1);
+    assert!(!artifact.imports[1].returns_value);
+
+    let engine = Engine::default();
+    let module = Module::new(&engine, &artifact.bytes).unwrap();
+    let imports: Vec<(String, String)> = module
+        .imports()
+        .map(|i| (i.module().to_string(), i.name().to_string()))
+        .collect();
+    assert_eq!(
+        imports,
+        vec![
+            ("Io".to_string(), "op5".to_string()),
+            ("Stream".to_string(), "op0".to_string()),
+        ]
+    );
 }
 
 /// MARV-8: a module whose entry uses only the supported subset builds even when

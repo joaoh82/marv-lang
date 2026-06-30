@@ -64,8 +64,10 @@
 //! - **Structs and enums**, encoded *unpacked*: a value is an integer tag plus
 //!   per-variant field terms (no SMT datatypes needed). Construction, `match`
 //!   (branch-joined with `ite`), and struct projection encode; parameters of
-//!   nominal type are havocked from their declaration in the [`World`]
-//!   (recursive types are honestly `unsupported`).
+//!   nominal type are havocked from their declaration in the [`World`]. Generic
+//!   non-recursive declarations are instantiated by substituting their concrete
+//!   type arguments before havocking fields; recursive types remain honestly
+//!   `unsupported`.
 //! - **Bounded quantifiers** `forall i in lo..hi: P` / `exists …` in contracts
 //!   and invariants, encoded as guarded SMT quantifiers over the integers.
 //! - **`old(e)`** in `ensures` — erased at lowering (parameters are immutable
@@ -423,6 +425,7 @@ enum Sym {
     },
     Adt {
         ty: Hash,
+        args: Vec<Type>,
         tag: SExpr,
         variants: Vec<Option<Vec<Sym>>>,
     },
@@ -558,6 +561,7 @@ impl Encoder<'_, '_> {
                 variants[*tag as usize] = Some(fs);
                 Ok(Sym::Adt {
                     ty: *ty,
+                    args: Vec::new(),
                     tag: self.ctx.numeral(*tag as i64),
                     variants,
                 })
@@ -800,10 +804,12 @@ impl Encoder<'_, '_> {
             (
                 Sym::Adt {
                     ty,
+                    args,
                     tag: ta,
                     variants: va,
                 },
                 Sym::Adt {
+                    args: eb,
                     tag: tb,
                     variants: vb,
                     ..
@@ -830,6 +836,7 @@ impl Encoder<'_, '_> {
                 }
                 Ok(Sym::Adt {
                     ty,
+                    args: if args.is_empty() { eb } else { args },
                     tag: self.ctx.ite(cond, ta, tb),
                     variants,
                 })
@@ -1305,14 +1312,11 @@ impl Encoder<'_, '_> {
                         elem: elem_kind,
                     });
                 }
-                if !args.is_empty() {
-                    return Err(stop("generic ADTs are outside the verified subset"));
-                }
                 if visiting.contains(def) {
                     return Err(stop("recursive types are outside the verified subset"));
                 }
                 visiting.push(*def);
-                let r = self.havoc_nominal(def, name, visiting);
+                let r = self.havoc_nominal(def, args, name, visiting);
                 visiting.pop();
                 r
             }
@@ -1325,6 +1329,7 @@ impl Encoder<'_, '_> {
     fn havoc_nominal(
         &mut self,
         def: &Hash,
+        args: &[Type],
         name: &str,
         visiting: &mut Vec<Hash>,
     ) -> Result<Sym, Stop> {
@@ -1332,10 +1337,12 @@ impl Encoder<'_, '_> {
             let fields = s.fields.clone();
             let mut fs = Vec::with_capacity(fields.len());
             for (i, ft) in fields.iter().enumerate() {
-                fs.push(self.havoc_type(ft, &format!("{name}_f{i}"), visiting)?);
+                let ft = substitute_type_vars(ft, args)?;
+                fs.push(self.havoc_type(&ft, &format!("{name}_f{i}"), visiting)?);
             }
             return Ok(Sym::Adt {
                 ty: *def,
+                args: args.to_vec(),
                 tag: self.ctx.numeral(0),
                 variants: vec![Some(fs)],
             });
@@ -1355,12 +1362,14 @@ impl Encoder<'_, '_> {
             for (k, v) in decl_variants.iter().enumerate() {
                 let mut fs = Vec::with_capacity(v.fields.len());
                 for (i, ft) in v.fields.iter().enumerate() {
-                    fs.push(self.havoc_type(ft, &format!("{name}_v{k}f{i}"), visiting)?);
+                    let ft = substitute_type_vars(ft, args)?;
+                    fs.push(self.havoc_type(&ft, &format!("{name}_v{k}f{i}"), visiting)?);
                 }
                 variants.push(Some(fs));
             }
             return Ok(Sym::Adt {
                 ty: *def,
+                args: args.to_vec(),
                 tag,
                 variants,
             });
@@ -1395,7 +1404,9 @@ impl Encoder<'_, '_> {
                 })
             }
             // A carried ADT havocs from its declaration (all variants live).
-            Sym::Adt { ty, .. } => self.havoc_nominal(&ty.clone(), name, &mut vec![*ty]),
+            Sym::Adt { ty, args, .. } => {
+                self.havoc_nominal(&ty.clone(), args, name, &mut vec![*ty])
+            }
             Sym::Tuple(_) => Err(stop("nested loop state cannot be havocked")),
         }
     }
@@ -1438,6 +1449,51 @@ fn as_state(s: Sym, k: usize) -> Result<Vec<Sym>, Stop> {
         return Err(stop("loop body did not produce its carried state"));
     }
     Ok(fields)
+}
+
+/// Instantiate a generic struct/enum declaration field by replacing `Type::Var`
+/// indices with the concrete nominal arguments from the use site. The lowerer
+/// assigns type parameters by source order, so `Type::Var(0)` maps to
+/// `args[0]`, and so on.
+fn substitute_type_vars(t: &Type, args: &[Type]) -> Result<Type, Stop> {
+    match t {
+        Type::Var(i) => args
+            .get(*i as usize)
+            .cloned()
+            .ok_or_else(|| stop("generic ADT field references a missing type argument")),
+        Type::Array(elem, n) => Ok(Type::Array(Box::new(substitute_type_vars(elem, args)?), *n)),
+        Type::Slice(elem) => Ok(Type::Slice(Box::new(substitute_type_vars(elem, args)?))),
+        Type::Tuple(items) => Ok(Type::Tuple(
+            items
+                .iter()
+                .map(|item| substitute_type_vars(item, args))
+                .collect::<Result<Vec<_>, _>>()?,
+        )),
+        Type::Arrow {
+            param,
+            ret,
+            effects,
+        } => Ok(Type::Arrow {
+            param: Box::new(substitute_type_vars(param, args)?),
+            ret: Box::new(substitute_type_vars(ret, args)?),
+            effects: effects.clone(),
+        }),
+        Type::Nominal { def, args: inner } => Ok(Type::Nominal {
+            def: *def,
+            args: inner
+                .iter()
+                .map(|item| substitute_type_vars(item, args))
+                .collect::<Result<Vec<_>, _>>()?,
+        }),
+        Type::Ref { mutable, of } => Ok(Type::Ref {
+            mutable: *mutable,
+            of: Box::new(substitute_type_vars(of, args)?),
+        }),
+        Type::Linear(inner) => Ok(Type::Linear(Box::new(substitute_type_vars(inner, args)?))),
+        Type::Unit | Type::Bool | Type::Int(_) | Type::Float(_) | Type::Str | Type::Char => {
+            Ok(t.clone())
+        }
+    }
 }
 
 // ---- primitive & arithmetic encoding --------------------------------------

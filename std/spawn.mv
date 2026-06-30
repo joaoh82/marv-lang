@@ -1,0 +1,15 @@
+mod std.spawn
+import std.io (Spawn)
+
+/// A scoped integer task handle. It is linear: callers must join exactly once,
+/// which prevents detached tasks in the first structured-concurrency slice.
+linear struct TaskI64 { value: i64 }
+
+fn spawn_i64(spawn: Spawn, value: i64) -> !TaskI64 {
+    let started: () = spawn.start()?
+    TaskI64 { value: value }
+}
+
+fn join_i64(task: TaskI64) -> i64 {
+    task.value
+}

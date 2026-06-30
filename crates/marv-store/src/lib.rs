@@ -38,6 +38,8 @@ pub struct DefMeta {
     pub enum_variants: Vec<StoredVariant>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub capability_ops: Vec<StoredOpSig>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unsafe_sites: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -141,8 +143,7 @@ pub struct AuditEntry {
     pub reviewed: bool,
     pub reachable: bool,
     pub deps: Vec<String>,
-    /// Placeholder for `marv/unsafeSites`; unsafe surface syntax is still spec
-    /// only, so current Core blobs have no unsafe-site metadata to report.
+    /// Unsafe audit sites carried as non-hashed source metadata.
     pub unsafe_sites: Vec<String>,
 }
 
@@ -292,7 +293,12 @@ pub fn commit_with_meta(
         let qualified = qualify(module_path, name);
         let hash = resolved.dag_hashes[i].to_b3();
 
-        let status = if let Some(existing) = store.defs.get(&hash) {
+        let status = if let Some(existing) = store.defs.get_mut(&hash) {
+            for site in &meta.unsafe_sites {
+                if !existing.meta.unsafe_sites.contains(site) {
+                    existing.meta.unsafe_sites.push(site.clone());
+                }
+            }
             CommitStatus::Existing {
                 reviewed: existing.reviewed,
             }
@@ -428,7 +434,7 @@ impl Store {
                 reviewed: d.reviewed,
                 reachable: reachable.contains(&d.hash),
                 deps: d.deps.clone(),
-                unsafe_sites: Vec::new(),
+                unsafe_sites: d.meta.unsafe_sites.clone(),
             })
             .collect();
         AuditReport { entries }

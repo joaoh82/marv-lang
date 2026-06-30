@@ -19,6 +19,7 @@ interface Io {
     fn alloc(io: &Io) -> Alloc
     fn stdout(io: &Io) -> Stream
     fn http(io: &Io) -> Http
+    fn spawn(io: &Io) -> Spawn
 }
 
 /// A text output stream (e.g. standard output). Stage-0 writes a `str`;
@@ -50,6 +51,14 @@ interface Http {
     fn path(http: &Http) -> !str
     fn body_text(http: &Http) -> !str
     fn respond(http: &Http, status: u16, body: str) -> !
+}
+
+/// Structured concurrency authority. A function without a `Spawn` parameter
+/// cannot create task handles. The first std slice models a spawn as a
+/// capability-gated scoped value; hosts may execute it sequentially while the
+/// type/effect surface is established.
+interface Spawn {
+    fn start(spawn: &Spawn) -> !
 }
 
 /// An open network connection. A connection must be `close`d exactly once;

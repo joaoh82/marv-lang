@@ -1,0 +1,30 @@
+mod list_literals
+import std.io (Alloc)
+import std.collections (List, Map, Set, get, len, map_get_or, set_contains, set_len)
+
+fn choose(cond: bool, yes: i64, no: i64) -> i64 {
+    if cond {
+        yes
+    } else {
+        no
+    }
+}
+
+fn exercise(alloc: Alloc) -> i64 {
+    let weights: List[i64] = List { alloc: alloc, items: [3, 5, 8, 13] }
+    let scores: Map[str, i64] = Map { alloc: alloc, keys: ["red", "blue"], values: [10, 20] }
+    let seen: Set[str] = Set { alloc: alloc, items: ["red", "blue", "red"] }
+    var total: i64 = 0
+    var i: usize = 0
+    while (i < len(weights)) {
+        total = (total + get(weights, i))
+        i = (i + 1)
+    }
+    total = (total + map_get_or(scores, "blue", 0))
+    total = (total + choose(set_contains(seen, "red"), (set_len(seen) as i64), 1000))
+    total
+}
+
+fn main(alloc: Alloc) -> i64 {
+    exercise(alloc)
+}
