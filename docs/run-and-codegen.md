@@ -95,13 +95,14 @@ path, so an unsupported reachable construct fails before any object or linked
 executable is written. New constructs land in *both* backends together so
 agreement is preserved.
 
-The LLVM release backend follows the same honesty rule. Its first MARV-69 slice
-covers scalar arithmetic/casts, calls/recursion, bool `if`/`match`, `while`,
-early `return`, boxed structs/enums, arrays, runtime-length slice updates,
-`List[T]` grow/set/pop/index operations, string concat/equality/slice/from_chars,
-iterator loops, and the current map/set corpus paths. It intentionally reports
-`unsupported` for reachable capability `perform`, `raise`, and unsafe/resource
-host integration until those paths are lowered into LLVM too.
+The LLVM release backend follows the same honesty rule. Its MARV-69 slice covers
+scalar arithmetic/casts, calls/recursion, bool `if`/`match`, `while`, early
+`return`, boxed structs/enums, arrays, runtime-length slice updates, `List[T]`
+grow/set/pop/index operations, string concat/equality/slice/from_chars, iterator
+loops, bytes/UTF-8 backend-safe paths, JSON serializer-safe paths, and the
+current map/set/app corpus paths. It intentionally reports `unsupported` for
+reachable capability `perform`, `raise`, and unsafe/resource host integration
+until those paths are lowered into LLVM too.
 
 ### Cranelift AOT objects and executables (MARV-68)
 
@@ -300,8 +301,8 @@ the results are equal to each other and to a hand-computed golden value:
 | `arrays.mv`     | array literals + `len` + index read `a[i]` + index store `a[i] = e` (functional element update); a `len`-bounded `while` loop over an array — MARV-30 |
 | `slices.mv`     | runtime-length slices `[]T`: construct (array→slice), `len`/index, a `Core::IndexSet` element store over a runtime length, and `total` over a slice of structs (`sales[i].amount`) — MARV-33; `for x in s` over a slice and over a slice of structs, nested `for`s (depth-keyed index names), and sequential `for`s — MARV-20 |
 | `iter.mv`       | `std.iter.IndexIter[i64]` over a `List[i64]`; `for x in it` lowers through the `Iter[i64]` protocol wrappers instead of direct `len`/index — MARV-52 |
-| `json.mv`       | `std.json` first slice: scalar serialization with explicit `Alloc` runs three-way; parser/typed-error paths are interpreter-smoked — MARV-55 |
-| `json_dom.mv`   | `std.json` recursive/materialized DOM: backend-safe nested construction + deterministic serialization run three-way; recursive parse/error paths are interpreter/check covered until raise lowering reaches WASM — MARV-66 |
+| `json.mv`       | `std.json` first slice: scalar serialization with explicit `Alloc` runs across the interpreter, Cranelift, WASM, and LLVM; parser/typed-error paths are interpreter-smoked — MARV-55 |
+| `json_dom.mv`   | `std.json` recursive/materialized DOM: backend-safe nested construction + deterministic serialization run across the interpreter, Cranelift, WASM, and LLVM; recursive parse/error paths are interpreter/check covered until raise lowering reaches native/WASM backends — MARV-66 |
 
 Both differential harnesses also carry an **out-of-bounds corpus** (MARV-34):
 slice reads at `len` and at `-1`, a slice store at `len`, and an array read at
@@ -390,17 +391,18 @@ cd web && python3 -m http.server 8087   # then open http://localhost:8087/
 ## Status and what's next
 
 - **Done:** interpreter over the full Core IR (capability injection, effect
-  logging, currying, recursion, `match`); a Cranelift JIT and a WebAssembly
-  backend over the integer/boolean subset **plus heap-boxed aggregates and enums
-  with field-binding `match`** (MARV-9) **plus fixed-length arrays with
-  `len`/index/store** (MARV-30) **plus runtime-length slices `[]T` with
-  `len`/index and an allocate-copy-store element store** (MARV-33) **plus the
-  Tier-1 debug bounds check on runtime element reads/stores, with
-  `marv build --release` to omit it** (MARV-34); `marv run`, `marv build --target
-  native-cranelift`, `marv build --target wasm-component`; the three-way
-  differential gate (interpreter ↔ Cranelift ↔ wasm) and a browser sandbox demo.
-- **Next:** ahead-of-time object/executable emission and an LLVM backend for
-  release builds (MARV-10); broader ownership-aware reclamation for heap values
-  that escape arena reset scopes; string/aggregate-typed capability operands and
-  full component-model / WIT packaging. The interpreter remains the oracle each
-  backend is differentially tested against.
+  logging, currying, recursion, `match`); Cranelift JIT/AOT, WebAssembly, and
+  LLVM/clang release slices over the integer/boolean subset **plus heap-boxed
+  aggregates and enums with field-binding `match`** (MARV-9) **plus fixed-length
+  arrays with `len`/index/store** (MARV-30) **plus runtime-length slices `[]T`
+  with `len`/index and an allocate-copy-store element store** (MARV-33) **plus
+  the Tier-1 debug bounds check on runtime element reads/stores, with
+  `marv build --release` to omit it** (MARV-34); `marv run`, `marv build
+  --target native-cranelift`, `marv build --target native-llvm`, `marv build
+  --target wasm-component`; differential gates against the interpreter and a
+  browser sandbox demo.
+- **Next:** capability-hosted native runtimes, broader ownership-aware
+  reclamation for heap values that escape arena reset scopes,
+  string/aggregate-typed capability operands, and full component-model / WIT
+  packaging. The interpreter remains the oracle each backend is differentially
+  tested against.

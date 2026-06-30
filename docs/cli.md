@@ -234,14 +234,14 @@ JIT path and does not leave a partial artifact.
 ### `--target native-llvm`
 
 `native-llvm` emits deterministic textual LLVM IR for the entry's reachable Core
-closure, then uses the host `clang` driver to optimize, run, or link it. It is
-the first MARV-69 release slice rather than full app-corpus parity: scalar
+closure, then uses the host `clang` driver to optimize, run, or link it. It is a
+MARV-69 release backend slice, not a capability-hosted native runtime: scalar
 arithmetic/casts, calls/recursion, `if`/`match`, `while`, early `return`, boxed
 structs/enums, arrays, runtime-length slice element updates, `List[T]` runtime
 operations, string concat/equality/slice/from_chars, iterator loops, and the
-current map/set corpus paths are covered. Capability `perform`, `raise`, and
-unsafe/resource host integration still report honest `unsupported` errors when
-reachable.
+current bytes/UTF-8, JSON serializer-safe, map/set, and app corpus paths are
+covered. Capability `perform`, `raise`, and unsafe/resource host integration
+still report honest `unsupported` errors when reachable.
 
 ```sh
 marv build --target native-llvm --run examples/factorial.mv --entry factorial 6

@@ -715,7 +715,7 @@ impl<'a> FuncBuilder<'a> {
             .map(|t| layout::is_boxed(self.world, t))
             .unwrap_or(false);
         if boxed {
-            self.eval_match_boxed(scrutinee, branches)
+            self.eval_match_boxed(scrutinee, branches, &scrut_ty.unwrap())
         } else {
             self.eval_match_scalar(scrutinee, branches)
         }
@@ -799,6 +799,7 @@ impl<'a> FuncBuilder<'a> {
         &mut self,
         scrutinee: &Atom,
         branches: &[Branch],
+        scrut_ty: &Type,
     ) -> Result<Slot, LlvmError> {
         let ptr = self.eval_atom(scrutinee)?;
         let ptr = self.as_word(ptr)?;
@@ -827,11 +828,13 @@ impl<'a> FuncBuilder<'a> {
         let mut arms = Vec::new();
         for (i, br) in branches.iter().enumerate() {
             self.push_label(arm_labels[i].clone());
+            let field_tys =
+                layout::variant_fields(self.world, scrut_ty, i as u32).unwrap_or_default();
             let pushed = br.binds as usize;
             for field_i in 0..pushed {
                 let slot = self.load_word(&ptr, &(field_i as i64 + 1).to_string());
                 self.env.push(Slot::Val(slot));
-                self.tys.push(None);
+                self.tys.push(field_tys.get(field_i).cloned());
             }
             let mut slot = self.eval(&br.body)?;
             for _ in 0..pushed {
@@ -1036,6 +1039,7 @@ impl<'a> FuncBuilder<'a> {
         let mut arms = Vec::new();
 
         if boxed {
+            let scrut_ty = scrut_ty.unwrap();
             let ptr = self.eval_atom(scrutinee)?;
             let ptr = self.as_word(ptr)?;
             let tag = self.load_word(&ptr, "0");
@@ -1061,11 +1065,13 @@ impl<'a> FuncBuilder<'a> {
 
             for (i, br) in branches.iter().enumerate() {
                 self.push_label(arm_labels[i].clone());
+                let field_tys =
+                    layout::variant_fields(self.world, &scrut_ty, i as u32).unwrap_or_default();
                 let pushed = br.binds as usize;
                 for field_i in 0..pushed {
                     let slot = self.load_word(&ptr, &(field_i as i64 + 1).to_string());
                     self.env.push(Slot::Val(slot));
-                    self.tys.push(None);
+                    self.tys.push(field_tys.get(field_i).cloned());
                 }
                 let next = self.eval_loop_body(&br.body, k)?;
                 for _ in 0..pushed {

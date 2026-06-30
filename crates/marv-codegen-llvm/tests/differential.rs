@@ -186,7 +186,7 @@ fn llvm_agrees_with_interpreter_on_release_slice() {
 }
 
 #[test]
-fn llvm_agrees_with_interpreter_on_std_collections_and_strings() {
+fn llvm_agrees_with_interpreter_on_std_and_app_corpus() {
     if !clang_available() {
         return;
     }
@@ -199,6 +199,13 @@ fn llvm_agrees_with_interpreter_on_std_collections_and_strings() {
                 ("iter.mv", "exercise", &[], 12),
                 ("map_set.mv", "exercise", &[], 1208),
                 ("strings.mv", "exercise", &[], 324),
+                ("bytes_utf8.mv", "encode_multibyte", &[], 435),
+                ("bytes_utf8.mv", "compare_bytes", &[], 3),
+                ("json.mv", "exercise", &[], 280),
+                ("json_dom.mv", "exercise", &[], 379),
+                ("app_tokenizer.mv", "main", &[], 310),
+                ("app_router.mv", "main", &[], 512),
+                ("app_invoice_summary.mv", "main", &[], 3070),
             ];
             for (file, entry, args, expected) in cases {
                 let (defs, aliases, world) = load_source_hashed(file);
@@ -209,9 +216,57 @@ fn llvm_agrees_with_interpreter_on_std_collections_and_strings() {
                 assert_eq!(llvm, interp, "{file}:{entry} llvm");
             }
         })
-        .expect("spawn std LLVM differential test")
+        .expect("spawn std/app LLVM differential test")
         .join()
-        .expect("std LLVM differential test panicked");
+        .expect("std/app LLVM differential test panicked");
+}
+
+#[test]
+fn llvm_debug_bounds_checks_abort_out_of_bounds() {
+    if !clang_available() {
+        return;
+    }
+    let (module_path, defs, world) = load_source("arrays.mv");
+    let program = marv_codegen_llvm::compile_reachable(
+        &module_path,
+        &defs,
+        &world,
+        &marv_codegen_llvm::Options::default(),
+        "nth",
+    )
+    .unwrap_or_else(|e| panic!("llvm compile nth: {e}"));
+    let err = program
+        .run_i64(&[4])
+        .expect_err("out-of-bounds array read must abort under debug bounds checks");
+    assert!(
+        err.to_string().contains("LLVM executable exited"),
+        "unexpected bounds-check failure: {err}"
+    );
+}
+
+#[test]
+fn llvm_release_mode_in_bounds_results_are_unchanged() {
+    if !clang_available() {
+        return;
+    }
+    let (module_path, defs, world) = load_source("arrays.mv");
+    let interp = interp_i64(&module_path, defs.clone(), world.clone(), "nth", &[2]);
+    let program = marv_codegen_llvm::compile_reachable(
+        &module_path,
+        &defs,
+        &world,
+        &marv_codegen_llvm::Options {
+            bounds_checks: false,
+            ..marv_codegen_llvm::Options::default()
+        },
+        "nth",
+    )
+    .unwrap_or_else(|e| panic!("llvm compile release nth: {e}"));
+    assert_eq!(program.run_i64(&[2]).expect("run release nth"), interp);
+    assert!(
+        !program.ir.contains("call void @abort()"),
+        "release-mode LLVM IR should omit emitted bounds-check abort calls"
+    );
 }
 
 #[test]

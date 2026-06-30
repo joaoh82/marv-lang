@@ -101,6 +101,25 @@ fn native_llvm_run_and_linked_executable_work() {
 }
 
 #[test]
+fn native_llvm_runs_recursive_json_dom_serializer_path() {
+    if !clang_available() {
+        return;
+    }
+    let mut run_cmd = marv();
+    run_cmd.args([
+        "build",
+        "--target",
+        "native-llvm",
+        "--run",
+        "tests/run/json_dom.mv",
+        "--entry",
+        "exercise",
+    ]);
+    let output = run(run_cmd);
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "379");
+}
+
+#[test]
 fn native_llvm_reports_reachable_capability_perform() {
     let output = marv()
         .args([
@@ -120,5 +139,74 @@ fn native_llvm_reports_reachable_capability_perform() {
     assert!(
         stderr.contains("unsupported: capability perform"),
         "stderr should explain unsupported capability perform, got:\n{stderr}"
+    );
+}
+
+#[test]
+fn native_llvm_reports_reachable_resource_capability_perform() {
+    let output = marv()
+        .args([
+            "build",
+            "--target",
+            "native-llvm",
+            "examples/resource_lifecycle.mv",
+            "--entry",
+            "file_scope",
+        ])
+        .output()
+        .expect("run marv");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("unsupported: capability perform"),
+        "stderr should explain unsupported resource capability perform, got:\n{stderr}"
+    );
+}
+
+#[test]
+fn native_llvm_reports_reachable_raise() {
+    let output = marv()
+        .args([
+            "build",
+            "--target",
+            "native-llvm",
+            "--run",
+            "tests/run/json.mv",
+            "--entry",
+            "invalid_scalar",
+        ])
+        .output()
+        .expect("run marv");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("unsupported: raise"),
+        "stderr should explain unsupported raise, got:\n{stderr}"
+    );
+}
+
+#[test]
+fn native_llvm_reports_reachable_unsafe_extern_without_body() {
+    let output = marv()
+        .args([
+            "build",
+            "--target",
+            "native-llvm",
+            "--run",
+            "examples/unsafe_audit.mv",
+            "--entry",
+            "audited_add_one",
+            "41",
+        ])
+        .output()
+        .expect("run marv");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("unsupported: function without a body"),
+        "stderr should explain unsupported unsafe extern call, got:\n{stderr}"
     );
 }

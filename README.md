@@ -188,7 +188,7 @@ and local path dependencies, `marv/openPackage` opens those packages for agents,
 and the content store supports
 lockfile-pinned cross-module builds by hash. MARV-48's first application-language
 wave is complete; the remaining post-MARV-48 roadmap covers host-backed socket serving beyond the
-deterministic listener harness, executable host FFI bindings, WASM component packaging, broader LLVM release coverage, and deeper verification. The
+deterministic listener harness, executable host FFI bindings, WASM component packaging, native capability-host runtime coverage, and deeper verification. The
 full backlog (surface growth → backend breadth → verification breadth →
 application runtime → packaging/LLVM → self-hosting) — with phases, ordering, and the
 dependency graph — is in
