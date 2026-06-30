@@ -66,6 +66,7 @@ jobs:
           mkdir -p "$dist"
           cp "target/${{ matrix.target }}/release/marv" "$dist/"
           cp "target/${{ matrix.target }}/release/marv-mcp" "$dist/"
+          cp -R std "$dist/std"
           cp README.md LICENSE-MIT LICENSE-APACHE AGENTS.md "$dist/"
           tar czf "${dist}.tar.gz" "$dist"
           shasum -a 256 "${dist}.tar.gz" > "${dist}.tar.gz.sha256"

@@ -140,12 +140,12 @@ fn load_source(src: &str, path: &Path) -> Result<Loaded, LoadError> {
 }
 
 /// Resolve every source import in `main` to parsed modules, following imports
-/// transitively. `std.*` is discovered from `MARV_STD` or the nearest `std/`
-/// directory as before; non-`std` modules are discovered from the nearest
-/// ancestor with `marv.toml`, falling back to the entry file's directory. The
-/// index keys on each file's declared `mod` path, so file names remain an
-/// implementation detail and duplicate module declarations are reported
-/// explicitly.
+/// transitively. `std.*` is discovered from `MARV_STD`, the nearest `std/`
+/// directory, or a `std/` directory beside the installed `marv` binary; non-`std`
+/// modules are discovered from the nearest ancestor with `marv.toml`, falling
+/// back to the entry file's directory. The index keys on each file's declared
+/// `mod` path, so file names remain an implementation detail and duplicate
+/// module declarations are reported explicitly.
 fn resolve_source_imports(main: &Module, path: &Path) -> Result<Vec<Module>, LoadError> {
     if main.imports.is_empty() {
         return Ok(Vec::new());
@@ -306,34 +306,55 @@ fn collect_modules(
 
 /// Locate the `std/` source directory: the `MARV_STD` environment variable if
 /// set, otherwise the nearest ancestor of the source file that contains a `std/`
-/// directory with `.mv` files.
+/// directory with `.mv` files, otherwise a `std/` directory next to the running
+/// `marv` binary.
 fn find_std_dir(path: &Path) -> Option<PathBuf> {
-    if let Ok(dir) = std::env::var("MARV_STD") {
-        let p = PathBuf::from(dir);
-        if p.is_dir() {
-            return Some(p);
+    let env_std = std::env::var_os("MARV_STD").map(PathBuf::from);
+    let exe = std::env::current_exe().ok();
+    find_std_dir_candidates(path, env_std.as_deref(), exe.as_deref())
+}
+
+fn find_std_dir_candidates(
+    path: &Path,
+    env_std: Option<&Path>,
+    exe_path: Option<&Path>,
+) -> Option<PathBuf> {
+    if let Some(p) = env_std {
+        if is_std_dir(p) {
+            return Some(p.to_path_buf());
         }
     }
     let start = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     let mut dir = start.parent();
     while let Some(d) = dir {
         let cand = d.join("std");
-        if cand.is_dir()
-            && std::fs::read_dir(&cand)
-                .map(|mut it| {
-                    it.any(|e| {
-                        e.ok()
-                            .map(|e| e.path().extension().and_then(|s| s.to_str()) == Some("mv"))
-                            .unwrap_or(false)
-                    })
-                })
-                .unwrap_or(false)
-        {
+        if is_std_dir(&cand) {
             return Some(cand);
         }
         dir = d.parent();
     }
+    if let Some(exe_path) = exe_path {
+        if let Some(exe_dir) = exe_path.parent() {
+            let cand = exe_dir.join("std");
+            if is_std_dir(&cand) {
+                return Some(cand);
+            }
+        }
+    }
     None
+}
+
+fn is_std_dir(path: &Path) -> bool {
+    path.is_dir()
+        && std::fs::read_dir(path)
+            .map(|mut it| {
+                it.any(|e| {
+                    e.ok()
+                        .map(|e| e.path().extension().and_then(|s| s.to_str()) == Some("mv"))
+                        .unwrap_or(false)
+                })
+            })
+            .unwrap_or(false)
 }
 
 /// The parameter names of a named function in the AST (empty for non-functions).
@@ -632,6 +653,28 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.dir);
         }
+    }
+
+    #[test]
+    fn std_dir_can_live_next_to_installed_binary() {
+        let dir = std::env::temp_dir().join(format!("marv-toolchain-std-{}", std::process::id()));
+        let app_dir = dir.join("app/src");
+        let toolchain_dir = dir.join("toolchain");
+        let toolchain_std = toolchain_dir.join("std");
+        std::fs::create_dir_all(&app_dir).expect("create app src");
+        std::fs::create_dir_all(&toolchain_std).expect("create toolchain std");
+        std::fs::write(app_dir.join("main.mv"), "mod app.main\n").expect("write app");
+        std::fs::write(toolchain_std.join("option.mv"), "mod std.option\n").expect("write std");
+
+        let found = find_std_dir_candidates(
+            &app_dir.join("main.mv"),
+            None,
+            Some(&toolchain_dir.join("marv")),
+        )
+        .expect("find toolchain std");
+        assert_eq!(found, toolchain_std);
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     const PALETTE: &str = "\

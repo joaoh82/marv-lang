@@ -31,13 +31,14 @@ lowered through the front end) or a `*.core.json` **Core-IR snapshot**
 
 **Source import discovery.** When a source file imports another module, the CLI
 lowers the imported source modules alongside the entry file, transitively. `std.*`
-imports are found through `MARV_STD` or the nearest `std/` ancestor. Non-`std`
-imports are found under the nearest ancestor containing `marv.toml`; if there is
-no manifest yet, the entry file's directory is the source root. Files are indexed
-by their declared `mod` path, so file names are not semantic. Missing or
-ambiguous non-`std` module declarations are load errors, not silent soft-skips.
-Missing `std` modules remain opaque so not-yet-surfaced builtins such as
-`std.math` can be imported without forcing a source file.
+imports are found through `MARV_STD`, the nearest `std/` ancestor, or the `std/`
+directory packaged beside the installed `marv` binary. Non-`std` imports are
+found under the nearest ancestor containing `marv.toml`; if there is no manifest
+yet, the entry file's directory is the source root. Files are indexed by their
+declared `mod` path, so file names are not semantic. Missing or ambiguous
+non-`std` module declarations are load errors, not silent soft-skips. Missing
+`std` modules remain opaque so not-yet-surfaced builtins such as `std.math` can
+be imported without forcing a source file.
 
 ```text
 workspace/

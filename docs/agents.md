@@ -74,8 +74,10 @@ marv commit <file> [--store .marv]             # freeze into the content-address
 
 Both `.mv` source and `*.core.json` Core-IR snapshots are accepted. Enums and capability
 `perform`/narrowing are now expressible directly in `.mv` source (MARV-1, MARV-6); a source
-file that `import std.*` is resolved against the `std/` directory automatically. The
-`*.core.json` path remains for hand-authoring Core IR directly.
+file that `import std.*` is resolved against `MARV_STD`, a nearby `std/`, or the `std/`
+directory packaged beside the installed `marv` binary. Application projects should use the
+released toolchain and keep only app sources/manifests locally; do not copy the compiler
+repository into the app. The `*.core.json` path remains for hand-authoring Core IR directly.
 
 ## The MCP server
 
