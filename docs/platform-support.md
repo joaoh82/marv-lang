@@ -10,7 +10,7 @@ property (`spec/01` §9).
 | Backend | Crate | Form | Status |
 |---------|-------|------|--------|
 | Tree-walking interpreter | `marv-interp` | in-process; the oracle | **working** — full Core IR (arithmetic, `if`/`match`, recursion, currying, aggregates, `perform`/effects, contracts/Tier-1) plus a deterministic `Http` request/response test host |
-| Cranelift (native) | `marv-codegen-cl` | **JIT** (in-process) | **working** for the integer/boolean subset + heap-boxed aggregates/enums (MARV-9) + `List[T]` growable storage (MARV-42) + string manipulation (MARV-43) + arena reclamation for scalar-carried loop temporaries; AOT object/executable emission is roadmap |
+| Cranelift (native) | `marv-codegen-cl` | **JIT** (in-process), AOT `.o`, linked executable | **working** for the integer/boolean subset + heap-boxed aggregates/enums (MARV-9) + `List[T]` growable storage (MARV-42) + string manipulation (MARV-43) + arena reclamation for scalar-carried loop temporaries; AOT object/executable builds are working for backend-supported reachable closures (MARV-68) |
 | WebAssembly | `marv-codegen-wasm` | core `.wasm` module | **working** for the integer/boolean subset + growable linear-memory aggregates/enums (MARV-9) + `List[T]` growable storage (MARV-42) + string manipulation (MARV-43) + arena reclamation for scalar-carried loop temporaries + capabilities-as-host-imports; component/WIT packaging is roadmap |
 | LLVM (release) | `marv-codegen-llvm` | — | **stub** (roadmap — optimized release builds via `inkwell`) |
 
@@ -26,8 +26,12 @@ scalars at 64-bit width so they match the oracle exactly. Constructs they don't 
 (first-class closures, floats) return an honest `unsupported` rather than emitting wrong code — and
 land in *both* backends together so agreement is preserved. A definition the entry never reaches
 doesn't block a build: `marv build` compiles only the entry's transitive closure (MARV-8), so a
-module can mix supported and not-yet-supported functions. The WASM backend additionally lowers
-`perform` to a host-import call.
+module can mix supported and not-yet-supported functions. Native AOT uses the same reachable
+closure and lowering rules, then writes either a deterministic object (`--emit object`) or links
+that object with a small runtime wrapper (`--out app`). The current executable wrapper is for
+pure/value entries with up to four integer arguments; reachable capability `perform` code still
+fails clearly before artifact emission. The WASM backend additionally lowers `perform` to a
+host-import call.
 
 ## Capabilities across hosts
 
@@ -64,3 +68,5 @@ module can mix supported and not-yet-supported functions. The WASM backend addit
   solver-dependent tests skip rather than fail.
 - **wasmtime** is a dev-dependency (the WASM differential tests run modules under it); not
   needed at runtime for `marv` itself.
+- **cc** on `PATH` is needed only when `marv build --out app` links a native executable.
+  `marv build --emit object` can emit the relocatable object without a C linker.

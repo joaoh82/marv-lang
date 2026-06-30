@@ -17,7 +17,10 @@ mod pipeline;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, Read, Write};
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::process::ExitCode;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use marv_codegen_cl as codegen;
 use marv_codegen_wasm as wasm;
@@ -45,11 +48,13 @@ COMMANDS:
                                non-zero if any input is not already canonical.
     check <file>               Type / effect / capability check a `.mv` source
                                file or a `.core.json` Core-IR snapshot.
-    build [--target T] [--run] [--release] [--out PATH] [--entry NAME] <file> [args...]
+    build [--target T] [--run] [--release] [--emit object|exe] [--out PATH] [--entry NAME] <file> [args...]
                                Compile. Refuses to build a file that fails
                                `check`. Targets: `native-cranelift` (default;
                                --run JIT-executes the entry and prints its
-                               integer result) and `wasm-component` (writes a
+                               integer result; --out writes a linked native
+                               executable; --emit object writes a relocatable
+                               object) and `wasm-component` (writes a
                                .wasm module to --out, default <file>.wasm, and
                                reports the host imports = capabilities it needs).
                                Only definitions reachable from the entry
@@ -725,14 +730,15 @@ fn qualify_name(module_path: &str, name: &str) -> String {
 
 // ---- build --------------------------------------------------------------
 
-/// `marv build [--target T] [--run] [--out PATH] [--entry NAME] <file>` —
+/// `marv build [--target T] [--run] [--emit object|exe] [--out PATH]
+/// [--entry NAME] <file>` —
 /// check, then compile with the selected backend.
 ///
-/// Targets: `native-cranelift` (Cranelift JIT; `--run` executes it) and
-/// `wasm-component` (a WebAssembly module written to `--out`, default
-/// `<file>.wasm`). Both refuse code that fails `check`, and both compile only
-/// the definitions reachable from the entry (MARV-8) — `commit`/audit flows
-/// keep operating on every definition.
+/// Targets: `native-cranelift` (Cranelift JIT; `--run` executes it; `--out` /
+/// `--emit` writes AOT artifacts) and `wasm-component` (a WebAssembly module
+/// written to `--out`, default `<file>.wasm`). Both refuse code that fails
+/// `check`, and both compile only the definitions reachable from the entry
+/// (MARV-8) — `commit`/audit flows keep operating on every definition.
 fn cmd_build(args: &[String]) -> ExitCode {
     let inv = match parse_invocation(args) {
         Ok(i) => i,
@@ -804,6 +810,29 @@ fn build_native_pinned(inv: &Invocation, file: &str, pinned: &PinnedProgram) -> 
     let opts = codegen::Options {
         bounds_checks: !inv.release,
     };
+    let emit_kind = match native_emit_kind(inv) {
+        Ok(kind) => kind,
+        Err(e) => {
+            eprintln!("marv build: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    if let Some(kind) = emit_kind {
+        let artifact = match codegen::emit_hashed_object_reachable(
+            &pinned.defs_for_backend(),
+            &pinned.aliases,
+            &pinned.world,
+            &opts,
+            &inv.entry,
+        ) {
+            Ok(a) => a,
+            Err(e) => {
+                eprintln!("marv build: {e}");
+                return ExitCode::FAILURE;
+            }
+        };
+        return emit_native_artifact(inv, file, &artifact, kind, true);
+    }
     let jit = match codegen::compile_hashed_reachable(
         &pinned.defs_for_backend(),
         &pinned.aliases,
@@ -889,11 +918,35 @@ fn build_wasm_pinned(inv: &Invocation, file: &str, pinned: &PinnedProgram) -> Ex
     ExitCode::SUCCESS
 }
 
-/// Cranelift backend: JIT-compile, and with `--run` execute the entry point.
+/// Cranelift backend: JIT-compile/run by default, or emit AOT artifacts when
+/// `--out`/`--emit` requests them.
 fn build_native(inv: &Invocation, file: &str, loaded: &Loaded) -> ExitCode {
     let opts = codegen::Options {
         bounds_checks: !inv.release,
     };
+    let emit_kind = match native_emit_kind(inv) {
+        Ok(kind) => kind,
+        Err(e) => {
+            eprintln!("marv build: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    if let Some(kind) = emit_kind {
+        let artifact = match codegen::emit_hashed_object_reachable(
+            &loaded.runtime_defs,
+            &loaded.runtime_aliases,
+            &loaded.world,
+            &opts,
+            &inv.entry,
+        ) {
+            Ok(a) => a,
+            Err(e) => {
+                eprintln!("marv build: {e}");
+                return ExitCode::FAILURE;
+            }
+        };
+        return emit_native_artifact(inv, file, &artifact, kind, false);
+    }
     // Compile only what the entry reaches (MARV-8): a sibling definition the
     // backend cannot lower yet must not block a build that never calls it.
     // Whole-module compilation remains the audit path (`compile_with`).
@@ -987,13 +1040,230 @@ fn build_wasm(inv: &Invocation, file: &str, loaded: &Loaded) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+#[derive(Clone, Copy)]
+enum NativeEmit {
+    Object,
+    Executable,
+}
+
+fn native_emit_kind(inv: &Invocation) -> Result<Option<NativeEmit>, String> {
+    if inv.run && (inv.out.is_some() || inv.emit.is_some()) {
+        return Err("--run cannot be combined with native --out/--emit AOT output".into());
+    }
+    match inv.emit.as_deref() {
+        Some("object") => Ok(Some(NativeEmit::Object)),
+        Some("exe") | Some("executable") => Ok(Some(NativeEmit::Executable)),
+        Some(other) => Err(format!(
+            "unsupported native --emit `{other}` (have `object`, `exe`)"
+        )),
+        None if inv.out.is_some() => Ok(Some(NativeEmit::Executable)),
+        None => Ok(None),
+    }
+}
+
+fn emit_native_artifact(
+    inv: &Invocation,
+    file: &str,
+    artifact: &codegen::AotObject,
+    kind: NativeEmit,
+    pinned: bool,
+) -> ExitCode {
+    match kind {
+        NativeEmit::Object => {
+            let out = inv.out.clone().unwrap_or_else(|| default_object_out(file));
+            if let Err(e) = std::fs::write(&out, &artifact.bytes) {
+                eprintln!("marv build: {out}: {e}");
+                return ExitCode::FAILURE;
+            }
+            let source = if pinned { " from pinned hashes" } else { "" };
+            eprintln!(
+                "marv build: {file}: wrote {out} ({} bytes){source} via native-cranelift object",
+                artifact.bytes.len()
+            );
+            ExitCode::SUCCESS
+        }
+        NativeEmit::Executable => {
+            let out = inv.out.clone().unwrap_or_else(|| default_exe_out(file));
+            match link_native_executable(&out, artifact) {
+                Ok(()) => {
+                    let source = if pinned { " from pinned hashes" } else { "" };
+                    eprintln!(
+                        "marv build: {file}: wrote {out}{source} via native-cranelift executable \
+                         (entry takes {} word argument(s))",
+                        artifact.entry_arity
+                    );
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("marv build: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+    }
+}
+
+fn link_native_executable(out: &str, artifact: &codegen::AotObject) -> Result<(), String> {
+    if artifact.entry_arity > 4 {
+        return Err(format!(
+            "native executable wrapper supports up to four entry arguments, got {}",
+            artifact.entry_arity
+        ));
+    }
+    let tmp = unique_temp_dir("marv-aot")?;
+    let obj = tmp.join("module.o");
+    let runtime = tmp.join("runtime.c");
+    std::fs::write(&obj, &artifact.bytes).map_err(|e| format!("{}: {e}", obj.display()))?;
+    std::fs::write(&runtime, native_runtime_c(artifact))
+        .map_err(|e| format!("{}: {e}", runtime.display()))?;
+    let status = Command::new("cc")
+        .arg(&obj)
+        .arg(&runtime)
+        .arg("-o")
+        .arg(out)
+        .status()
+        .map_err(|e| format!("failed to invoke cc for native executable link: {e}"))?;
+    let cleanup = std::fs::remove_dir_all(&tmp);
+    if !status.success() {
+        return Err(format!(
+            "cc failed while linking native executable `{out}` with status {status}"
+        ));
+    }
+    cleanup.map_err(|e| format!("cleanup {}: {e}", tmp.display()))?;
+    Ok(())
+}
+
+fn native_runtime_c(artifact: &codegen::AotObject) -> String {
+    let entry = &artifact.entry_symbol;
+    let params = (0..artifact.entry_arity)
+        .map(|i| format!("int64_t a{i}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let args = (0..artifact.entry_arity)
+        .map(|i| format!("argv_i64[{i}]"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        r#"#include <errno.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+
+static int64_t **marv_heap = 0;
+static int64_t marv_heap_len = 0;
+static int64_t marv_heap_cap = 0;
+
+int64_t marv_rt_alloc(int64_t n_words) {{
+    if (n_words < 0) n_words = 0;
+    int64_t *buf = (int64_t *)calloc((size_t)n_words, sizeof(int64_t));
+    if (!buf) {{
+        fprintf(stderr, "marv: allocation failed\n");
+        abort();
+    }}
+    if (marv_heap_len == marv_heap_cap) {{
+        int64_t next = marv_heap_cap ? marv_heap_cap * 2 : 64;
+        int64_t **grown = (int64_t **)realloc(marv_heap, (size_t)next * sizeof(int64_t *));
+        if (!grown) {{
+            fprintf(stderr, "marv: runtime heap tracking failed\n");
+            abort();
+        }}
+        marv_heap = grown;
+        marv_heap_cap = next;
+    }}
+    marv_heap[marv_heap_len++] = buf;
+    return (int64_t)(intptr_t)buf;
+}}
+
+int64_t marv_rt_heap_mark(void) {{
+    return marv_heap_len;
+}}
+
+void marv_rt_heap_reset(int64_t mark) {{
+    if (mark < 0) mark = 0;
+    if (mark > marv_heap_len) mark = marv_heap_len;
+    for (int64_t i = mark; i < marv_heap_len; i++) {{
+        free(marv_heap[i]);
+    }}
+    marv_heap_len = mark;
+}}
+
+void marv_rt_bounds_fail(int64_t index, int64_t len) {{
+    fprintf(stderr, "marv: bounds check failed: index %lld out of range for length %lld (Tier 1)\n",
+            (long long)index, (long long)len);
+    abort();
+}}
+
+extern int64_t {entry}({params});
+
+static int parse_i64(const char *s, int64_t *out) {{
+    errno = 0;
+    char *end = 0;
+    long long v = strtoll(s, &end, 10);
+    if (errno || !end || *end != 0) return 0;
+    *out = (int64_t)v;
+    return 1;
+}}
+
+int main(int argc, char **argv) {{
+    if (argc - 1 != {arity}) {{
+        fprintf(stderr, "marv: entry expects {arity} integer argument(s), got %d\n", argc - 1);
+        return 2;
+    }}
+    int64_t argv_i64[4] = {{0, 0, 0, 0}};
+    for (int i = 0; i < argc - 1; i++) {{
+        if (!parse_i64(argv[i + 1], &argv_i64[i])) {{
+            fprintf(stderr, "marv: argument %d `%s` is not an integer\n", i, argv[i + 1]);
+            return 2;
+        }}
+    }}
+    int64_t result = {entry}({args});
+    marv_rt_heap_reset(0);
+    printf("%lld\n", (long long)result);
+    return 0;
+}}
+"#,
+        arity = artifact.entry_arity,
+    )
+}
+
+fn unique_temp_dir(prefix: &str) -> Result<PathBuf, String> {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| format!("system clock before epoch: {e}"))?
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!("{prefix}-{}-{nanos}", std::process::id()));
+    std::fs::create_dir(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    Ok(dir)
+}
+
 /// Default `.wasm` output path: the input file with its extension replaced.
 fn default_wasm_out(file: &str) -> String {
-    let base = file
-        .strip_suffix(".core.json")
-        .or_else(|| file.strip_suffix(".mv"))
-        .unwrap_or(file);
+    let base = input_base(file);
     format!("{base}.wasm")
+}
+
+fn default_object_out(file: &str) -> String {
+    let base = input_base(file);
+    format!("{base}.o")
+}
+
+fn default_exe_out(file: &str) -> String {
+    let base = input_base(file);
+    if cfg!(windows) {
+        format!("{base}.exe")
+    } else {
+        base.to_string()
+    }
+}
+
+fn input_base(file: &str) -> &str {
+    Path::new(file)
+        .to_str()
+        .and_then(|p| {
+            p.strip_suffix(".core.json")
+                .or_else(|| p.strip_suffix(".mv"))
+        })
+        .unwrap_or(file)
 }
 
 fn join_exports(exports: &[wasm::ExportInfo]) -> String {
@@ -1094,13 +1364,16 @@ struct Invocation {
     grant: Vec<String>,
     /// Output path for `build` artifacts (`--out`/`-o`); defaults per target.
     out: Option<String>,
+    /// Native artifact kind (`object` or `exe`) requested by `build`.
+    emit: Option<String>,
     /// Content store to resolve imports/build dependencies from.
     store_dir: Option<String>,
     file: Option<String>,
     args: Vec<String>,
 }
 
-/// Parse `[--target T] [--run] [--entry NAME] [--grant LIST] <file> [args...]`.
+/// Parse `[--target T] [--run] [--emit KIND] [--entry NAME] [--grant LIST]
+/// <file> [args...]`.
 /// The first non-flag operand is the file; everything after it is passed
 /// through as program arguments.
 fn parse_invocation(args: &[String]) -> Result<Invocation, String> {
@@ -1111,6 +1384,7 @@ fn parse_invocation(args: &[String]) -> Result<Invocation, String> {
         entry: String::new(),
         grant: Vec::new(),
         out: None,
+        emit: None,
         store_dir: None,
         file: None,
         args: Vec::new(),
@@ -1131,6 +1405,7 @@ fn parse_invocation(args: &[String]) -> Result<Invocation, String> {
             "--run" => inv.run = true,
             "--release" => inv.release = true,
             "--target" => inv.target = take_value(args, &mut i, "--target")?,
+            "--emit" => inv.emit = Some(take_value(args, &mut i, "--emit")?),
             "--out" | "-o" => inv.out = Some(take_value(args, &mut i, "--out")?),
             "--store" => inv.store_dir = Some(take_value(args, &mut i, "--store")?),
             "--entry" => inv.entry = take_value(args, &mut i, "--entry")?,

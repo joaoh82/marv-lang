@@ -15,7 +15,7 @@ marv <command> [args]
 |---------|--------|-------------|
 | `fmt`    | **working** (M0+, parse-and-reprint for the implemented surface) | Canonicalize marv source. |
 | `check`  | **working** (M2) | Type / effect / capability / error-set / reference / linearity checking. |
-| `build`  | **working** (M4 `native-cranelift`, M5 `wasm-component`, MARV-14 pinned store) | Compile a target: Cranelift JIT or a WebAssembly module. |
+| `build`  | **working** (M4 `native-cranelift`, M5 `wasm-component`, MARV-14 pinned store, MARV-68 native AOT) | Compile a target: Cranelift JIT/AOT or a WebAssembly module. |
 | `run`    | **working** (M4, MARV-14 pinned store) | Interpret an entry point with an explicit capability grant set. |
 | `resolve-impl` | **working** (MARV-5) | Report each generic instantiation and which coherent `impl` its bounded type arguments select. |
 | `verify` | **working** (M6, Tier 2) | Discharge `requires`/`ensures` contracts via SMT. |
@@ -153,7 +153,7 @@ marv run examples/hello.mv                              # refused: capability `I
 ## `marv build`
 
 ```
-marv build [--target T] [--run] [--release] [--store DIR] [--out PATH] [--entry NAME] <file> [args...]
+marv build [--target T] [--run] [--release] [--store DIR] [--emit object|exe] [--out PATH] [--entry NAME] <file> [args...]
 ```
 
 Compiles with the selected backend. Like `run`, it first runs `check` and
@@ -182,7 +182,12 @@ The entry resolves as for `run`: `--entry NAME` (bare or qualified), else
 - **`--target`** — `native-cranelift` (default) or `wasm-component`. LLVM is a
   later milestone. Unknown targets are rejected.
 - **`--run`** *(native only)* — after compiling, JIT-executes the entry point and
-  prints its integer result. Without it, `build` reports success and the arity.
+  prints its integer result. It cannot be combined with native AOT output flags.
+  Without `--run`, `--out`, or `--emit`, `build` reports success and the arity.
+- **`--emit object|exe`** *(native only)* — `object` writes the deterministic
+  relocatable object for the entry's reachable closure; `exe` links that object
+  with the small native runtime wrapper. For native builds, `--out` without
+  `--emit` means `--emit exe`.
 - **`--release`** — omit the Tier-1 debug checks from the compiled artifact.
   Today that is the runtime **bounds check** (MARV-34): debug builds (the
   default) abort on an array/slice subscript outside `0..len` — Cranelift with a
@@ -190,8 +195,8 @@ The entry resolves as for `run`: `--entry NAME` (bare or qualified), else
   builds emit the unchecked pre-MARV-34 code. The interpreter (`marv run`) is
   the debug runner and always checks. See
   [run-and-codegen.md](run-and-codegen.md).
-- **`--out PATH`** *(wasm only)* — where to write the `.wasm` module (default
-  `<file>.wasm`).
+- **`--out PATH`** — where to write the artifact. Defaults are `<file>` for a
+  native executable, `<file>.o` for a native object, and `<file>.wasm` for wasm.
 - **`--store DIR`** — resolve known imports through `DIR/lockfile.json`, fetch
   their transitive closure from `DIR/blobs/b3/`, and compile Core whose calls
   are keyed by pinned dag hashes. Missing blobs are hard errors. For packages,
@@ -201,12 +206,30 @@ The entry resolves as for `run`: `--entry NAME` (bare or qualified), else
 
 ### `--target native-cranelift`
 
-Cranelift JIT (`marv-codegen-cl`).
+Cranelift (`marv-codegen-cl`) has two modes:
+
+- **JIT**: `--run` executes the entry in-process and prints its integer result.
+- **AOT**: `--emit object` writes a relocatable object, and `--out` /
+  `--emit exe` links a host executable that can run without `marv`.
+
+The object exports content-hashed marv symbols and imports the small runtime ABI
+(`marv_rt_alloc`, `marv_rt_heap_mark`, `marv_rt_heap_reset`, and, for debug
+bounds checks, `marv_rt_bounds_fail`). The CLI executable path links those hooks
+with a generated C wrapper. Today that wrapper supports entries with up to four
+integer value arguments and prints the integer result; richer host integration
+for capabilities stays with the interpreter/WASM host story for now.
 
 ```sh
 marv build examples/factorial.mv                              # compiles, reports success
 marv build --run examples/factorial.mv --entry factorial 6    # prints 720
+marv build examples/factorial.mv --entry factorial --out factorial
+./factorial 6                                                  # prints 720
+marv build --emit object examples/factorial.mv --entry factorial -o factorial.o
 ```
+
+If the reachable closure needs a construct the backend cannot lower, such as a
+capability `perform`, native AOT fails with the same clear backend error as the
+JIT path and does not leave a partial artifact.
 
 ### `--target wasm-component`
 

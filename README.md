@@ -67,6 +67,8 @@ marv fmt examples/factorial.mv                      # canonical form (the parser
 marv check examples/factorial.mv                    # type / effect / capability / error / linearity
 marv run examples/factorial.mv --entry factorial 6  # 720  (tree-walking interpreter — the oracle)
 marv build --run examples/factorial.mv --entry factorial 6   # 720  (Cranelift JIT)
+marv build examples/factorial.mv --entry factorial --out factorial && ./factorial 6
+marv build --emit object examples/factorial.mv --entry factorial -o factorial.o
 marv build --target wasm-component examples/factorial.mv -o factorial.wasm
 marv verify examples/clamp.mv                       # proved  (Tier-2 SMT) — or a counterexample
 marv commit examples/clamp.mv                       # freeze into the content-addressed store
@@ -96,7 +98,7 @@ cd web && python3 -m http.server 8087   # open http://localhost:8087/
 | `marv fmt [--write\|--check] [files…]` | Canonicalize source. The formatter is the parser's inverse — exactly one form per program. |
 | `marv check <file>` | Type / effect / capability / error-set / reference / linearity checks over the discovered source module set; fix-carrying diagnostics. |
 | `marv run [--grant CAP,…] [--entry NAME] <file> [args…]` | Interpret an entry point (the semantics oracle), including discovered source imports. Capabilities enter only via `--grant`. |
-| `marv build [--target native-cranelift\|wasm-component] [--run] [--release] [--store DIR] [--out PATH] [--entry NAME] <file>` | Compile via Cranelift (JIT, `--run` to execute) or to a WebAssembly module. Only definitions reachable from the entry are compiled (MARV-8). With `--store`, imports/deps are fetched from pinned dag hashes. Debug builds (default) carry the Tier-1 bounds check; `--release` omits it. |
+| `marv build [--target native-cranelift\|wasm-component] [--run] [--release] [--emit object\|exe] [--store DIR] [--out PATH] [--entry NAME] <file>` | Compile via Cranelift (JIT `--run`, AOT object/executable output) or to a WebAssembly module. Only definitions reachable from the entry are compiled (MARV-8). With `--store`, imports/deps are fetched from pinned dag hashes. Debug builds (default) carry the Tier-1 bounds check; `--release` omits it. |
 | `marv verify [--def NAME] <file>` | Discharge `requires`/`ensures` contracts via SMT: `proved` / `failed` (with a counterexample) / `unsupported` (→ runtime fallback). |
 | `marv commit [--store DIR] <file>` | Freeze discovered definitions into the content-addressed store; report the lockfile delta (new vs. already-reviewed). |
 | `marv store audit/gc [--store DIR]` | Inspect provenance/reachability or remove blobs unreachable from the lockfile. |
@@ -136,7 +138,7 @@ crates/
   marv-types/        type / effect / capability / error-set / reference / linearity checker
   marv-db/           salsa incremental query database (the protocol's backbone)
   marv-verify/       SMT contract discharge (z3 via easy-smt) for the verified subset
-  marv-codegen-cl/   Cranelift backend (native, JIT today)
+  marv-codegen-cl/   Cranelift backend (native JIT + AOT object/executable)
   marv-codegen-llvm/ LLVM backend (stub — release builds, future)
   marv-codegen-wasm/ WebAssembly backend (capabilities as host imports)
   marv-interp/       tree-walking interpreter (the semantics oracle)
@@ -185,9 +187,9 @@ and local path dependencies, `marv/openPackage` opens those packages for agents,
 and the content store supports
 lockfile-pinned cross-module builds by hash. MARV-48's first application-language
 wave is complete; the remaining post-MARV-48 roadmap covers host-backed socket serving beyond the
-deterministic listener harness, executable host FFI bindings, AOT/component packaging, and deeper verification. The
+deterministic listener harness, executable host FFI bindings, WASM component packaging, LLVM release builds, and deeper verification. The
 full backlog (surface growth → backend breadth → verification breadth →
-application runtime → AOT/LLVM → self-hosting) — with phases, ordering, and the
+application runtime → packaging/LLVM → self-hosting) — with phases, ordering, and the
 dependency graph — is in
 [`docs/roadmap.md`](docs/roadmap.md), mapped to the `MARV-#` tasks in the project tracker.
 

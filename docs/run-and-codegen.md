@@ -7,7 +7,8 @@ canonical Core IR (`spec/02` §C):
   is the reference meaning of a program and is kept permanently as the thing the
   native backends are tested against.
 - **`marv-codegen-cl`** — a **Cranelift** backend that JIT-compiles Core to
-  native code (`spec/01` §9 — "same Core IR feeds both").
+  native code and can also emit AOT object/executable artifacts (`spec/01` §9
+  — "same Core IR feeds both").
 
 The acceptance gate for M4 is that the two **agree** on a corpus of programs,
 plus one program that *fails to compile* because it uses a capability absent
@@ -85,10 +86,28 @@ Every scalar lives in a 64-bit register in *both* backends, so their wrapping
 arithmetic matches — the property that makes the differential test meaningful.
 Constructs the Cranelift backend cannot lower (`perform` — now expressible from
 source, MARV-6, and lowered by the WASM backend — first-class closures, floats)
-are interpreted where
-the interpreter can, and Cranelift returns an honest `unsupported` rather than
-emitting wrong code. New constructs land in *both* backends together so agreement
-is preserved.
+are interpreted where the interpreter can, and Cranelift returns an honest
+`unsupported` rather than emitting wrong code. Native AOT uses that same lowering
+path, so an unsupported reachable construct fails before any object or linked
+executable is written. New constructs land in *both* backends together so
+agreement is preserved.
+
+### Cranelift AOT objects and executables (MARV-68)
+
+`marv build --emit object` emits a relocatable native object for the entry's
+reachable closure. Function symbols are derived from content hashes, the module
+name is fixed, and repeated builds of the same checked source produce identical
+object bytes on the same host target. The object imports the small runtime ABI:
+`marv_rt_alloc`, `marv_rt_heap_mark`, `marv_rt_heap_reset`, and, in debug builds,
+`marv_rt_bounds_fail`.
+
+`marv build --out app` (or `--emit exe --out app`) links that object with a
+generated C runtime wrapper. The wrapper supplies the allocation/arena hooks,
+parses up to four integer entry arguments, calls the selected entry, resets the
+runtime heap, and prints the integer result. This is intentionally still a
+backend-supported pure/value entrypoint story: capability-hosted programs should
+use `marv run --grant ...` or the WASM host-import model until the production
+native host runtime grows a capability ABI.
 
 ### Reachability-pruned builds (MARV-8)
 
