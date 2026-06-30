@@ -1,0 +1,38 @@
+mod json_dom
+import std.io (Alloc)
+import std.json (Json, parse_json, serialize_json, json_as_bool, json_as_number, json_as_string, json_array_len, json_array_get_or, json_object_get_or, json_empty_array, json_empty_object, json_array_push, json_object_insert)
+
+fn choose(flag: bool, yes: i64, no: i64) -> i64 {
+    if flag {
+        yes
+    } else {
+        no
+    }
+}
+
+fn parse_config(alloc: Alloc) -> !i64 {
+    let config: Json = parse_json(alloc, "{\"service\":\"api\",\"enabled\":true,\"limits\":[7,9]}")?
+    let limits: Json = json_object_get_or(config, "limits", json_empty_array(alloc))
+    let first_limit: i64 = json_as_number(json_array_get_or(limits, 0, Json.Number(0)), 0)
+    let service: str = json_as_string(json_object_get_or(config, "service", Json.String("")), "")
+    let enabled: bool = json_as_bool(json_object_get_or(config, "enabled", Json.Bool(false)), false)
+    var score: i64 = (first_limit + (len(service) as i64))
+    score = (score + ((json_array_len(limits) as i64) * 10))
+    choose(enabled, (score + 100), score)
+}
+
+fn response_text(alloc: Alloc) -> str {
+    var limits: Json = json_empty_array(alloc)
+    limits = json_array_push(alloc, limits, Json.Number(7))
+    limits = json_array_push(alloc, limits, Json.Number(9))
+    var response: Json = json_empty_object(alloc)
+    response = json_object_insert(alloc, response, "service", Json.String("api"))
+    response = json_object_insert(alloc, response, "enabled", Json.Bool(true))
+    response = json_object_insert(alloc, response, "limits", limits)
+    serialize_json(alloc, response)
+}
+
+fn response_score(alloc: Alloc) -> i64 {
+    let text: str = response_text(alloc)
+    (((text[0] as i64) + (text[(len(text) - 1)] as i64)) + (len(text) as i64))
+}

@@ -170,7 +170,7 @@ explicit-`Alloc` growable operations, explicit-allocation `List`/`Set`/`Map`
 collection literals, `std.collections.Map[K, V]` / `Set[T]` with string-key
 compatibility plus scalar `i64` hash-backed operations, a first `std.iter.Iter[T]`
 protocol-backed iterator wrapper, `std.bytes` byte-slice and UTF-8 helpers,
-`std.json` scalar/flat-object parsing and serialization,
+`std.json` scalar/flat-object plus recursive/materialized JSON parsing and serialization,
 the first `std.http` request/response helper layer over explicit `Http` authority,
 an explicit HTTP listener/router surface (`Net.listen` → `Listener.accept_http` → `Http.respond`),
 the first `std.spawn` scoped task-handle layer over explicit `Spawn` authority,

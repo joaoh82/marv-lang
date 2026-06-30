@@ -124,6 +124,7 @@ fn interp_i64(
             | "map_set.mv"
             | "bytes_utf8.mv"
             | "json.mv"
+            | "json_dom.mv"
             | "app_tokenizer.mv"
             | "app_router.mv"
             | "app_invoice_summary.mv"
@@ -404,6 +405,10 @@ fn corpus_cases() -> Vec<(&'static str, &'static str, Vec<i64>, i64)> {
         // JSON first slice (MARV-55): deterministic scalar serialization with
         // explicit Alloc; parser/error paths are interpreter-smoked separately.
         ("json.mv", "exercise", vec![], 280),
+        // Recursive/materialized JSON DOM (MARV-66): deterministic construction
+        // and serialization of nested array/object values. Parse/error paths
+        // stay interpreter/check covered until raise lowering reaches WASM.
+        ("json_dom.mv", "exercise", vec![], 379),
         // MARV-40 app examples: app-shaped string/list programs with explicit
         // Alloc, pinned across interpreter, Cranelift, and WASM.
         ("app_tokenizer.mv", "main", vec![], 310),

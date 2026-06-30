@@ -255,6 +255,7 @@ the results are equal to each other and to a hand-computed golden value:
 | `slices.mv`     | runtime-length slices `[]T`: construct (array→slice), `len`/index, a `Core::IndexSet` element store over a runtime length, and `total` over a slice of structs (`sales[i].amount`) — MARV-33; `for x in s` over a slice and over a slice of structs, nested `for`s (depth-keyed index names), and sequential `for`s — MARV-20 |
 | `iter.mv`       | `std.iter.IndexIter[i64]` over a `List[i64]`; `for x in it` lowers through the `Iter[i64]` protocol wrappers instead of direct `len`/index — MARV-52 |
 | `json.mv`       | `std.json` first slice: scalar serialization with explicit `Alloc` runs three-way; parser/typed-error paths are interpreter-smoked — MARV-55 |
+| `json_dom.mv`   | `std.json` recursive/materialized DOM: backend-safe nested construction + deterministic serialization run three-way; recursive parse/error paths are interpreter/check covered until raise lowering reaches WASM — MARV-66 |
 
 Both differential harnesses also carry an **out-of-bounds corpus** (MARV-34):
 slice reads at `len` and at `-1`, a slice store at `len`, and an array read at

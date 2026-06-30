@@ -41,7 +41,7 @@ where each one sits and what must land first. Each task references back here.
 | ~~**MARV-52** real `Iter[T]` protocol~~ ✅ done — adds `std.iter.IndexIter[T]`, `Iter[T]`, generic `iter_len`/`iter_get` wrappers, and a protocol-backed `for` path for `IndexIter[i64]` while preserving direct indexed fast paths | 6 · Surface/stdlib | ~~MARV-42~~ ✅ | ~~MARV-50~~ ✅ | medium |
 | ~~**MARV-53** HTTP/server runtime capability + host ABI~~ ✅ done — adds an explicit `Http` request capability, `std.http` `Request`/`Response` helpers, a deterministic interpreter request host (`POST /echo`, body `marv-http-echo`), a `http_echo` example, and core-WASM capability imports that can return string handles. Honest residue: production listener/accept loops, streaming/raw bodies, and exact close-once lifecycle safety remain tied to MARV-27/MARV-10 and later std work. | 6 · Runtime/capabilities | ~~MARV-49~~ ✅, ~~MARV-54~~ ✅, MARV-27 *(for linear resource safety)* | MARV-10, MARV-27, 55 | high |
 | ~~**MARV-54** bytes + UTF-8 stdlib utilities~~ ✅ done | 6 · Std/runtime | ~~MARV-42~~ ✅, ~~MARV-43~~ ✅ | 53, 55 | high |
-| ~~**MARV-55** JSON + serialization stdlib~~ ✅ done — first scalar/source-backed flat-object slice with typed `JsonError`, explicit-`Alloc` scalar/string serialization, interpreter parse/error smoke coverage, and backend parity for serializer-safe paths; recursive/materialized JSON remains tied to MARV-59/MARV-61 | 6 · Std/app data | ~~MARV-54~~ ✅, ~~MARV-50~~ ✅ | 53, 59, 61 | medium |
+| ~~**MARV-55** JSON + serialization stdlib~~ ✅ done — first scalar/source-backed flat-object slice with typed `JsonError`, explicit-`Alloc` scalar/string serialization, interpreter parse/error smoke coverage, and backend parity for serializer-safe paths; recursive/materialized JSON landed later in MARV-66 | 6 · Std/app data | ~~MARV-54~~ ✅, ~~MARV-50~~ ✅ | 53, 59, 61 | medium |
 | ~~**MARV-56** capability-gated structured concurrency (`Spawn`)~~ ✅ done — first slice adds `std.io.Spawn`, `std.spawn.TaskI64` as a linear scoped handle, `spawn_i64`/`join_i64`, interpreter host-effect recording, boundary grant enforcement, and checker rejection for detached/unjoined task handles; channels/generic task results/true parallel scheduling remain follow-ups | 6 · Runtime/capabilities | — | — | medium |
 | ~~**MARV-57** `unsafe`/FFI surface + `unsafeSites` audit query~~ ✅ done — first slice adds `unsafe fn` parsing/formatting, required `/// SAFETY:` justifications, `marv/unsafeSites`, MCP exposure, and store-audit unsafe-site metadata outside Core identity; raw pointer/FFI operations remain staged follow-ups | 6 · Audit/escape hatch | ~~MARV-12~~ ✅ | — | medium |
 | ~~**MARV-58** early `return` inside loop bodies~~ ✅ done | 6 · Surface/control flow | ~~MARV-21~~ ✅ | — | low |
@@ -52,7 +52,7 @@ where each one sits and what must land first. Each task references back here.
 | ~~**MARV-63** production HTTP listener/router runtime~~ ✅ done — adds `Listener.accept_http() -> !Http`, a runnable `examples/http_router.mv` with two routes and a JSON response, deterministic interpreter support for `Net.listen` → `Listener.accept_http` → `Http.respond`, and docs that keep raw/streaming bodies, multi-request scheduling, real OS socket serving, and WASM linear-resource import support honest as follow-ups. | 7 · Runtime/capabilities | ~~MARV-64~~ ✅ | — | high |
 | ~~**MARV-64** linear resource capabilities for files/listeners/connections~~ ✅ done — adds `linear interface` for capability resource handles, marks `File`, `Listener`, and `Conn` as close-once resources, and pins source diagnostics for forgotten close, double close, and branch-only close paths. Production listener loops remain MARV-63 | 7 · Runtime/capabilities | ~~MARV-56~~ ✅ | 63 | high |
 | ~~**MARV-65** raw FFI operations behind explicit unsafe audit boundaries~~ ✅ done — adds `unsafe extern fn` host FFI declarations with required `SAFETY:` justifications, canonical formatting, `marv/unsafeSites` / store-audit visibility, direct-call rejection from safe functions, and honest unsupported runtime/backend behavior until host symbol linking lands. Raw pointers/ABI-rich handles remain staged follow-ups. | 7 · Platform/unsafe | ~~MARV-57~~ ✅, ~~MARV-64~~ ✅ | — | medium |
-| **MARV-66** recursive/materialized JSON DOM with typed codecs | 7 · Std/app data | ~~MARV-55~~ ✅, ~~MARV-59~~ ✅, ~~MARV-61~~ ✅ | 63 | medium |
+| ~~**MARV-66** recursive/materialized JSON DOM with typed codecs~~ ✅ done — adds a list-backed recursive `Json` DOM (`Null`/`Bool`/`Number`/`String`/`Array`/`Object`), `JsonField`, nested parse from `str`/`[]u8`, deterministic `str`/byte serialization, typed lookup/extraction/build helpers, interpreter parse/error coverage, and three-way backend parity for serializer-safe construction paths. Honest residue: parser/error paths still rely on `raise`, so WASM coverage stays on reachable serializer entries until raise lowering lands. | 7 · Std/app data | ~~MARV-55~~ ✅, ~~MARV-59~~ ✅, ~~MARV-61~~ ✅ | 63 | medium |
 | **MARV-67** package manifest, dependency resolution, package-aware agent queries | 7 · Packages | ~~MARV-49~~ ✅, ~~MARV-14~~ ✅ | 71–74 | medium |
 | **MARV-68** Cranelift AOT object/executable builds | 7 · Backends | ~~MARV-8~~ ✅, ~~MARV-9~~ ✅ | 69 | medium |
 | **MARV-69** LLVM optimized release backend | 7 · Backends | 68 | — | medium |
@@ -271,7 +271,7 @@ discovery, bytes/UTF-8, the first HTTP request capability/host ABI slice, JSON,
 the first scoped `Spawn` task-handle slice, unsafe audit metadata, hash-backed
 scalar collection paths, and generic non-recursive ADT verification are now done.
 Post-MARV-48 work includes production server/listener runtime support, raw FFI
-operations, recursive/materialized JSON, and deeper verification.
+operations, package/query polish, and deeper verification.
 
 The first implementation wave kept scope narrow and is now complete; the next production
 wave is tracked by MARV-62 through MARV-74. Close-once resource capability safety landed in
@@ -349,9 +349,9 @@ builds)~~ ✅ and ~~MARV-12 (doc-comments + spans)~~ ✅ are both done — the t
   HTTP request capability/host ABI slice, JSON/serialization, loop-body early returns, and
   the first scoped `Spawn` task-handle slice, unsafe audit metadata, generic non-recursive ADT
   verification, scalar hash-backed `Map`/`Set` operations, MARV-64's linear resource
-  capability lifecycle slice, and MARV-63's listener-accepted HTTP router slice. Remaining
-  post-MARV-48 work covers host-backed multi-request HTTP serving, raw FFI operations,
-  recursive/materialized JSON, richer package metadata/query coverage, and broader verification.
+  capability lifecycle slice, MARV-63's listener-accepted HTTP router slice, and MARV-66's
+  recursive/materialized JSON DOM. Remaining post-MARV-48 work covers host-backed multi-request
+  HTTP serving, raw FFI execution/linking, richer package metadata/query coverage, and broader verification.
 
 ## How a task is meant to be picked up
 

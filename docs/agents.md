@@ -177,8 +177,8 @@ monomorphization, **capabilities & `perform` from source** (capability method ca
 `Perform`, `io.fs()` narrowing, inferred-and-checked effect rows), and `requires`/`ensures`
 contracts. Local source imports are discoverable by the CLI, and source-only
 JSON-RPC snapshots can be checked as a module set. `std.bytes` provides UTF-8
-helpers, `std.json` provides the first scalar/source-backed flat-object parsing and
-serialization slice, `std.http` exposes the first host-provided request/response capability,
+helpers, `std.json` provides scalar/source-backed flat-object helpers plus a recursive
+materialized JSON DOM for nested parse/inspect/rebuild/serialize workflows, `std.http` exposes the first host-provided request/response capability,
 `std.io.Listener.accept_http` exposes a listener-accepted HTTP exchange for one router turn,
 `std.spawn` exposes scoped linear task handles over explicit `Spawn`, `unsafe fn` audit metadata is
 queryable through `marv/unsafeSites`, and
@@ -186,8 +186,8 @@ explicit-allocation `List`/`Set`/`Map` collection literals plus `std.iter.IndexI
 implemented. `File`, `Listener`, and `Conn` are now linear resource capabilities that must
 be closed exactly once. `unsafe extern fn` declarations now make raw host FFI boundaries
 auditable, while executing/linking host symbols remains a staged follow-up. Post-MARV-48
-roadmap work includes recursive/materialized JSON, host-backed multi-request HTTP serving,
-richer package metadata, and package-aware read queries. For
+roadmap work includes host-backed multi-request HTTP serving, richer package metadata,
+package-aware read queries, and deeper verification. For
 anything not yet expressible, construct a `*.core.json` snapshot (see
 [`store.md`](store.md) and the `tests/run/*.core.json` fixtures) or check
 [`roadmap.md`](roadmap.md).

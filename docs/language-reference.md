@@ -375,7 +375,6 @@ Everything still marked **[core]**/**[design]** above is tracked in the project
 tracker. Local source imports already lower/check/run/build as module sets, and
 the MARV-48 application-language wave has landed first slices for collections,
 iteration, bytes/UTF-8, JSON, HTTP, `Spawn`, unsafe audit metadata, and generic
-ADT verification. Post-MARV-48 work covers recursive/materialized JSON,
-production HTTP listener/router runtime,
+ADT verification. Post-MARV-48 work covers production HTTP listener/router runtime,
 raw FFI operations, richer package metadata/query coverage, and broader
 verification.

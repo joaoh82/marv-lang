@@ -166,26 +166,41 @@ fn decode_utf8(alloc: Alloc, bytes: []u8) -> !str
 fn encode_utf8(alloc: Alloc, text: str) -> List[u8]
 ```
 
-### `std/json.mv` — JSON scalar and flat-object support
-MARV-55 adds a first JSON/serialization slice in ordinary marv source. `JsonScalar` covers
-`null`, booleans, integer numbers, and strings. `JsonObject` is currently a validated
+### `std/json.mv` — JSON scalar, flat-object, and recursive DOM support
+MARV-55 added the first JSON/serialization slice in ordinary marv source. `JsonScalar` covers
+`null`, booleans, integer numbers, and strings. `JsonObject` remains a validated
 source-backed flat object: parsing checks object syntax and scalar field values, field lookup
 re-parses the requested scalar value, and `serialize_object` returns the validated source.
-This avoids pretending recursive `Json.Array` / materialized nested `Json.Object` values exist
-before the recursive-ADT and general map work lands. Parsing failures are typed `JsonError`
-values; string/number serialization takes explicit `Alloc` when it builds output text.
+MARV-66 adds a materialized recursive `Json` DOM with list-backed arrays and objects
+(`List[Json]` / `List[JsonField]`) so nested API/config payloads can be parsed, inspected,
+rebuilt, and serialized deterministically. Parsing failures are typed `JsonError` values;
+all parser/builder/serializer APIs that allocate take explicit `Alloc`.
 
 ```marv
 error JsonError { UnexpectedEnd, UnexpectedChar, ExpectedColon, ... }
 enum JsonScalar { Null, Bool(bool), Number(i64), String(str) }
+enum Json { Null, Bool(bool), Number(i64), String(str), Array(List[Json]), Object(List[JsonField]) }
 struct JsonObject { source: str }
+struct JsonField { key: str, value: Json }
 fn parse_scalar(alloc: Alloc, text: str) -> !JsonScalar
 fn parse_object(alloc: Alloc, text: str) -> !JsonObject
+fn parse_json(alloc: Alloc, text: str) -> !Json
+fn parse_json_bytes(alloc: Alloc, bytes: []u8) -> !Json
 fn object_get_or(alloc: Alloc, object: JsonObject, key: str, fallback: JsonScalar) -> !JsonScalar
+fn json_object_get_or(value: Json, key: str, fallback: Json) -> Json
+fn json_array_get_or(value: Json, index: usize, fallback: Json) -> Json
+fn json_object_insert(alloc: Alloc, value: Json, key: str, item: Json) -> Json
+fn json_array_push(alloc: Alloc, value: Json, item: Json) -> Json
 pure fn object_len(object: JsonObject) -> usize
 fn serialize_scalar(alloc: Alloc, value: JsonScalar) -> str
+fn serialize_json(alloc: Alloc, value: Json) -> str
+fn serialize_json_bytes(alloc: Alloc, value: Json) -> List[u8]
 pure fn serialize_object(object: JsonObject) -> str
 ```
+
+The recursive parser is runtime/Tier-1 today. Deterministic DOM construction and serialization
+are backend-safe and differentially tested in `tests/run/json_dom.mv`; raise-lowering still
+keeps parser error paths out of the WASM differential entry.
 
 ### `std/http.mv` — request/response
 `Http` is declared in `std/capabilities.mv`; `std.http` layers normal app-level

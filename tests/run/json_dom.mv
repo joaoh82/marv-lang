@@ -1,0 +1,74 @@
+mod json_dom
+import std.io (Alloc)
+import std.json (Json, parse_json, serialize_json, serialize_json_bytes, json_as_bool, json_as_number, json_as_string, json_array_len, json_object_len, json_array_get_or, json_object_get_or, json_empty_array, json_array_push, json_array_set, json_empty_object, json_object_insert)
+
+fn choose(flag: bool, yes: i64, no: i64) -> i64 {
+    if flag {
+        yes
+    } else {
+        no
+    }
+}
+
+fn parse_nested(alloc: Alloc) -> !i64 {
+    let doc: Json = parse_json(alloc, "{\"enabled\":true,\"users\":[{\"id\":7,\"tags\":[\"api\",\"prod\"]}]}")?
+    let users: Json = json_object_get_or(doc, "users", json_empty_array(alloc))
+    let first: Json = json_array_get_or(users, 0, json_empty_object(alloc))
+    let tags: Json = json_object_get_or(first, "tags", json_empty_array(alloc))
+    let tag: str = json_as_string(json_array_get_or(tags, 1, Json.String("")), "")
+    let enabled: bool = json_as_bool(json_object_get_or(doc, "enabled", Json.Bool(false)), false)
+    let id: i64 = json_as_number(json_object_get_or(first, "id", Json.Number(0)), 0)
+    var score: i64 = ((json_array_len(users) as i64) * 100)
+    score = (score + (json_object_len(first) as i64))
+    score = (score + id)
+    score = (score + (len(tag) as i64))
+    score = choose(enabled, (score + 1000), score)
+    score
+}
+
+fn build_response(alloc: Alloc) -> Json {
+    var tags: Json = json_empty_array(alloc)
+    tags = json_array_push(alloc, tags, Json.String("api"))
+    tags = json_array_push(alloc, tags, Json.String("old"))
+    tags = json_array_set(tags, 1, Json.String("prod"))
+    var user: Json = json_empty_object(alloc)
+    user = json_object_insert(alloc, user, "id", Json.Number(7))
+    user = json_object_insert(alloc, user, "tags", tags)
+    var users: Json = json_empty_array(alloc)
+    users = json_array_push(alloc, users, user)
+    var doc: Json = json_empty_object(alloc)
+    doc = json_object_insert(alloc, doc, "enabled", Json.Bool(true))
+    json_object_insert(alloc, doc, "users", users)
+}
+
+fn serialize_nested(alloc: Alloc) -> i64 {
+    let text: str = serialize_json(alloc, build_response(alloc))
+    var score: i64 = (len(text) as i64)
+    score = (score + (text[0] as i64))
+    score = (score + (text[(len(text) - 1)] as i64))
+    score
+}
+
+fn serialize_bytes_score(alloc: Alloc) -> i64 {
+    let bytes = serialize_json_bytes(alloc, Json.String("ok"))
+    (((len(bytes) as i64) * 10) + (bytes[0] as i64))
+}
+
+fn round_trip_nested(alloc: Alloc) -> !i64 {
+    let text: str = serialize_json(alloc, build_response(alloc))
+    let parsed: Json = parse_json(alloc, text)?
+    let users: Json = json_object_get_or(parsed, "users", json_empty_array(alloc))
+    let first: Json = json_array_get_or(users, 0, json_empty_object(alloc))
+    let tags: Json = json_object_get_or(first, "tags", json_empty_array(alloc))
+    let tag: str = json_as_string(json_array_get_or(tags, 1, Json.String("")), "")
+    ((json_as_number(json_object_get_or(first, "id", Json.Number(0)), 0) * 10) + (len(tag) as i64))
+}
+
+fn invalid_nested(alloc: Alloc) -> !i64 {
+    let value: Json = parse_json(alloc, "{\"users\":[{\"id\":7}")?
+    (json_object_len(value) as i64)
+}
+
+fn exercise(alloc: Alloc) -> i64 {
+    (serialize_nested(alloc) + serialize_bytes_score(alloc))
+}
