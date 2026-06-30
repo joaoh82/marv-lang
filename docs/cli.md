@@ -15,7 +15,7 @@ marv <command> [args]
 |---------|--------|-------------|
 | `fmt`    | **working** (M0+, parse-and-reprint for the implemented surface) | Canonicalize marv source. |
 | `check`  | **working** (M2) | Type / effect / capability / error-set / reference / linearity checking. |
-| `build`  | **working** (M4 `native-cranelift`, M5 `wasm-component`, MARV-14 pinned store, MARV-68 native AOT) | Compile a target: Cranelift JIT/AOT or a WebAssembly module. |
+| `build`  | **working** (M4 `native-cranelift`, M5 `wasm-component`, MARV-14 pinned store, MARV-68 native AOT, MARV-69 LLVM first slice) | Compile a target: Cranelift JIT/AOT, LLVM/clang native release-slice output, or a WebAssembly module. |
 | `run`    | **working** (M4, MARV-14 pinned store) | Interpret an entry point with an explicit capability grant set. |
 | `resolve-impl` | **working** (MARV-5) | Report each generic instantiation and which coherent `impl` its bounded type arguments select. |
 | `verify` | **working** (M6, Tier 2) | Discharge `requires`/`ensures` contracts via SMT. |
@@ -179,8 +179,8 @@ The entry resolves as for `run`: `--entry NAME` (bare or qualified), else
 `commit`/audit flows always operate on every discovered definition; pruning is a
 `build` behavior only.
 
-- **`--target`** — `native-cranelift` (default) or `wasm-component`. LLVM is a
-  later milestone. Unknown targets are rejected.
+- **`--target`** — `native-cranelift` (default), `native-llvm`, or
+  `wasm-component`. Unknown targets are rejected.
 - **`--run`** *(native only)* — after compiling, JIT-executes the entry point and
   prints its integer result. It cannot be combined with native AOT output flags.
   Without `--run`, `--out`, or `--emit`, `build` reports success and the arity.
@@ -230,6 +230,26 @@ marv build --emit object examples/factorial.mv --entry factorial -o factorial.o
 If the reachable closure needs a construct the backend cannot lower, such as a
 capability `perform`, native AOT fails with the same clear backend error as the
 JIT path and does not leave a partial artifact.
+
+### `--target native-llvm`
+
+`native-llvm` emits deterministic textual LLVM IR for the entry's reachable Core
+closure, then uses the host `clang` driver to optimize, run, or link it. It is
+the first MARV-69 release slice rather than full app-corpus parity: scalar
+arithmetic/casts, calls/recursion, `if`/`match`, `while`, early `return`, boxed
+structs/enums, arrays, and runtime-length slice element updates are covered.
+Capability `perform`, `raise`, list/map/set runtime operations, and string
+builder operations still report honest `unsupported` errors when reachable.
+
+```sh
+marv build --target native-llvm --run examples/factorial.mv --entry factorial 6
+marv build --target native-llvm examples/factorial.mv --entry factorial --out factorial-llvm
+./factorial-llvm 6
+```
+
+`--out` links an executable. Without `--run` or `--out`, the target checks and
+compiles the reachable closure and reports the entry arity. `--emit` is not
+defined for `native-llvm` yet.
 
 ### `--target wasm-component`
 

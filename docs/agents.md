@@ -50,7 +50,7 @@ Use as many as your harness supports:
 3. fmt (canonical form — never argue about style; there is exactly one)
 4. for each pure / verified-subset def: verify(def)
        on "failed": use the counterexample to repair, then re-verify
-5. build (--target native-cranelift | wasm-component; native can JIT-run or AOT emit) ; run with an explicit capability grant
+5. build (--target native-cranelift | native-llvm | wasm-component; native can JIT-run, AOT emit, or LLVM-run the release slice) ; run with an explicit capability grant
 6. commit (freeze hashes into the store + lockfile)
 ```
 
@@ -65,6 +65,7 @@ marv run <file> --grant Fs,Net --entry NAME    # inject ONLY these capabilities
 marv build --run <file> --entry NAME [args…]   # Cranelift JIT, then execute
 marv build <file> --entry NAME --out app       # Cranelift AOT executable
 marv build --emit object <file> -o app.o       # deterministic native object
+marv build --target native-llvm --run <file> --entry NAME [args…]
 marv build --target wasm-component <file> -o out.wasm
 marv verify <file> [--def NAME]                # SMT: proved / failed+counterexample / unsupported
 marv commit <file> [--store .marv]             # freeze into the content-addressed store

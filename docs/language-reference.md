@@ -316,9 +316,9 @@ definitions into the store. See [store.md](store.md).
 
 ## 9. Compilation targets
 
-Native via **Cranelift** (JIT plus AOT object/executable output) and
-**WebAssembly** (capabilities as host imports; component/WIT packaging is roadmap). An
-LLVM release backend remains roadmap. The
+Native via **Cranelift** (JIT plus AOT object/executable output), a first
+**LLVM** release slice (`native-llvm`, optimized through `clang`), and
+**WebAssembly** (capabilities as host imports; component/WIT packaging is roadmap). The
 tree-walking **interpreter** is the reference semantics oracle every backend is differentially
 tested against. See [run-and-codegen.md](run-and-codegen.md) and [platform-support.md](platform-support.md).
 
@@ -378,5 +378,5 @@ tracker. Local source imports already lower/check/run/build as module sets,
 the MARV-48 application-language wave has landed first slices for collections,
 iteration, bytes/UTF-8, JSON, HTTP, `Spawn`, unsafe audit metadata, and generic
 ADT verification. Post-MARV-48 work covers production HTTP listener/router runtime,
-raw FFI operations, WASM component packaging, LLVM release builds, self-hosting slices, and broader
+raw FFI operations, WASM component packaging, broader LLVM release coverage, self-hosting slices, and broader
 verification.

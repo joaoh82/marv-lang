@@ -23,6 +23,7 @@ use std::process::ExitCode;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use marv_codegen_cl as codegen;
+use marv_codegen_llvm as llvm;
 use marv_codegen_wasm as wasm;
 use marv_core::ir::{Def, DefKind, Hash, Type};
 use marv_interp::Program;
@@ -54,7 +55,9 @@ COMMANDS:
                                --run JIT-executes the entry and prints its
                                integer result; --out writes a linked native
                                executable; --emit object writes a relocatable
-                               object) and `wasm-component` (writes a
+                               object), `native-llvm` (uses clang/LLVM for
+                               optimized release-style native run/exe output),
+                               and `wasm-component` (writes a
                                .wasm module to --out, default <file>.wasm, and
                                reports the host imports = capabilities it needs).
                                Only definitions reachable from the entry
@@ -735,10 +738,11 @@ fn qualify_name(module_path: &str, name: &str) -> String {
 /// check, then compile with the selected backend.
 ///
 /// Targets: `native-cranelift` (Cranelift JIT; `--run` executes it; `--out` /
-/// `--emit` writes AOT artifacts) and `wasm-component` (a WebAssembly module
-/// written to `--out`, default `<file>.wasm`). Both refuse code that fails
-/// `check`, and both compile only the definitions reachable from the entry
-/// (MARV-8) — `commit`/audit flows keep operating on every definition.
+/// `--emit` writes AOT artifacts), `native-llvm` (LLVM IR via `clang` for the
+/// release slice), and `wasm-component` (a WebAssembly module written to `--out`,
+/// default `<file>.wasm`). All refuse code that fails `check`, and all compile
+/// only the definitions reachable from the entry (MARV-8) — `commit`/audit flows
+/// keep operating on every definition.
 fn cmd_build(args: &[String]) -> ExitCode {
     let inv = match parse_invocation(args) {
         Ok(i) => i,
@@ -779,11 +783,12 @@ fn cmd_build(args: &[String]) -> ExitCode {
         };
         return match inv.target.as_str() {
             "native-cranelift" => build_native_pinned(&inv, &file, &pinned),
+            "native-llvm" | "llvm" => build_llvm_pinned(&inv, &file, &pinned),
             "wasm-component" | "wasm" => build_wasm_pinned(&inv, &file, &pinned),
             other => {
                 eprintln!(
                     "marv build: unsupported target `{other}` (have `native-cranelift`, \
-                     `wasm-component`; LLVM is a later milestone)"
+                     `native-llvm`, `wasm-component`)"
                 );
                 ExitCode::FAILURE
             }
@@ -792,6 +797,7 @@ fn cmd_build(args: &[String]) -> ExitCode {
 
     match inv.target.as_str() {
         "native-cranelift" => build_native(&inv, &file, &loaded),
+        "native-llvm" | "llvm" => build_llvm(&inv, &file, &loaded),
         // `wasm-component` is the spec's name for the WASM target; today the
         // artifact is a core module (the component's substrate), with
         // capabilities as host imports per the component model (`spec/01` §9).
@@ -799,7 +805,7 @@ fn cmd_build(args: &[String]) -> ExitCode {
         other => {
             eprintln!(
                 "marv build: unsupported target `{other}` (have `native-cranelift`, \
-                 `wasm-component`; LLVM is a later milestone)"
+                 `native-llvm`, `wasm-component`)"
             );
             ExitCode::FAILURE
         }
@@ -918,6 +924,17 @@ fn build_wasm_pinned(inv: &Invocation, file: &str, pinned: &PinnedProgram) -> Ex
     ExitCode::SUCCESS
 }
 
+fn build_llvm_pinned(inv: &Invocation, file: &str, pinned: &PinnedProgram) -> ExitCode {
+    build_llvm_inner(
+        inv,
+        file,
+        &pinned.defs_for_backend(),
+        &pinned.aliases,
+        &pinned.world,
+        true,
+    )
+}
+
 /// Cranelift backend: JIT-compile/run by default, or emit AOT artifacts when
 /// `--out`/`--emit` requests them.
 fn build_native(inv: &Invocation, file: &str, loaded: &Loaded) -> ExitCode {
@@ -985,6 +1002,86 @@ fn build_native(inv: &Invocation, file: &str, loaded: &Loaded) -> ExitCode {
         }
     };
     match jit.run_i64(&inv.entry, &ints) {
+        Ok(v) => {
+            println!("{v}");
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("marv build: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// LLVM release backend: emit deterministic LLVM IR and use `clang` to run or
+/// link optimized native executables for the supported Core subset.
+fn build_llvm(inv: &Invocation, file: &str, loaded: &Loaded) -> ExitCode {
+    build_llvm_inner(
+        inv,
+        file,
+        &loaded.runtime_defs,
+        &loaded.runtime_aliases,
+        &loaded.world,
+        false,
+    )
+}
+
+fn build_llvm_inner(
+    inv: &Invocation,
+    file: &str,
+    defs: &[(marv_core::Hash, String, marv_core::ir::Def)],
+    aliases: &[(String, marv_core::Hash)],
+    world: &marv_types::World,
+    pinned: bool,
+) -> ExitCode {
+    if inv.emit.is_some() {
+        eprintln!("marv build: native-llvm does not support --emit yet (use --run or --out)");
+        return ExitCode::FAILURE;
+    }
+    if inv.run && inv.out.is_some() {
+        eprintln!("marv build: --run cannot be combined with native-llvm --out");
+        return ExitCode::FAILURE;
+    }
+    let opts = llvm::Options {
+        bounds_checks: !inv.release,
+        optimize: true,
+    };
+    let program = match llvm::compile_hashed_reachable(defs, aliases, world, &opts, &inv.entry) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("marv build: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let source = if pinned { " from pinned hashes" } else { "" };
+    if let Some(out) = &inv.out {
+        if let Err(e) = program.link_executable(out) {
+            eprintln!("marv build: {e}");
+            return ExitCode::FAILURE;
+        }
+        eprintln!(
+            "marv build: {file}: wrote {out}{source} via native-llvm executable \
+             (entry takes {} word argument(s))",
+            program.entry_arity()
+        );
+        return ExitCode::SUCCESS;
+    }
+    if !inv.run {
+        eprintln!(
+            "marv build: {file}: compiled{source} via native-llvm (entry takes {} word \
+             argument(s))",
+            program.entry_arity()
+        );
+        return ExitCode::SUCCESS;
+    }
+    let ints = match parse_int_args(&inv.args, program.entry_arity()) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("marv build: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    match program.run_i64(&ints) {
         Ok(v) => {
             println!("{v}");
             ExitCode::SUCCESS

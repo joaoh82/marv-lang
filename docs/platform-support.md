@@ -1,7 +1,7 @@
 # Platform support
 
 marv has one Core IR and several backends. The **interpreter** is the reference semantics
-oracle; the native (Cranelift) and WebAssembly backends are differentially tested against it
+oracle; the native (Cranelift/LLVM) and WebAssembly backends are differentially tested against it
 on a shared corpus ([`tests/run/`](../tests/run)), so "the backends agree" is a checkable
 property (`spec/01` §9).
 
@@ -12,7 +12,7 @@ property (`spec/01` §9).
 | Tree-walking interpreter | `marv-interp` | in-process; the oracle | **working** — full Core IR (arithmetic, `if`/`match`, recursion, currying, aggregates, `perform`/effects, contracts/Tier-1) plus a deterministic `Http` request/response test host |
 | Cranelift (native) | `marv-codegen-cl` | **JIT** (in-process), AOT `.o`, linked executable | **working** for the integer/boolean subset + heap-boxed aggregates/enums (MARV-9) + `List[T]` growable storage (MARV-42) + string manipulation (MARV-43) + arena reclamation for scalar-carried loop temporaries; AOT object/executable builds are working for backend-supported reachable closures (MARV-68) |
 | WebAssembly | `marv-codegen-wasm` | core `.wasm` module | **working** for the integer/boolean subset + growable linear-memory aggregates/enums (MARV-9) + `List[T]` growable storage (MARV-42) + string manipulation (MARV-43) + arena reclamation for scalar-carried loop temporaries + capabilities-as-host-imports; component/WIT packaging is roadmap |
-| LLVM (release) | `marv-codegen-llvm` | — | **stub** (roadmap — optimized release builds via `inkwell`) |
+| LLVM (release) | `marv-codegen-llvm` | textual LLVM IR compiled/linked by `clang` | **first slice working** for scalar arithmetic/casts, calls/recursion, `if`/`match`, `while`, early `return`, boxed structs/enums, arrays, and runtime-length slice updates; list/map/set runtime helpers, string builder ops, `raise`, capabilities, unsafe/resource host integration remain honest `unsupported` |
 
 The interpreter executes the whole Core IR. The Cranelift and WASM backends today compile the
 integer/boolean subset the front end can lower (arithmetic, comparisons, `and`/`or`, `if`/`else`,
@@ -30,8 +30,9 @@ module can mix supported and not-yet-supported functions. Native AOT uses the sa
 closure and lowering rules, then writes either a deterministic object (`--emit object`) or links
 that object with a small runtime wrapper (`--out app`). The current executable wrapper is for
 pure/value entries with up to four integer arguments; reachable capability `perform` code still
-fails clearly before artifact emission. The WASM backend additionally lowers `perform` to a
-host-import call.
+fails clearly before artifact emission. The LLVM release slice also uses reachability pruning,
+emits deterministic textual IR for the supported closure, and asks `clang -O2` to produce the
+optimized executable. The WASM backend additionally lowers `perform` to a host-import call.
 
 ## Capabilities across hosts
 
@@ -70,3 +71,5 @@ host-import call.
   needed at runtime for `marv` itself.
 - **cc** on `PATH` is needed only when `marv build --out app` links a native executable.
   `marv build --emit object` can emit the relocatable object without a C linker.
+- **clang** on `PATH` is needed for `marv build --target native-llvm --run` and
+  `--target native-llvm --out app`; the crate does not require `llvm-config`.

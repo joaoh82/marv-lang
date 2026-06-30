@@ -660,6 +660,7 @@ name = "marv-cli"
 version = "0.0.0"
 dependencies = [
  "marv-codegen-cl",
+ "marv-codegen-llvm",
  "marv-codegen-wasm",
  "marv-core",
  "marv-db",
@@ -692,6 +693,12 @@ dependencies = [
 [[package]]
 name = "marv-codegen-llvm"
 version = "0.0.0"
+dependencies = [
+ "marv-core",
+ "marv-interp",
+ "marv-syntax",
+ "marv-types",
+]
 
 [[package]]
 name = "marv-codegen-wasm"

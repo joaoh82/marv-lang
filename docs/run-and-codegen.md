@@ -9,6 +9,9 @@ canonical Core IR (`spec/02` §C):
 - **`marv-codegen-cl`** — a **Cranelift** backend that JIT-compiles Core to
   native code and can also emit AOT object/executable artifacts (`spec/01` §9
   — "same Core IR feeds both").
+- **`marv-codegen-llvm`** — a **LLVM/clang** release backend slice that emits
+  deterministic textual LLVM IR for reachable Core closures and asks `clang` to
+  optimize/run/link them.
 
 The acceptance gate for M4 is that the two **agree** on a corpus of programs,
 plus one program that *fails to compile* because it uses a capability absent
@@ -92,6 +95,13 @@ path, so an unsupported reachable construct fails before any object or linked
 executable is written. New constructs land in *both* backends together so
 agreement is preserved.
 
+The LLVM release backend follows the same honesty rule. Its first MARV-69 slice
+covers scalar arithmetic/casts, calls/recursion, bool `if`/`match`, `while`,
+early `return`, boxed structs/enums, arrays, and runtime-length slice updates.
+It intentionally reports `unsupported` for reachable capability `perform`,
+`raise`, list/map/set runtime helpers, and string-builder operations until those
+paths are lowered into LLVM too.
+
 ### Cranelift AOT objects and executables (MARV-68)
 
 `marv build --emit object` emits a relocatable native object for the entry's
@@ -108,6 +118,22 @@ runtime heap, and prints the integer result. This is intentionally still a
 backend-supported pure/value entrypoint story: capability-hosted programs should
 use `marv run --grant ...` or the WASM host-import model until the production
 native host runtime grows a capability ABI.
+
+### LLVM release slice (MARV-69)
+
+`marv build --target native-llvm --run <file> --entry f ...` compiles the
+entry's reachable closure to textual LLVM IR, links it with a tiny C entry
+wrapper through `clang -O2`, runs the executable, and prints the integer result.
+`marv build --target native-llvm --out app ...` writes the linked executable
+instead. Without `--run` or `--out`, the CLI still checks and compiles the
+closure and reports the entry arity.
+
+This backend does not require `llvm-config` or in-process LLVM bindings. The IR
+uses the same one-word value model as Cranelift: scalars are `i64`; boxed
+aggregates and arrays are heap blocks with the tag/length in word 0; projections,
+enum matches, `len`, `index`, and slice updates operate over that layout. Debug
+builds emit Tier-1 bounds checks that abort through LLVM IR's `abort` call;
+`--release` omits those checks.
 
 ### Reachability-pruned builds (MARV-8)
 
