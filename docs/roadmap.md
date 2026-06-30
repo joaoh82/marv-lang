@@ -255,12 +255,13 @@ heap-backed application logic possible by landing `Alloc`, `List[T]`, string
 manipulation, List/string verification, and three app-shaped examples. MARV-48
 tracks the remaining pieces needed for ordinary application boundaries: package
 discovery, bytes/UTF-8, the first HTTP request capability/host ABI slice, JSON,
-and the first scoped `Spawn` task-handle slice are now done; remaining pieces include
-production server/network resource lifecycles, `unsafe`/FFI
-auditability, hash-backed general-key collections, and deeper verification.
+the first scoped `Spawn` task-handle slice, unsafe audit metadata, hash-backed
+scalar collection paths, and generic non-recursive ADT verification are now done.
+Post-MARV-48 work includes production server/network resource lifecycles, raw FFI
+operations, recursive/materialized JSON, and deeper verification.
 
-The first implementation wave kept scope narrow and is now complete except for
-the linear-resource safety it intentionally left to MARV-27:
+The first implementation wave kept scope narrow and is now complete; production
+resource lifecycle safety remains intentionally left to MARV-27:
 
 1. ~~**MARV-60**~~ ✅ — keep this roadmap and status docs aligned with the tracker.
 2. ~~**MARV-49**~~ ✅ — make non-`std` project/package/module discovery real. MARV-14
@@ -271,12 +272,12 @@ the linear-resource safety it intentionally left to MARV-27:
 4. ~~**MARV-53**~~ ✅ — add the HTTP/server capability and host ABI story, coordinating
    with **MARV-27** for linear connection/listener lifecycle.
 
-The rest can proceed in parallel where dependencies allow: **MARV-59**
-recursive/generic ADT verification and **MARV-61** hash-backed general-key
-maps/sets. ~~**MARV-50**~~ ✅ first-slice maps/sets, ~~**MARV-51**~~ ✅
-collection literals, ~~**MARV-52**~~ ✅ iterators, ~~**MARV-55**~~ ✅ JSON,
-~~**MARV-56**~~ ✅ `Spawn`, ~~**MARV-57**~~ ✅ unsafe audit metadata, and ~~**MARV-58**~~ ✅ loop
-early return are already landed.
+The rest of the MARV-48 wave is also landed: ~~**MARV-50**~~ ✅ first-slice
+maps/sets, ~~**MARV-51**~~ ✅ collection literals, ~~**MARV-52**~~ ✅ iterators,
+~~**MARV-55**~~ ✅ JSON, ~~**MARV-56**~~ ✅ `Spawn`, ~~**MARV-57**~~ ✅ unsafe
+audit metadata, ~~**MARV-58**~~ ✅ loop early return, ~~**MARV-59**~~ ✅ generic
+non-recursive ADT verification, and ~~**MARV-61**~~ ✅ hash-backed scalar-key
+maps/sets.
 
 ## Recommended order
 
@@ -293,10 +294,11 @@ they unblock the rest. Then:
   (which closed the last big gap between the design and what real `.mv` can express).
 - **Compounds on the surface:** ~~MARV-9 aggregate codegen~~ ✅ → MARV-10; and
   ~~MARV-11 verification expansion~~ ✅.
-- **Application/runtime wave:** MARV-48; MARV-60 docs cleanup, MARV-49
-  project/source-module discovery, MARV-50 first-slice maps/sets, MARV-54
-  bytes/UTF-8, MARV-53 HTTP request capability/host ABI, and MARV-58 loop early
-  return are done. MARV-61 tracks the hash-backed general-key Map/Set follow-up.
+- **Application/runtime wave:** MARV-48 is done: MARV-49 through MARV-61 covered
+  project/source-module discovery, maps/sets, collection literals, iterators,
+  bytes/UTF-8, HTTP request capability/host ABI, JSON, `Spawn`, unsafe audit
+  metadata, loop early return, generic non-recursive ADT verification, and the
+  scalar hash-backed Map/Set path.
 - **Longer horizon:** MARV-13 more self-hosting; MARV-10 AOT/LLVM/component
   packaging; MARV-27 linear capabilities; MARV-39 trap-freedom verification;
   richer package metadata and package-aware agent queries on top of the MARV-49
@@ -328,12 +330,13 @@ builds)~~ ✅ and ~~MARV-12 (doc-comments + spans)~~ ✅ are both done — the t
 - **Phase 5 · Infra/polish.** Doc-comment preservation and real (definition-granular) source
   spans through to diagnostics/`typeAt`/`verify` are **done** (MARV-12). (Phase 0 —
   repo/CI/agent enablement — is also done.)
-- **Phase 6 · Full application language.** MARV-48 tracks the next practical layer:
+- **Phase 6 · Full application language.** MARV-48 delivered the next practical layer:
   project/package discovery beyond the special-cased `std` loader, bytes/UTF-8, the first
   HTTP request capability/host ABI slice, JSON/serialization, loop-body early returns, and
-  the first scoped `Spawn` task-handle slice are done. Remaining work covers hash-backed
-  `Map`/`Set`, production listener/resource lifecycle safety, raw FFI operations, and broader
-  Tier-2 ADT verification.
+  the first scoped `Spawn` task-handle slice, unsafe audit metadata, generic non-recursive ADT
+  verification, and scalar hash-backed `Map`/`Set` operations. Remaining post-MARV-48 work
+  covers production listener/resource lifecycle safety, raw FFI operations, recursive/materialized
+  JSON, richer package metadata/query coverage, and broader verification.
 
 ## How a task is meant to be picked up
 

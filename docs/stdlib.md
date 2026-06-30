@@ -15,7 +15,7 @@ the capability interfaces every program links against (`spec/01` §§3, 5, 6).
 > pinned hash linking are done (MARV-14); the remaining module work is broader project/package
 > source discovery beyond `std` (MARV-49). `std.collections` now includes `Map[K, V]`
 > and `Set[T]` types with a first string-keyed/string-set operation slice over explicit
-> `Alloc` (MARV-50); true hash-backed general keys are tracked by MARV-61. `std.http`
+> `Alloc` (MARV-50), plus the scalar hash-backed `i64` path from MARV-61. `std.http`
 > now exposes host-provided request/response structs over an explicit `Http` capability
 > (MARV-53). `std.spawn` now exposes the first scoped `Spawn` task-handle slice
 > (MARV-56). Still pending:
