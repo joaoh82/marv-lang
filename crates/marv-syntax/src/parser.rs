@@ -257,12 +257,18 @@ impl Parser {
             Tok::Fn => Ok(Item::Fn(self.parse_fn(false, docs)?)),
             Tok::Linear => {
                 self.bump();
-                Ok(Item::Struct(self.parse_struct(true, docs)?))
+                match self.peek() {
+                    Tok::Struct => Ok(Item::Struct(self.parse_struct(true, docs)?)),
+                    Tok::Interface => Ok(Item::Interface(self.parse_interface(true, docs)?)),
+                    other => Err(ParseError::new(format!(
+                        "expected `struct` or `interface` after `linear`, found {other:?}"
+                    ))),
+                }
             }
             Tok::Struct => Ok(Item::Struct(self.parse_struct(false, docs)?)),
             Tok::Enum => Ok(Item::Enum(self.parse_enum(docs)?)),
             Tok::Error => Ok(Item::Error(self.parse_error_decl(docs)?)),
-            Tok::Interface => Ok(Item::Interface(self.parse_interface(docs)?)),
+            Tok::Interface => Ok(Item::Interface(self.parse_interface(false, docs)?)),
             Tok::Impl => Ok(Item::Impl(self.parse_impl(docs)?)),
             other => Err(ParseError::new(format!(
                 "expected an item (`fn`, `pure fn`, `unsafe fn`, `struct`, `linear struct`, \
@@ -324,12 +330,17 @@ impl Parser {
     /// Parse `interface Name[generics] { fn_sig* }` (`spec/02` §B
     /// `interface_decl`). Method signatures have no body and no contracts; each
     /// sits on its own line.
-    fn parse_interface(&mut self, docs: Vec<String>) -> PResult<InterfaceDecl> {
+    fn parse_interface(&mut self, linear: bool, docs: Vec<String>) -> PResult<InterfaceDecl> {
         self.expect(Tok::Interface)?;
         let name_hi = self.cur_span().1;
         let name = self.ident()?;
         self.name_hi = name_hi;
         let generics = self.parse_generics()?;
+        if linear && !generics.is_empty() {
+            return Err(ParseError::new(
+                "`linear interface` is reserved for non-generic capability resources",
+            ));
+        }
         self.expect(Tok::LBrace)?;
 
         let mut methods = Vec::new();
@@ -344,6 +355,7 @@ impl Parser {
         self.expect(Tok::RBrace)?;
         Ok(InterfaceDecl {
             docs,
+            linear,
             name,
             generics,
             methods,

@@ -684,6 +684,7 @@ fn world_for_pinned(defs: &[PinnedDef]) -> World {
                     .capability_ops
                     .iter()
                     .map(|op| OpSig {
+                        consumes_receiver: op.consumes_receiver,
                         params: op.params.clone(),
                         ret: op.ret.clone(),
                         errors: op.errors.clone(),

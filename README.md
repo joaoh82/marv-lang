@@ -182,7 +182,7 @@ lower/check/run/build as module sets, and the content store supports
 lockfile-pinned cross-module builds by hash. MARV-48's first application-language
 wave is complete; the remaining post-MARV-48 roadmap covers richer package
 metadata/query coverage, recursive/materialized JSON, production HTTP/server
-resource lifecycles, raw FFI operations, and deeper verification. The
+listener runtime, raw FFI operations, AOT/component packaging, and deeper verification. The
 full backlog (surface growth → backend breadth → verification breadth →
 application runtime → AOT/LLVM → self-hosting) — with phases, ordering, and the
 dependency graph — is in

@@ -135,7 +135,12 @@ fn indent_lines(text: &str, level: usize) -> String {
 /// signature per line at 4-space indentation. An interface with no methods is
 /// `{}` on the signature line.
 fn format_interface(decl: &InterfaceDecl) -> String {
-    let mut s = format!("interface {}{}", decl.name, format_generics(&decl.generics));
+    let prefix = if decl.linear {
+        "linear interface"
+    } else {
+        "interface"
+    };
+    let mut s = format!("{prefix} {}{}", decl.name, format_generics(&decl.generics));
     if decl.methods.is_empty() {
         s.push_str(" {}");
         return s;

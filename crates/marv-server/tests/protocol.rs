@@ -87,6 +87,7 @@ fn report_core_module() -> Value {
             caps: vec![CapSpec {
                 name: "Fs".into(),
                 ops: vec![OpSpec {
+                    consumes_receiver: true,
                     params: vec![Type::Str],
                     ret: Type::Unit,
                     errors: Vec::new(),

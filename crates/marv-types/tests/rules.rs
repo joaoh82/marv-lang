@@ -5,11 +5,9 @@
 //! the stable [`Code`] plus — for the five mechanically-derivable cases
 //! `spec/03` §2 names — the presence and shape of the carried [`Fix`].
 //!
-//! Type, struct-field-reference, and returned-reference rules are reached from
-//! real `.mv` source (parsed + lowered through `marv-core`). The capability,
-//! error-set, exhaustiveness, and linearity rules are driven over hand-written
-//! Core, because the M0 front end emits no `perform`/`raise`/enum/`linear`
-//! surface forms yet (see `marv_types::check` scope notes).
+//! Type, struct-field-reference, returned-reference, capability, and linearity
+//! rules are reached from real `.mv` source where possible. Some older minimal
+//! cases still use hand-written Core to isolate exactly one rule.
 
 mod common;
 
@@ -29,21 +27,28 @@ fn check_src(src: &str) -> Vec<Diagnostic> {
     check_module(&lowered)
 }
 
-/// Parse the real `std.io`/`std.spawn` pair plus a source module, then check
-/// only the source module against the full declaration world.
-fn check_spawn_src(src: &str) -> Vec<Diagnostic> {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+fn repo_root() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .ancestors()
         .nth(2)
         .unwrap()
-        .to_path_buf();
-    let caps = parse(&std::fs::read_to_string(root.join("std/capabilities.mv")).unwrap())
-        .expect("parse std.capabilities");
-    let spawn = parse(&std::fs::read_to_string(root.join("std/spawn.mv")).unwrap())
-        .expect("parse std.spawn");
-    let app = parse(src).unwrap_or_else(|e| panic!("parse failed: {e}\n{src}"));
-    let app_module = app.name.join(".");
-    let lowered = lower_modules(&[caps, spawn, app]).expect("lower std.spawn + app");
+        .to_path_buf()
+}
+
+/// Parse std capability declarations plus source modules, then check only the
+/// last source module against the full declaration world.
+fn check_with_std(srcs: &[&str]) -> Vec<Diagnostic> {
+    let root = repo_root();
+    let mut modules =
+        vec![
+            parse(&std::fs::read_to_string(root.join("std/capabilities.mv")).unwrap())
+                .expect("parse std.capabilities"),
+        ];
+    for src in srcs {
+        modules.push(parse(src).unwrap_or_else(|e| panic!("parse failed: {e}\n{src}")));
+    }
+    let app_module = modules.last().unwrap().name.join(".");
+    let lowered = lower_modules(&modules).expect("lower std modules + app");
     let world = World::from_modules(&lowered);
     let app = lowered
         .iter()
@@ -54,6 +59,14 @@ fn check_spawn_src(src: &str) -> Vec<Diagnostic> {
         diags.extend(check_def(&world, &entry.def, Some(&entry.name)));
     }
     diags
+}
+
+/// Parse the real `std.io`/`std.spawn` pair plus a source module, then check
+/// only the source module against the full declaration world.
+fn check_spawn_src(src: &str) -> Vec<Diagnostic> {
+    let root = repo_root();
+    let spawn_src = std::fs::read_to_string(root.join("std/spawn.mv")).unwrap();
+    check_with_std(&[&spawn_src, src])
 }
 
 /// Assert exactly one diagnostic, with the given code, and return it.
@@ -172,6 +185,7 @@ fn e0110_missing_capability_in_effect_row() {
         .cap(
             "Fs",
             vec![marv_types::OpSig {
+                consumes_receiver: true,
                 params: vec![Type::Str],
                 ret: Type::Unit,
                 errors: vec![],
@@ -194,6 +208,7 @@ fn e0110_alloc_perform_requires_alloc_in_effect_row() {
         .cap(
             "Alloc",
             vec![marv_types::OpSig {
+                consumes_receiver: true,
                 params: vec![Type::Int(IntTy::Usize)],
                 ret: Type::Slice(Box::new(Type::Int(IntTy::U8))),
                 errors: vec![],
@@ -238,6 +253,7 @@ fn e0112_forged_capability() {
         .cap(
             "Fs",
             vec![marv_types::OpSig {
+                consumes_receiver: true,
                 params: vec![Type::Str],
                 ret: Type::Unit,
                 errors: vec![],
@@ -431,6 +447,87 @@ fn good(spawn: Spawn) -> !i64 {
     assert!(
         diags.is_empty(),
         "joined task handle should check clean, got: {diags:#?}"
+    );
+}
+
+#[test]
+fn source_linear_connection_must_be_closed() {
+    let diags = check_with_std(&[r#"
+mod app
+import std.io (Net, Conn)
+
+fn bad(net: Net) -> ! {
+    let conn: Conn = net.connect("localhost", (8080 as u16))?
+    ()
+}
+"#]);
+    one(diags, Code::LinearUnused);
+}
+
+#[test]
+fn source_linear_connection_double_close_is_rejected() {
+    let diags = check_with_std(&[r#"
+mod app
+import std.io (Net, Conn)
+
+fn bad(net: Net) -> ! {
+    let conn: Conn = net.connect("localhost", (8080 as u16))?
+    let first = conn.close()?
+    let second = conn.close()?
+    ()
+}
+"#]);
+    one(diags, Code::LinearDuplicated);
+}
+
+#[test]
+fn source_linear_connection_close_must_happen_on_every_branch() {
+    let diags = check_with_std(&[r#"
+mod app
+import std.io (Net, Conn)
+
+fn bad(net: Net, close_it: bool) -> ! {
+    let conn: Conn = net.connect("localhost", (8080 as u16))?
+    if close_it {
+        let done = conn.close()?
+        ()
+    } else {
+        ()
+    }
+}
+"#]);
+    one(diags, Code::LinearNotAllPaths);
+}
+
+#[test]
+fn source_linear_file_connection_and_listener_close_paths_check_clean() {
+    let diags = check_with_std(&[r#"
+mod app
+import std.io (Fs, File, Net, Conn, Listener)
+
+fn file_ok(fs: Fs, path: str) -> ! {
+    let file: File = fs.open(path)?
+    let done = file.close()?
+    ()
+}
+
+fn conn_ok(net: Net) -> ! {
+    let conn: Conn = net.connect("localhost", (8080 as u16))?
+    let done = conn.close()?
+    ()
+}
+
+fn listener_ok(net: Net) -> ! {
+    let listener: Listener = net.listen("127.0.0.1", (8080 as u16))?
+    let conn: Conn = listener.accept()?
+    let conn_done = conn.close()?
+    let listener_done = listener.close()?
+    ()
+}
+"#]);
+    assert!(
+        diags.is_empty(),
+        "linear resource happy paths should check clean, got: {diags:#?}"
     );
 }
 

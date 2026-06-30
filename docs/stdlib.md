@@ -18,10 +18,10 @@ the capability interfaces every program links against (`spec/01` §§3, 5, 6).
 > `Alloc` (MARV-50), plus the scalar hash-backed `i64` path from MARV-61. `std.http`
 > now exposes host-provided request/response structs over an explicit `Http` capability
 > (MARV-53). `std.spawn` now exposes the first scoped `Spawn` task-handle slice
-> (MARV-56). Still pending:
-> `linear` capabilities, so a `Conn`/listener/request lifecycle must be `close`d or
-> completed exactly once (MARV-27). The capability *model* is also exercised over the
-> Core IR and on WebAssembly (host imports).
+> (MARV-56), and `std.io` marks `File`, `Listener`, and `Conn` as `linear interface`
+> resource capabilities: `open`/`connect`/`listen` results must be closed exactly once
+> (MARV-64). The capability *model* is also exercised over the Core IR and on WebAssembly
+> (host imports).
 
 ## Data types
 
@@ -190,9 +190,9 @@ pure fn serialize_object(object: JsonObject) -> str
 `Http` is declared in `std/capabilities.mv`; `std.http` layers normal app-level
 types over it. A host hands a function an `Http` capability for one request.
 The current ABI exposes UTF-8 request pieces (`method`, `path`, `body`) and a
-single `respond(status, body)` operation. Raw bytes, streaming bodies, listener
-accept loops, and exact once-only lifecycle safety are intentionally left to the
-bytes/JSON and linear-capability follow-ups.
+single `respond(status, body)` operation. Raw bytes, streaming bodies, and production listener
+accept loops remain future runtime work; close-once lifecycle checking for `File`, `Listener`,
+and `Conn` resources now lives in `std.io`.
 
 ```marv
 struct Request { method: str, path: str, body: str }
@@ -230,10 +230,12 @@ supplies the implementations the process/page chooses to grant.
 |------------|------|---------------------------|
 | `Io` | Root capability; everything narrows from it | `fs() -> Fs`, `net() -> Net`, `clock() -> Clock`, `rand() -> Rand`, `alloc() -> Alloc`, `stdout() -> Stream`, `http() -> Http` |
 | `Stream` | A text/byte output stream | `write(text: str) -> !` |
-| `Fs` | Filesystem | `read(path: str) -> ![]u8`, `write(path, bytes) -> !` |
-| `Net` | Network | `get(url) -> ![]u8`, `connect(host, port) -> !Conn` |
+| `Fs` | Filesystem | `read(path: str) -> ![]u8`, `write(path, bytes) -> !`, `open(path) -> !File` |
+| `Net` | Network | `get(url) -> ![]u8`, `connect(host, port) -> !Conn`, `listen(host, port) -> !Listener` |
 | `Http` | One server request/response exchange | `method()`, `path()`, `body_text()`, `respond(status, body)` |
-| `Conn` | Open connection | `send`, `recv`, `close` |
+| `File` | Linear file handle | `read`, `write`, `close` |
+| `Listener` | Linear listening socket | `accept`, `close` |
+| `Conn` | Linear open connection | `send`, `recv`, `close` |
 | `Spawn` | Structured-concurrency authority | `start() -> !` |
 | `Clock` | Monotonic time | `now() -> i64` |
 | `Rand` | Randomness | `next_u64() -> u64` |

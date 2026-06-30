@@ -12,7 +12,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
-use marv_core::ir::{Def, Hash};
+use marv_core::ir::{Def, Hash, Type};
 use marv_core::{lower_modules, symbol_hash};
 use marv_db::{qualify, CoreModuleSpec};
 use marv_store::{DefMeta, StoredOpSig, StoredVariant};
@@ -386,6 +386,7 @@ fn store_meta_for_module(
                 .method_sigs
                 .iter()
                 .map(|sig| StoredOpSig {
+                    consumes_receiver: matches!(sig.params.first(), Some(Type::Linear(_))),
                     // Drop the receiver; `Perform` operands carry only the
                     // non-receiver arguments.
                     params: sig.params.iter().skip(1).cloned().collect(),

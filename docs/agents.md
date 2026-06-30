@@ -182,8 +182,9 @@ serialization slice, `std.http` exposes the first host-provided request/response
 `std.spawn` exposes scoped linear task handles over explicit `Spawn`, `unsafe fn` audit metadata is
 queryable through `marv/unsafeSites`, and
 explicit-allocation `List`/`Set`/`Map` collection literals plus `std.iter.IndexIter[T]` are
-implemented. Post-MARV-48 roadmap work includes `linear` resource capabilities,
-recursive/materialized JSON, production listener/resource lifecycle safety, raw FFI operations,
+implemented. `File`, `Listener`, and `Conn` are now linear resource capabilities that must
+be closed exactly once. Post-MARV-48 roadmap work includes
+recursive/materialized JSON, production HTTP listener/router runtime, raw FFI operations,
 richer package metadata, and package-aware read queries. For
 anything not yet expressible, construct a `*.core.json` snapshot (see
 [`store.md`](store.md) and the `tests/run/*.core.json` fixtures) or check

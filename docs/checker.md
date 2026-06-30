@@ -118,7 +118,8 @@ Two boundaries are worth stating plainly, in the spirit of the M1 scope note:
    capability rules are now reachable from real `.mv` source — `E0110` (missing capability),
    plus `E0111`/`E0112` over constructed Core — alongside the type (`E0101`/`E0102`/`E0103`),
    returned-reference, struct-field-reference, **`match` exhaustiveness (`E0130`)**, `Ctor`
-   field-type, and `Prim` index/operand (`BadPrimOperand`) families. Linear *consumption* is
-   still exercised over hand-written Core IR (see `tests/rules.rs`); `linear` capabilities are a
-   follow-up. **The checker itself is complete over the whole Core IR**, independent of which
+   field-type, and `Prim` index/operand (`BadPrimOperand`) families. Linear consumption is now
+   reachable from source through `linear struct` handles and `linear interface` resource
+   capabilities such as `File`, `Listener`, and `Conn`; forgotten close, double close, and
+   branch-only close paths report `E0140`/`E0141`/`E0142`. **The checker itself is complete over the whole Core IR**, independent of which
    surface forms the parser accepts.

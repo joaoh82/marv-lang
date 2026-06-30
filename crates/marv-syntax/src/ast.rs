@@ -107,16 +107,20 @@ pub fn generic_names(generics: &[Generic]) -> Vec<String> {
 }
 
 /// `interface Name[generics] { fn sig; ... }` (`spec/02` §B `interface_decl`,
-/// `spec/01` §3.4). An interface is bounded polymorphism: it declares abstract
-/// method signatures over its type parameter(s); concrete types supply bodies via
-/// an [`ImplDecl`]. The grammar requires a non-empty generic list.
+/// `spec/01` §3.4). A generic interface is bounded polymorphism: it declares
+/// abstract method signatures over its type parameter(s); concrete types supply
+/// bodies via an [`ImplDecl`]. A non-generic interface is a capability, and a
+/// `linear interface` is a linear capability resource.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InterfaceDecl {
     /// Doc-comment lines preceding the declaration (see [`ErrorDecl::docs`]).
     pub docs: Vec<String>,
+    /// Whether values of this interface type are linear resources that must be
+    /// consumed exactly once.
+    pub linear: bool,
     pub name: String,
-    /// Generic type parameter names, e.g. `["T"]` for `interface Ord[T]`. Always
-    /// non-empty (the grammar requires generics on an interface).
+    /// Generic type parameter names, e.g. `["T"]` for `interface Ord[T]`.
+    /// Empty for capability interfaces.
     pub generics: Vec<Generic>,
     /// The method signatures the interface declares (bodies live in `impl`s).
     pub methods: Vec<FnSig>,

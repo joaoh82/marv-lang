@@ -48,6 +48,19 @@ where each one sits and what must land first. Each task references back here.
 | ~~**MARV-59** Tier-2 recursive/generic ADTs~~ ✅ done — first sound slice supports generic, non-recursive ADTs by substituting concrete type arguments before havocking struct/enum fields; false claims over generic enum payloads still produce counterexamples, and recursive ADTs remain honest `unsupported`/Tier-1 fallback. `examples/adt_verify.mv` proves the supported shape. | 6 · Verification | ~~MARV-11~~ ✅, ~~MARV-38~~ ✅ | 13 | medium |
 | **MARV-60** roadmap/docs cleanup for MARV-48 | 5 · Infra/polish | MARV-48 | 49–59 | low |
 | ~~**MARV-61** hash-backed general-key `Map`/`Set` with `Hash`/`Eq` interfaces~~ ✅ done — adds stored hashes to the std map/set entry layout, a first `Hash[T]` interface carrying explicit `hash_key` + `key_eq`, and scalar-key `map_i64_*` / `set_i64_*` operations for `Map[i64, V]` and `Set[i64]` while preserving dynamic string-key behavior and collection literals across interpreter, Cranelift, and WASM | 6 · Std collections | ~~MARV-50~~ ✅, ~~MARV-5~~ ✅ | 55 | medium |
+| **MARV-62** production application platform + self-hosting epic | 7 · Production/self-hosting | ~~MARV-48~~ ✅ | 63–74 | high |
+| **MARV-63** production HTTP listener/router runtime | 7 · Runtime/capabilities | 64 | — | high |
+| ~~**MARV-64** linear resource capabilities for files/listeners/connections~~ ✅ done — adds `linear interface` for capability resource handles, marks `File`, `Listener`, and `Conn` as close-once resources, and pins source diagnostics for forgotten close, double close, and branch-only close paths. Production listener loops remain MARV-63 | 7 · Runtime/capabilities | ~~MARV-56~~ ✅ | 63 | high |
+| **MARV-65** raw FFI operations behind explicit unsafe audit boundaries | 7 · Platform/unsafe | ~~MARV-57~~ ✅, 64 *(for raw resource handles where needed)* | — | medium |
+| **MARV-66** recursive/materialized JSON DOM with typed codecs | 7 · Std/app data | ~~MARV-55~~ ✅, ~~MARV-59~~ ✅, ~~MARV-61~~ ✅ | 63 | medium |
+| **MARV-67** package manifest, dependency resolution, package-aware agent queries | 7 · Packages | ~~MARV-49~~ ✅, ~~MARV-14~~ ✅ | 71–74 | medium |
+| **MARV-68** Cranelift AOT object/executable builds | 7 · Backends | ~~MARV-8~~ ✅, ~~MARV-9~~ ✅ | 69 | medium |
+| **MARV-69** LLVM optimized release backend | 7 · Backends | 68 | — | medium |
+| **MARV-70** WASM component model and WIT packaging | 7 · Backends | ~~MARV-53~~ ✅ | 63 | medium |
+| **MARV-71** Stage-1 AST/Core data model in marv | 7 · Self-hosting | 67 *(nice-to-have package workflow)* | 72, 73, 74 | high |
+| **MARV-72** Stage-1 lexer/parser slices in marv | 7 · Self-hosting | 71 | 73, 74 | high |
+| **MARV-73** Stage-1 lowering/checker slices in marv | 7 · Self-hosting | 71, 72 | 74 | high |
+| **MARV-74** Stage-1 compiler driver and self-compile milestone | 7 · Self-hosting | 71, 72, 73 | — | high |
 
 Done (Phase 0 · Infra/agent): **MARV-15** repo housekeeping · **MARV-16** CI/CD + release ·
 **MARV-17** agent enablement (AGENTS.md, MCP server, skill).
@@ -143,9 +156,9 @@ op returns the narrowed capability value; the CLI resolves `import std.*` to the
 extends the same source-module loading to local non-`std` imports). `std/capabilities.mv` parses/checks; `examples/hello.mv`
 (`io.stdout().write(...)`), `examples/read_file.mv` (`io.fs()` → `fs.read`), and
 `examples/http_echo.mv` (`Http` request/response) check, infer their rows, and run under explicit
-grants. Cranelift n/a (rejects `Perform`); WASM lowers a `perform` to a host import. Production
-listener/resource lifecycle safety and linear capabilities (a `Conn` that must be `close`d) are
-follow-ups.
+grants. Cranelift n/a (rejects `Perform`); WASM lowers a `perform` to a host import. Linear
+resource capabilities for `File`, `Listener`, and `Conn` landed in MARV-64; production listener
+serving remains MARV-63.
 · **MARV-18** single-file lowering of imported enum constructors / matches: the CLI's
 `import std.*` resolution (MARV-6) now serves enums too — `marv check std/result.mv` standalone
 lowers the `Option.Some(x)`/`Option.None` it builds to real `Ctor`s with the `std.option.Option`
@@ -257,11 +270,12 @@ tracks the remaining pieces needed for ordinary application boundaries: package
 discovery, bytes/UTF-8, the first HTTP request capability/host ABI slice, JSON,
 the first scoped `Spawn` task-handle slice, unsafe audit metadata, hash-backed
 scalar collection paths, and generic non-recursive ADT verification are now done.
-Post-MARV-48 work includes production server/network resource lifecycles, raw FFI
+Post-MARV-48 work includes production server/listener runtime support, raw FFI
 operations, recursive/materialized JSON, and deeper verification.
 
-The first implementation wave kept scope narrow and is now complete; production
-resource lifecycle safety remains intentionally left to MARV-27:
+The first implementation wave kept scope narrow and is now complete; the next production
+wave is tracked by MARV-62 through MARV-74. Close-once resource capability safety landed in
+MARV-64; production HTTP listener/router runtime remains MARV-63:
 
 1. ~~**MARV-60**~~ ✅ — keep this roadmap and status docs aligned with the tracker.
 2. ~~**MARV-49**~~ ✅ — make non-`std` project/package/module discovery real. MARV-14
@@ -269,8 +283,8 @@ resource lifecycle safety remains intentionally left to MARV-27:
    developer-facing source/project layer above it.
 3. ~~**MARV-54**~~ ✅ — add practical bytes + UTF-8 utilities, because file/network/HTTP
    boundaries need byte payloads before JSON or HTTP can be honest.
-4. ~~**MARV-53**~~ ✅ — add the HTTP/server capability and host ABI story, coordinating
-   with **MARV-27** for linear connection/listener lifecycle.
+4. ~~**MARV-53**~~ ✅ — add the HTTP/server capability and host ABI story; its production
+   listener/router runtime continues as MARV-63 after MARV-64's linear resource lifecycle slice.
 
 The rest of the MARV-48 wave is also landed: ~~**MARV-50**~~ ✅ first-slice
 maps/sets, ~~**MARV-51**~~ ✅ collection literals, ~~**MARV-52**~~ ✅ iterators,
@@ -299,8 +313,8 @@ they unblock the rest. Then:
   bytes/UTF-8, HTTP request capability/host ABI, JSON, `Spawn`, unsafe audit
   metadata, loop early return, generic non-recursive ADT verification, and the
   scalar hash-backed Map/Set path.
-- **Longer horizon:** MARV-13 more self-hosting; MARV-10 AOT/LLVM/component
-  packaging; MARV-27 linear capabilities; MARV-39 trap-freedom verification;
+- **Longer horizon:** MARV-71 through MARV-74 self-hosting; MARV-68 through MARV-70
+  AOT/LLVM/component packaging; MARV-39 trap-freedom verification;
   richer package metadata and package-aware agent queries on top of the MARV-49
   source-module discovery and MARV-14 pinned store.
 
@@ -334,8 +348,9 @@ builds)~~ ✅ and ~~MARV-12 (doc-comments + spans)~~ ✅ are both done — the t
   project/package discovery beyond the special-cased `std` loader, bytes/UTF-8, the first
   HTTP request capability/host ABI slice, JSON/serialization, loop-body early returns, and
   the first scoped `Spawn` task-handle slice, unsafe audit metadata, generic non-recursive ADT
-  verification, and scalar hash-backed `Map`/`Set` operations. Remaining post-MARV-48 work
-  covers production listener/resource lifecycle safety, raw FFI operations, recursive/materialized
+  verification, scalar hash-backed `Map`/`Set` operations, and MARV-64's linear resource
+  capability lifecycle slice. Remaining post-MARV-48 work
+  covers production listener/router runtime, raw FFI operations, recursive/materialized
   JSON, richer package metadata/query coverage, and broader verification.
 
 ## How a task is meant to be picked up

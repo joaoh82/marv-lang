@@ -621,6 +621,7 @@ fn a_capability_using_module_imports_that_capability() {
         .cap(
             "Net",
             vec![OpSig {
+                consumes_receiver: true,
                 params: Vec::new(),
                 ret: Type::Unit,
                 errors: Vec::new(),
@@ -678,6 +679,7 @@ fn capability_imports_can_return_string_handles() {
         .cap(
             "Http",
             vec![OpSig {
+                consumes_receiver: true,
                 params: Vec::new(),
                 ret: Type::Str,
                 errors: Vec::new(),

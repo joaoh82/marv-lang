@@ -330,6 +330,8 @@ pub struct LoweredModule {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InterfaceInfo {
     pub name: String,
+    /// Whether values of this interface type are linear resources.
+    pub linear: bool,
     /// The interface's method names, in declaration order.
     pub methods: Vec<String>,
     /// Whether this interface is a **capability** (`spec/01` §5). A capability
@@ -639,6 +641,7 @@ struct MonoReg {
 /// recovers the narrowed capability's type.
 #[derive(Debug, Clone)]
 struct CapIface {
+    linear: bool,
     methods: Vec<CapMethod>,
 }
 
@@ -693,6 +696,7 @@ impl MonoReg {
                             reg.cap_ifaces.insert(
                                 iface.name.clone(),
                                 CapIface {
+                                    linear: iface.linear,
                                     methods: iface
                                         .methods
                                         .iter()
@@ -981,6 +985,7 @@ impl Lowerer {
                         .collect();
                     interfaces.push(InterfaceInfo {
                         name: iface.name.clone(),
+                        linear: iface.linear,
                         methods: iface.methods.iter().map(|s| s.name.clone()).collect(),
                         is_capability: iface.generics.is_empty(),
                         method_sigs,
@@ -3471,6 +3476,12 @@ impl Lowerer {
                         .get(&path[0])
                         .map(|s| s.linear)
                         .unwrap_or(false)
+                        || self
+                            .mono
+                            .cap_ifaces
+                            .get(&path[0])
+                            .map(|iface| iface.linear)
+                            .unwrap_or(false)
                     {
                         return Type::Linear(Box::new(self.lower_named(path, &[])));
                     }
@@ -3481,11 +3492,17 @@ impl Lowerer {
                 let lowered: Vec<Type> =
                     args.iter().map(|a| self.lower_type(a, generics)).collect();
                 if path.len() == 1
-                    && self
+                    && (self
                         .structs
                         .get(&path[0])
                         .map(|s| s.linear)
                         .unwrap_or(false)
+                        || self
+                            .mono
+                            .cap_ifaces
+                            .get(&path[0])
+                            .map(|iface| iface.linear)
+                            .unwrap_or(false))
                 {
                     return Type::Linear(Box::new(self.lower_named(path, &lowered)));
                 }

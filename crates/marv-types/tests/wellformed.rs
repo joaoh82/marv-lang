@@ -75,6 +75,7 @@ fn perform_with_declared_capability_checks_clean() {
         .cap(
             "Fs",
             vec![OpSig {
+                consumes_receiver: true,
                 params: vec![Type::Str],
                 ret: Type::Unit,
                 errors: vec![],

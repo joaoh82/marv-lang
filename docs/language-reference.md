@@ -221,8 +221,10 @@ fn read_config(fs: Fs, path: str) -> !Config { … }   // can do FS I/O, nothing
 pure fn clamp(x: i32, lo: i32, hi: i32) -> i32 { … }  // no capabilities or growable allocation
 ```
 
-A **capability is a non-generic `interface`** (`std/capabilities.mv`). A method call on a value
-of such a type lowers to `Core::Perform`: `io.fs()` **narrows** the root to an `Fs` value (you
+A **capability is a non-generic `interface`** (`std/capabilities.mv`). A `linear interface`
+is a capability whose values must also be consumed exactly once, used for resource handles
+such as `File`, `Listener`, and `Conn`. A method call on a value
+of a capability type lowers to `Core::Perform`: `io.fs()` **narrows** the root to an `Fs` value (you
 may narrow, never construct — capabilities are **unforgeable**), and `fs.read(path)` /
 `out.write(text)` **perform** an operation. The effect row is inferred from those sites and
 checked against the function's capability parameters, where a held capability authorizes its
@@ -232,8 +234,8 @@ capabilities: `Io` (root) and narrower `Fs`, `Net`, `Http`, `Spawn`, `Clock`, `R
 [`std/`](../std)). `Http` represents one host-provided server request/response exchange;
 without it a handler cannot read request data or send a response. On WebAssembly a capability
 is a host import the page chooses to provide — see [platform support](platform-support.md).
-(Generic interfaces like `Ord[T]` are bounded polymorphism, not capabilities; production
-listener/resource lifecycle safety is roadmap.)
+(Generic interfaces like `Ord[T]` are bounded polymorphism, not capabilities; production HTTP
+listener loops remain roadmap.)
 
 ## 6. Errors: inferred sets **[impl]**
 
@@ -363,6 +365,6 @@ tracker. Local source imports already lower/check/run/build as module sets, and
 the MARV-48 application-language wave has landed first slices for collections,
 iteration, bytes/UTF-8, JSON, HTTP, `Spawn`, unsafe audit metadata, and generic
 ADT verification. Post-MARV-48 work covers recursive/materialized JSON,
-production listener/resource lifecycle safety, `linear` resource capabilities,
+production HTTP listener/router runtime,
 raw FFI operations, richer package metadata/query coverage, and broader
 verification.

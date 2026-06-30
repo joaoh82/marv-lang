@@ -1236,7 +1236,10 @@ impl<'a> Checker<'a> {
         // The capability identity (its nominal hash) and whether it is a known,
         // in-scope capability value.
         let cap_hash = match &cap_ty {
-            Ty::Known(Type::Nominal { def, .. }) if self.world.is_cap(def) => Some(*def),
+            Ty::Known(ty) => match peel(peel_eu(ty)) {
+                Type::Nominal { def, .. } if self.world.is_cap(def) => Some(*def),
+                _ => None,
+            },
             _ => None,
         };
         if cap_hash.is_none() {
@@ -1271,6 +1274,7 @@ impl<'a> Checker<'a> {
         if let Some(h) = cap_hash {
             eff.caps.push(h);
         }
+        let mut consumes_receiver = true;
         let ret = if let Some(h) = cap_hash {
             if let Some(sig) = self
                 .world
@@ -1278,6 +1282,7 @@ impl<'a> Checker<'a> {
                 .and_then(|c| c.ops.get(op.0 as usize))
                 .cloned()
             {
+                consumes_receiver = sig.consumes_receiver;
                 self.check_args(&sig.params, args, env, "capability operation");
                 for e in &sig.errors {
                     eff.errors.push(*e);
@@ -1290,7 +1295,11 @@ impl<'a> Checker<'a> {
             Ty::Unknown
         };
 
-        let mut uses = atom_uses(cap, env);
+        let mut uses = if consumes_receiver {
+            atom_uses(cap, env)
+        } else {
+            Uses::new()
+        };
         for a in args {
             uses = seq(&uses, &atom_uses(a, env));
         }
