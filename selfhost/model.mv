@@ -1,0 +1,303 @@
+mod selfhost.model
+import std.io (Alloc)
+import std.collections (List, len)
+
+/// Byte span in a source file. This mirrors Stage-0's definition-granular span
+/// shape but keeps line/column derivation as a later parser concern.
+struct SourceSpan { file: str, start_byte: usize, end_byte: usize }
+
+enum Severity {
+    Error,
+    Warning,
+    Info,
+}
+
+struct Diagnostic { code: str, severity: Severity, message: str, span: SourceSpan }
+
+enum TokenKind {
+    Ident(str),
+    Keyword(str),
+    IntLit(i64),
+    StringLit(str),
+    Symbol(str),
+    Eof,
+}
+
+struct Token { kind: TokenKind, span: SourceSpan }
+
+struct EffectSyntax { caps: List[str], errors: List[str] }
+
+/// Type syntax / Core type arena node. Recursive edges are node indices so
+/// parser and lowering slices can build the graph incrementally.
+enum TypeKind {
+    Unit,
+    Bool,
+    Int(str),
+    Str,
+    Named(str, usize),
+    Array(usize, usize),
+    Slice(usize),
+    Arrow(usize, usize, EffectSyntax),
+    Ref(bool, usize),
+    Var(usize),
+}
+
+struct TypeNode { kind: TypeKind, span: SourceSpan }
+
+struct ImportDecl { path: str, names: List[str], span: SourceSpan }
+
+struct Param { name: str, ty: usize, span: SourceSpan }
+
+struct AstField { name: str, ty: usize, span: SourceSpan }
+
+struct AstVariant { name: str, fields: List[usize], span: SourceSpan }
+
+struct AstArm { tag: str, binds: List[str], body: usize, span: SourceSpan }
+
+enum AstItemKind {
+    Struct(str, usize),
+    Enum(str, usize),
+    Fn(str, usize, usize, usize),
+}
+
+struct AstItem { kind: AstItemKind, span: SourceSpan }
+
+enum AstExprKind {
+    Int(i64),
+    Bool(bool),
+    Str(str),
+    Var(str),
+    Call(usize, usize),
+    If(usize, usize, usize),
+    Match(usize, usize),
+    StructLit(str, usize),
+}
+
+struct AstExpr { kind: AstExprKind, span: SourceSpan }
+
+struct AstModule { name: str, imports: List[ImportDecl], types: List[TypeNode], items: List[AstItem], exprs: List[AstExpr], span: SourceSpan }
+
+enum CoreAtom {
+    Var(usize),
+    Global(str),
+    Unit,
+    Bool(bool),
+    Int(i64),
+    Str(str),
+}
+
+struct CoreBranch { tag: i64, binds: usize, body: usize }
+
+enum CoreNodeKind {
+    Atom(CoreAtom),
+    Lam(usize, usize),
+    App(CoreAtom, CoreAtom),
+    Let(usize, usize),
+    Prim(str, usize),
+    Ctor(str, i64, usize),
+    Proj(CoreAtom, usize),
+    Match(CoreAtom, usize),
+    Loop(usize, usize, usize),
+    Perform(CoreAtom, i64, usize),
+    Raise(str),
+    Ref(bool, CoreAtom),
+}
+
+struct CoreNode { kind: CoreNodeKind, ty: usize, span: SourceSpan }
+
+struct CoreDef { name: str, ty: usize, root: usize, span: SourceSpan }
+
+struct CoreModule { name: str, types: List[TypeNode], defs: List[CoreDef], nodes: List[CoreNode], diagnostics: List[Diagnostic] }
+
+pure fn span_width(span: SourceSpan) -> i64 {
+    ((span.end_byte - span.start_byte) as i64)
+}
+
+fn empty_effects(alloc: Alloc) -> EffectSyntax {
+    let caps: List[str] = List { alloc: alloc, items: [] }
+    let errors: List[str] = List { alloc: alloc, items: [] }
+    EffectSyntax { caps: caps, errors: errors }
+}
+
+fn sample_span() -> SourceSpan {
+    SourceSpan { file: "selfhost/sample.mv", start_byte: 0, end_byte: 42 }
+}
+
+fn sample_types(alloc: Alloc) -> List[TypeNode] {
+    let span: SourceSpan = sample_span()
+    List { alloc: alloc, items: [TypeNode { kind: TypeKind.Int("i64"), span: span }, TypeNode { kind: TypeKind.Bool, span: span }, TypeNode { kind: TypeKind.Arrow(0, 0, empty_effects(alloc)), span: span }] }
+}
+
+fn sample_imports(alloc: Alloc, span: SourceSpan) -> List[ImportDecl] {
+    let import_names: List[str] = List { alloc: alloc, items: ["Alloc"] }
+    List { alloc: alloc, items: [ImportDecl { path: "std.io", names: import_names, span: span }] }
+}
+
+fn sample_ast_exprs(alloc: Alloc, span: SourceSpan) -> List[AstExpr] {
+    List { alloc: alloc, items: [AstExpr { kind: AstExprKind.Int(1), span: span }, AstExpr { kind: AstExprKind.Var("n"), span: span }, AstExpr { kind: AstExprKind.Call(1, 1), span: span }, AstExpr { kind: AstExprKind.If(1, 0, 2), span: span }] }
+}
+
+fn sample_ast_items(alloc: Alloc, span: SourceSpan) -> List[AstItem] {
+    List { alloc: alloc, items: [sample_ast_fn_item(span)] }
+}
+
+fn sample_ast_fn_item(span: SourceSpan) -> AstItem {
+    AstItem { kind: AstItemKind.Fn("bump_or_one", 1, 0, 3), span: span }
+}
+
+fn sample_ast_body_expr(span: SourceSpan) -> AstExpr {
+    AstExpr { kind: AstExprKind.If(1, 0, 2), span: span }
+}
+
+fn sample_ast_module(alloc: Alloc) -> AstModule {
+    let span: SourceSpan = sample_span()
+    let types: List[TypeNode] = sample_types(alloc)
+    let imports: List[ImportDecl] = sample_imports(alloc, span)
+    let exprs: List[AstExpr] = List { alloc: alloc, items: [AstExpr { kind: AstExprKind.Int(1), span: span }, AstExpr { kind: AstExprKind.Var("n"), span: span }, AstExpr { kind: AstExprKind.Call(1, 1), span: span }, AstExpr { kind: AstExprKind.If(1, 0, 2), span: span }] }
+    let items: List[AstItem] = sample_ast_items(alloc, span)
+    AstModule { name: "sample", imports: imports, types: types, items: items, exprs: exprs, span: span }
+}
+
+fn type_weight(node: TypeNode) -> i64 {
+    match node.kind {
+        TypeKind.Unit => 1,
+        TypeKind.Bool => 1,
+        TypeKind.Int(name) => (1 + (len(name) as i64)),
+        TypeKind.Str => 1,
+        TypeKind.Named(name, arg_count) => ((2 + (len(name) as i64)) + (arg_count as i64)),
+        TypeKind.Array(elem, size) => ((3 + (elem as i64)) + (size as i64)),
+        TypeKind.Slice(elem) => (2 + (elem as i64)),
+        TypeKind.Arrow(param, ret, effects) => (((3 + (param as i64)) + (ret as i64)) + effect_weight(effects)),
+        TypeKind.Ref(mutable, of) => ref_type_weight(mutable, of),
+        TypeKind.Var(index) => (1 + (index as i64)),
+    }
+}
+
+fn effect_weight(effects: EffectSyntax) -> i64 {
+    ((len(effects.caps) + len(effects.errors)) as i64)
+}
+
+fn ref_type_weight(mutable: bool, of: usize) -> i64 {
+    if mutable {
+        (4 + (of as i64))
+    } else {
+        (3 + (of as i64))
+    }
+}
+
+fn ast_expr_weight(expr: AstExpr) -> i64 {
+    match expr.kind {
+        AstExprKind.Int(value) => (1 + value),
+        AstExprKind.Bool(flag) => bool_weight(flag),
+        AstExprKind.Str(text) => (1 + (len(text) as i64)),
+        AstExprKind.Var(name) => (1 + (len(name) as i64)),
+        AstExprKind.Call(callee, arg_count) => ast_call_weight(callee, arg_count),
+        AstExprKind.If(cond, yes, no) => (((3 + (cond as i64)) + (yes as i64)) + (no as i64)),
+        AstExprKind.Match(scrutinee, arm_count) => ((4 + (scrutinee as i64)) + (arm_count as i64)),
+        AstExprKind.StructLit(name, field_count) => ((2 + (len(name) as i64)) + (field_count as i64)),
+    }
+}
+
+fn ast_call_weight(callee: usize, arg_count: usize) -> i64 {
+    ((2 + (callee as i64)) + (arg_count as i64))
+}
+
+fn representative_ast_score(alloc: Alloc) -> i64 {
+    let span: SourceSpan = sample_span()
+    let module: AstModule = sample_ast_module(alloc)
+    let ret_type: TypeNode = TypeNode { kind: TypeKind.Int("i64"), span: span }
+    let body_expr: AstExpr = sample_ast_body_expr(span)
+    let item: AstItem = sample_ast_fn_item(span)
+    match item.kind {
+        AstItemKind.Struct(name, field_count) => ((len(name) + field_count) as i64),
+        AstItemKind.Enum(name, variant_count) => ((len(name) + variant_count) as i64),
+        AstItemKind.Fn(name, param_count, ret, body) => ast_fn_weight(module, ret_type, body_expr, name, param_count, ret, body),
+    }
+}
+
+fn ast_fn_weight(module: AstModule, ret_type: TypeNode, body_expr: AstExpr, name: str, param_count: usize, ret: usize, body: usize) -> i64 {
+    let shape: i64 = (((1 + 1) + 4) as i64)
+    (((((((shape + (len(module.name) as i64)) + (len(name) as i64)) + (param_count as i64)) + (ret as i64)) + (body as i64)) + type_weight(ret_type)) + ast_expr_weight(body_expr))
+}
+
+fn sample_core_nodes(alloc: Alloc, span: SourceSpan) -> List[CoreNode] {
+    List { alloc: alloc, items: [CoreNode { kind: CoreNodeKind.Atom(CoreAtom.Int(1)), ty: 0, span: span }, CoreNode { kind: CoreNodeKind.Atom(CoreAtom.Var(0)), ty: 0, span: span }, CoreNode { kind: CoreNodeKind.Prim("add", 2), ty: 0, span: span }, CoreNode { kind: CoreNodeKind.Lam(0, 2), ty: 2, span: span }] }
+}
+
+fn sample_core_defs(alloc: Alloc, span: SourceSpan) -> List[CoreDef] {
+    List { alloc: alloc, items: [CoreDef { name: "bump", ty: 2, root: 3, span: span }] }
+}
+
+fn sample_core_def(span: SourceSpan) -> CoreDef {
+    CoreDef { name: "bump", ty: 2, root: 3, span: span }
+}
+
+fn sample_core_root(span: SourceSpan) -> CoreNode {
+    CoreNode { kind: CoreNodeKind.Lam(0, 2), ty: 2, span: span }
+}
+
+fn sample_core_module(alloc: Alloc) -> CoreModule {
+    let span: SourceSpan = sample_span()
+    let types: List[TypeNode] = sample_types(alloc)
+    let nodes: List[CoreNode] = sample_core_nodes(alloc, span)
+    let defs: List[CoreDef] = sample_core_defs(alloc, span)
+    let diagnostics: List[Diagnostic] = List { alloc: alloc, items: [] }
+    CoreModule { name: "sample", types: types, defs: defs, nodes: nodes, diagnostics: diagnostics }
+}
+
+fn core_atom_weight(atom: CoreAtom) -> i64 {
+    match atom {
+        CoreAtom.Var(index) => (1 + (index as i64)),
+        CoreAtom.Global(name) => (2 + (len(name) as i64)),
+        CoreAtom.Unit => 1,
+        CoreAtom.Bool(flag) => bool_weight(flag),
+        CoreAtom.Int(value) => (1 + value),
+        CoreAtom.Str(text) => (1 + (len(text) as i64)),
+    }
+}
+
+pure fn bool_weight(flag: bool) -> i64 {
+    if flag {
+        2
+    } else {
+        1
+    }
+}
+
+fn core_node_weight(param_type: TypeNode, node: CoreNode) -> i64 {
+    match node.kind {
+        CoreNodeKind.Atom(atom) => core_atom_weight(atom),
+        CoreNodeKind.Lam(param_ty, body) => (((3 + type_weight(param_type)) + (param_ty as i64)) + (body as i64)),
+        CoreNodeKind.App(func, arg) => ((2 + core_atom_weight(func)) + core_atom_weight(arg)),
+        CoreNodeKind.Let(value, body) => ((2 + (value as i64)) + (body as i64)),
+        CoreNodeKind.Prim(op, arg_count) => ((2 + (len(op) as i64)) + (arg_count as i64)),
+        CoreNodeKind.Ctor(name, tag, field_count) => (((3 + (len(name) as i64)) + tag) + (field_count as i64)),
+        CoreNodeKind.Proj(base, index) => ((2 + core_atom_weight(base)) + (index as i64)),
+        CoreNodeKind.Match(scrutinee, branch_count) => ((4 + core_atom_weight(scrutinee)) + (branch_count as i64)),
+        CoreNodeKind.Loop(state_count, cond, body) => (((5 + (state_count as i64)) + (cond as i64)) + (body as i64)),
+        CoreNodeKind.Perform(cap, op, arg_count) => (((6 + core_atom_weight(cap)) + op) + (arg_count as i64)),
+        CoreNodeKind.Raise(name) => (5 + (len(name) as i64)),
+        CoreNodeKind.Ref(mutable, atom) => ref_atom_weight(mutable, atom),
+    }
+}
+
+fn ref_atom_weight(mutable: bool, atom: CoreAtom) -> i64 {
+    if mutable {
+        (4 + core_atom_weight(atom))
+    } else {
+        (3 + core_atom_weight(atom))
+    }
+}
+
+fn representative_core_score(alloc: Alloc) -> i64 {
+    let span: SourceSpan = sample_span()
+    let module: CoreModule = sample_core_module(alloc)
+    let param_type: TypeNode = TypeNode { kind: TypeKind.Int("i64"), span: span }
+    let root: CoreNode = sample_core_root(span)
+    let def: CoreDef = sample_core_def(span)
+    (((((1 + 4) as i64) + (len(module.name) as i64)) + (def.ty as i64)) + core_node_weight(param_type, root))
+}
+
+fn selfhost_model_score(alloc: Alloc) -> i64 {
+    (representative_ast_score(alloc) + representative_core_score(alloc))
+}

@@ -13,9 +13,10 @@
 use std::path::PathBuf;
 
 use marv_core::ir::*;
-use marv_core::lower_module;
+use marv_core::{lower_module, lower_modules};
 use marv_interp::{Program, Value};
-use marv_types::World;
+use marv_syntax::Module;
+use marv_types::{check_def, Severity, World};
 
 /// PrimOp tag (the stable content-encoding tag from `marv-core`) → the op, with
 /// flags for how the oracle must be fed.
@@ -107,6 +108,79 @@ fn candidate_program() -> Program {
     Program::new("selfhost", defs, World::new())
 }
 
+fn repo_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .expect("repo root")
+        .to_path_buf()
+}
+
+fn parse_file(path: PathBuf) -> Module {
+    let src = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path:?}: {e}"));
+    marv_syntax::parse(&src).unwrap_or_else(|e| panic!("parse {path:?}: {e}"))
+}
+
+fn selfhost_model_program() -> Program {
+    let root = repo_root();
+    let model_path = root.join("selfhost/model.mv");
+    let model_src =
+        std::fs::read_to_string(&model_path).unwrap_or_else(|e| panic!("read {model_path:?}: {e}"));
+    let model = marv_syntax::parse(&model_src).expect("parse model.mv");
+    assert_eq!(
+        marv_syntax::format_module(&model),
+        model_src,
+        "selfhost/model.mv must be in canonical form"
+    );
+
+    let std_io = parse_file(root.join("std/capabilities.mv"));
+    let std_collections = parse_file(root.join("std/collections.mv"));
+    let modules = vec![model, std_io, std_collections];
+    let lowered = lower_modules(&modules).expect("lower selfhost model + std");
+    let world = World::from_modules(&lowered);
+    let model_lowered = lowered
+        .iter()
+        .find(|module| module.module == ["selfhost".to_string(), "model".to_string()])
+        .expect("lowered selfhost.model");
+    let mut errors = Vec::new();
+    for entry in &model_lowered.defs {
+        errors.extend(
+            check_def(&world, &entry.def, Some(&entry.name))
+                .into_iter()
+                .filter(|d| d.severity == Severity::Error),
+        );
+    }
+    assert!(
+        errors.is_empty(),
+        "selfhost.model must check clean: {errors:?}"
+    );
+
+    let mut defs = Vec::new();
+    for (module, lowered_module) in modules.iter().zip(lowered.into_iter()) {
+        let prefix = module.name.join(".");
+        for entry in lowered_module.defs {
+            let name = if prefix == "selfhost.model" {
+                entry.name
+            } else {
+                format!("{prefix}.{}", entry.name)
+            };
+            defs.push((name, entry.def));
+        }
+    }
+    Program::new("selfhost.model", defs, world)
+}
+
+fn run_model_score(prog: &Program, entry: &str) -> i64 {
+    match prog
+        .run(entry, &["Alloc".to_string()], &[])
+        .unwrap_or_else(|e| panic!("run {entry}: {e:?}"))
+        .value
+    {
+        Value::Int(n) => n,
+        other => panic!("{entry} produced {other:?}"),
+    }
+}
+
 /// The Rust Stage-0 oracle: evaluate `Prim{op,[a,b]}` through the real
 /// interpreter and return its result as an i64 (booleans as 0/1).
 fn oracle(prim: PrimOp, a: i64, b: i64, boolean: bool) -> i64 {
@@ -187,4 +261,13 @@ fn ported_eval_prim_matches_the_rust_oracle() {
             }
         }
     }
+}
+
+#[test]
+fn selfhost_model_constructs_and_traverses_representative_ast_and_core_values() {
+    let prog = selfhost_model_program();
+
+    assert_eq!(run_model_score(&prog, "representative_ast_score"), 37);
+    assert_eq!(run_model_score(&prog, "representative_core_score"), 22);
+    assert_eq!(run_model_score(&prog, "selfhost_model_score"), 59);
 }
