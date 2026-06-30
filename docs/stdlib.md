@@ -17,7 +17,8 @@ the capability interfaces every program links against (`spec/01` §§3, 5, 6).
 > and `Set[T]` types with a first string-keyed/string-set operation slice over explicit
 > `Alloc` (MARV-50), plus the scalar hash-backed `i64` path from MARV-61. `std.http`
 > now exposes host-provided request/response structs over an explicit `Http` capability
-> (MARV-53). `std.spawn` now exposes the first scoped `Spawn` task-handle slice
+> (MARV-53), and `std.io.Listener.accept_http` lets a `Net`-authorized listener accept
+> one HTTP exchange for router code (MARV-63). `std.spawn` now exposes the first scoped `Spawn` task-handle slice
 > (MARV-56), and `std.io` marks `File`, `Listener`, and `Conn` as `linear interface`
 > resource capabilities: `open`/`connect`/`listen` results must be closed exactly once
 > (MARV-64). The capability *model* is also exercised over the Core IR and on WebAssembly
@@ -188,17 +189,25 @@ pure fn serialize_object(object: JsonObject) -> str
 
 ### `std/http.mv` — request/response
 `Http` is declared in `std/capabilities.mv`; `std.http` layers normal app-level
-types over it. A host hands a function an `Http` capability for one request.
-The current ABI exposes UTF-8 request pieces (`method`, `path`, `body`) and a
-single `respond(status, body)` operation. Raw bytes, streaming bodies, and production listener
-accept loops remain future runtime work; close-once lifecycle checking for `File`, `Listener`,
-and `Conn` resources now lives in `std.io`.
+types over it. A host can hand a function an `Http` capability for one request
+directly (`marv run --grant Http`) or return one from a `Listener.accept_http()`
+operation on a listener created with explicit `Net` authority. The current ABI exposes
+UTF-8 request pieces (`method`, `path`, `body`) and a `respond(status, body)` operation.
+Raw bytes, streaming bodies, multi-request serve loops, and real OS socket scheduling remain
+host/runtime follow-ups; close-once lifecycle checking for `File`, `Listener`, and `Conn`
+resources lives in `std.io`.
 
 ```marv
 struct Request { method: str, path: str, body: str }
 struct Response { status: u16, body: str }
+pure fn request_method(request: Request) -> str
+pure fn request_path(request: Request) -> str
 pure fn request_body(request: Request) -> str
+pure fn route_matches(request: Request, method: str, path: str) -> bool
 pure fn response(status: u16, body: str) -> Response
+pure fn text_response(body: str) -> Response
+pure fn json_response(status: u16, body: str) -> Response
+pure fn not_found() -> Response
 fn receive(http: Http) -> !Request
 fn send(http: Http, response: Response) -> !
 ```
@@ -234,7 +243,7 @@ supplies the implementations the process/page chooses to grant.
 | `Net` | Network | `get(url) -> ![]u8`, `connect(host, port) -> !Conn`, `listen(host, port) -> !Listener` |
 | `Http` | One server request/response exchange | `method()`, `path()`, `body_text()`, `respond(status, body)` |
 | `File` | Linear file handle | `read`, `write`, `close` |
-| `Listener` | Linear listening socket | `accept`, `close` |
+| `Listener` | Linear listening socket | `accept`, `accept_http`, `close` |
 | `Conn` | Linear open connection | `send`, `recv`, `close` |
 | `Spawn` | Structured-concurrency authority | `start() -> !` |
 | `Clock` | Monotonic time | `now() -> i64` |

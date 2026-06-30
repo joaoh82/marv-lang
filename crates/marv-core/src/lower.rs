@@ -3733,6 +3733,7 @@ impl Lowerer {
                     inner: Box::new(t),
                 }),
             },
+            Expr::Try(inner) => self.type_of_expr(inner, env).map(peel_error_union_ty),
             _ => None,
         }
     }
@@ -4114,6 +4115,15 @@ fn iter_elem_stype(t: &SType) -> Option<&SType> {
 fn peel_ref_ty(t: SType) -> SType {
     match t {
         SType::Ref { inner, .. } => peel_ref_ty(*inner),
+        other => other,
+    }
+}
+
+/// `e?` yields the success side of `!T` for best-effort source type inference.
+fn peel_error_union_ty(t: SType) -> SType {
+    match t {
+        SType::ErrorUnion(Some(inner)) => *inner,
+        SType::ErrorUnion(None) => SType::Unit,
         other => other,
     }
 }

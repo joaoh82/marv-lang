@@ -179,12 +179,13 @@ contracts. Local source imports are discoverable by the CLI, and source-only
 JSON-RPC snapshots can be checked as a module set. `std.bytes` provides UTF-8
 helpers, `std.json` provides the first scalar/source-backed flat-object parsing and
 serialization slice, `std.http` exposes the first host-provided request/response capability,
+`std.io.Listener.accept_http` exposes a listener-accepted HTTP exchange for one router turn,
 `std.spawn` exposes scoped linear task handles over explicit `Spawn`, `unsafe fn` audit metadata is
 queryable through `marv/unsafeSites`, and
 explicit-allocation `List`/`Set`/`Map` collection literals plus `std.iter.IndexIter[T]` are
 implemented. `File`, `Listener`, and `Conn` are now linear resource capabilities that must
 be closed exactly once. Post-MARV-48 roadmap work includes
-recursive/materialized JSON, production HTTP listener/router runtime, raw FFI operations,
+recursive/materialized JSON, host-backed multi-request HTTP serving, raw FFI operations,
 richer package metadata, and package-aware read queries. For
 anything not yet expressible, construct a `*.core.json` snapshot (see
 [`store.md`](store.md) and the `tests/run/*.core.json` fixtures) or check

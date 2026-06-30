@@ -313,7 +313,9 @@ lowers to a **call to an imported function** — one import per
 - String operands to an import are passed as the normal `str` ABI word: a pointer
   to the module's `[len, codepoint…]` linear-memory block.
 - String results from an import use the same one-word handle shape. The core-WASM
-  backend can model this today for `Http.method/path/body_text`; component/WIT
+  backend can model this today for `Http.method/path/body_text`. Listener operations that
+  return linear resource capabilities, such as `Net.listen`, still report honest
+  `unsupported`; component/WIT
   packaging remains the place where those handles become named host-level string
   types.
 
@@ -322,7 +324,7 @@ lowers to a **call to an imported function** — one import per
 `crates/marv-codegen-wasm/tests/differential.rs` runs the same `tests/run/*.mv`
 corpus through **wasmtime** and asserts it matches the interpreter, and checks
 that a pure module imports nothing, a `Net`-performing module imports exactly
-`Net`, and a string-returning `Http` operation validates as a host import.
+`Net`, and string-returning `Http` operations validate as host imports.
 
 [`../web/`](../web) is a dependency-free browser demo (serve it with any static
 server) proving the sandbox live:

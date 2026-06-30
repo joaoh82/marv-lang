@@ -49,7 +49,7 @@ where each one sits and what must land first. Each task references back here.
 | **MARV-60** roadmap/docs cleanup for MARV-48 | 5 · Infra/polish | MARV-48 | 49–59 | low |
 | ~~**MARV-61** hash-backed general-key `Map`/`Set` with `Hash`/`Eq` interfaces~~ ✅ done — adds stored hashes to the std map/set entry layout, a first `Hash[T]` interface carrying explicit `hash_key` + `key_eq`, and scalar-key `map_i64_*` / `set_i64_*` operations for `Map[i64, V]` and `Set[i64]` while preserving dynamic string-key behavior and collection literals across interpreter, Cranelift, and WASM | 6 · Std collections | ~~MARV-50~~ ✅, ~~MARV-5~~ ✅ | 55 | medium |
 | **MARV-62** production application platform + self-hosting epic | 7 · Production/self-hosting | ~~MARV-48~~ ✅ | 63–74 | high |
-| **MARV-63** production HTTP listener/router runtime | 7 · Runtime/capabilities | 64 | — | high |
+| ~~**MARV-63** production HTTP listener/router runtime~~ ✅ done — adds `Listener.accept_http() -> !Http`, a runnable `examples/http_router.mv` with two routes and a JSON response, deterministic interpreter support for `Net.listen` → `Listener.accept_http` → `Http.respond`, and docs that keep raw/streaming bodies, multi-request scheduling, real OS socket serving, and WASM linear-resource import support honest as follow-ups. | 7 · Runtime/capabilities | ~~MARV-64~~ ✅ | — | high |
 | ~~**MARV-64** linear resource capabilities for files/listeners/connections~~ ✅ done — adds `linear interface` for capability resource handles, marks `File`, `Listener`, and `Conn` as close-once resources, and pins source diagnostics for forgotten close, double close, and branch-only close paths. Production listener loops remain MARV-63 | 7 · Runtime/capabilities | ~~MARV-56~~ ✅ | 63 | high |
 | **MARV-65** raw FFI operations behind explicit unsafe audit boundaries | 7 · Platform/unsafe | ~~MARV-57~~ ✅, 64 *(for raw resource handles where needed)* | — | medium |
 | **MARV-66** recursive/materialized JSON DOM with typed codecs | 7 · Std/app data | ~~MARV-55~~ ✅, ~~MARV-59~~ ✅, ~~MARV-61~~ ✅ | 63 | medium |
@@ -154,11 +154,11 @@ that performs — or any function reaching a capability it never received — is
 op returns the narrowed capability value; the CLI resolves `import std.*` to the `std/` sources
 (transitively) so the capability interfaces are in scope (`MARV_STD` overrides discovery; MARV-49
 extends the same source-module loading to local non-`std` imports). `std/capabilities.mv` parses/checks; `examples/hello.mv`
-(`io.stdout().write(...)`), `examples/read_file.mv` (`io.fs()` → `fs.read`), and
-`examples/http_echo.mv` (`Http` request/response) check, infer their rows, and run under explicit
+(`io.stdout().write(...)`), `examples/read_file.mv` (`io.fs()` → `fs.read`),
+`examples/http_echo.mv` (`Http` request/response), and `examples/http_router.mv`
+(`Net.listen` → `Listener.accept_http` → `Http.respond`) check, infer their rows, and run under explicit
 grants. Cranelift n/a (rejects `Perform`); WASM lowers a `perform` to a host import. Linear
-resource capabilities for `File`, `Listener`, and `Conn` landed in MARV-64; production listener
-serving remains MARV-63.
+resource capabilities for `File`, `Listener`, and `Conn` landed in MARV-64.
 · **MARV-18** single-file lowering of imported enum constructors / matches: the CLI's
 `import std.*` resolution (MARV-6) now serves enums too — `marv check std/result.mv` standalone
 lowers the `Option.Some(x)`/`Option.None` it builds to real `Ctor`s with the `std.option.Option`
@@ -275,7 +275,7 @@ operations, recursive/materialized JSON, and deeper verification.
 
 The first implementation wave kept scope narrow and is now complete; the next production
 wave is tracked by MARV-62 through MARV-74. Close-once resource capability safety landed in
-MARV-64; production HTTP listener/router runtime remains MARV-63:
+MARV-64, and the first listener-accepted HTTP router slice landed in MARV-63:
 
 1. ~~**MARV-60**~~ ✅ — keep this roadmap and status docs aligned with the tracker.
 2. ~~**MARV-49**~~ ✅ — make non-`std` project/package/module discovery real. MARV-14
@@ -283,8 +283,8 @@ MARV-64; production HTTP listener/router runtime remains MARV-63:
    developer-facing source/project layer above it.
 3. ~~**MARV-54**~~ ✅ — add practical bytes + UTF-8 utilities, because file/network/HTTP
    boundaries need byte payloads before JSON or HTTP can be honest.
-4. ~~**MARV-53**~~ ✅ — add the HTTP/server capability and host ABI story; its production
-   listener/router runtime continues as MARV-63 after MARV-64's linear resource lifecycle slice.
+4. ~~**MARV-53**~~ ✅ — add the HTTP/server capability and host ABI story; its listener/router
+   runtime slice continued as MARV-63 after MARV-64's linear resource lifecycle slice.
 
 The rest of the MARV-48 wave is also landed: ~~**MARV-50**~~ ✅ first-slice
 maps/sets, ~~**MARV-51**~~ ✅ collection literals, ~~**MARV-52**~~ ✅ iterators,
@@ -348,10 +348,10 @@ builds)~~ ✅ and ~~MARV-12 (doc-comments + spans)~~ ✅ are both done — the t
   project/package discovery beyond the special-cased `std` loader, bytes/UTF-8, the first
   HTTP request capability/host ABI slice, JSON/serialization, loop-body early returns, and
   the first scoped `Spawn` task-handle slice, unsafe audit metadata, generic non-recursive ADT
-  verification, scalar hash-backed `Map`/`Set` operations, and MARV-64's linear resource
-  capability lifecycle slice. Remaining post-MARV-48 work
-  covers production listener/router runtime, raw FFI operations, recursive/materialized
-  JSON, richer package metadata/query coverage, and broader verification.
+  verification, scalar hash-backed `Map`/`Set` operations, MARV-64's linear resource
+  capability lifecycle slice, and MARV-63's listener-accepted HTTP router slice. Remaining
+  post-MARV-48 work covers host-backed multi-request HTTP serving, raw FFI operations,
+  recursive/materialized JSON, richer package metadata/query coverage, and broader verification.
 
 ## How a task is meant to be picked up
 

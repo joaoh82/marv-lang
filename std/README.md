@@ -62,11 +62,13 @@ scalars plus validated objects. Recursive arrays/materialized object maps stay w
 recursive-ADT and hash-map work.
 
 `http.mv` is the first server-runtime std layer. A host grants one `Http`
-capability per request; low-level operations read the method/path/body text and
-send a response, while user code can work with normal `Request` and `Response`
-structs through helper functions. Listener loops and raw byte streaming stay
-future runtime work; `File`, `Listener`, and `Conn` close-once lifecycle safety
-is represented in `capabilities.mv` with `linear interface` resource capabilities.
+capability per request, or a `Net`-authorized `Listener` can accept one with
+`accept_http`; low-level operations read the method/path/body text and send a
+response, while user code can work with normal `Request` and `Response` structs
+through helper functions. Multi-request serve loops, raw byte streaming, and OS
+socket scheduling stay host/runtime follow-ups; `File`, `Listener`, and `Conn`
+close-once lifecycle safety is represented in `capabilities.mv` with
+`linear interface` resource capabilities.
 
 `spawn.mv` is the first structured-concurrency std slice. `Spawn` is capability-gated in
 `capabilities.mv`; `spawn_i64` performs `Spawn.start` and returns a `linear TaskI64`, and

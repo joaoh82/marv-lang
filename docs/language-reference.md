@@ -231,11 +231,12 @@ checked against the function's capability parameters, where a held capability au
 **narrowing closure** (holding `Io` authorizes `Fs`/`Net`/`Http`/… ). A `pure fn` — or a function that
 reaches a capability it never received — that performs is `MissingCapability` (E0110). Standard
 capabilities: `Io` (root) and narrower `Fs`, `Net`, `Http`, `Spawn`, `Clock`, `Rand`, `Alloc` (see
-[`std/`](../std)). `Http` represents one host-provided server request/response exchange;
-without it a handler cannot read request data or send a response. On WebAssembly a capability
+[`std/`](../std)). `Http` represents one host-provided server request/response exchange, and
+`Listener.accept_http()` can produce that exchange from explicit `Net.listen` authority;
+without those capabilities a handler cannot bind, read request data, or send a response. On WebAssembly a capability
 is a host import the page chooses to provide — see [platform support](platform-support.md).
-(Generic interfaces like `Ord[T]` are bounded polymorphism, not capabilities; production HTTP
-listener loops remain roadmap.)
+(Generic interfaces like `Ord[T]` are bounded polymorphism, not capabilities; host-backed
+multi-request HTTP serving remains roadmap.)
 
 ## 6. Errors: inferred sets **[impl]**
 

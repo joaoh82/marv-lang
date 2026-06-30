@@ -34,12 +34,15 @@ module can mix supported and not-yet-supported functions. The WASM backend addit
 - **Interpreter** (`marv run --grant CAP,…`): the host's grant set is injected at the entry
   point; each `perform` is recorded as an effect; an ungranted capability is refused at the
   boundary (defense-in-depth behind the static effect-row guarantee). For `Http`, the
-  interpreter includes a deterministic test host (`POST /echo`, body `marv-http-echo`) so
-  request/response app logic can run before a production listener runtime exists.
+  interpreter includes a deterministic test host (`POST /echo`, body `marv-http-echo`).
+  `Net.listen`/`Listener.accept_http` can drive one listener-accepted HTTP exchange against
+  that same deterministic host; real OS socket scheduling remains host runtime work.
 - **WebAssembly**: each capability operation is a module **import**. A pure module imports
   nothing (no slot through which authority could be handed to it); a module that wants the
   network or HTTP request access imports `Net`/`Http` and **cannot be instantiated** unless
-  the host supplies it. Scalar, boolean, and string values cross the current core-WASM ABI as
+  the host supplies it. The current core-WASM backend still reports an honest `unsupported`
+  for listener operations that return linear resource capabilities, such as `Net.listen`.
+  Scalar, boolean, and string values cross the current core-WASM ABI as
   one-word slots; component/WIT packaging will make those names/types explicit. The import list
   is the capability manifest, statically inspectable
   (`WebAssembly.Module.imports` / the `marv build` output). See [`web/`](../web).

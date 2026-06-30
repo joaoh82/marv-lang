@@ -1,0 +1,23 @@
+mod http_router
+import std.io (Http, Listener, Net)
+
+fn serve_once(net: Net) -> !str {
+    let listener: Listener = net.listen("127.0.0.1", (8080 as u16))?
+    let http = listener.accept_http()?
+    let method: str = http.method()?
+    let path: str = http.path()?
+    let body: str = http.body_text()?
+    if ((method == "GET") and (path == "/health")) {
+        let sent = http.respond((200 as u16), "{\"ok\":true}")?
+        let closed = listener.close()?
+        "health"
+    } else if ((method == "POST") and (path == "/echo")) {
+        let sent = http.respond((200 as u16), body)?
+        let closed = listener.close()?
+        "echo"
+    } else {
+        let sent = http.respond((404 as u16), "not found")?
+        let closed = listener.close()?
+        "not-found"
+    }
+}

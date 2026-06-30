@@ -11,6 +11,7 @@ fixture source for the test suite. As of M4 the integer/boolean subset is
 | [`hello.mv`](hello.mv) | **Runnable (MARV-6):** capabilities & `perform` from source — `io.stdout()` narrows `Io` to a `Stream`, `out.write(...)` performs. `marv run --grant Io examples/hello.mv` logs the `Io`/`Stream` effects; without `--grant Io` it is refused. |
 | [`read_file.mv`](read_file.mv) | **Runnable (MARV-6):** capability **narrowing** — `io.fs()` attenuates `Io` to `Fs`, then `fs.read(path)` performs. `marv run --grant Io examples/read_file.mv /etc/hosts` records the `Io`→`Fs` narrowing and the read; the signature alone proves it touches only the filesystem. |
 | [`http_echo.mv`](http_echo.mv) | **Runnable (MARV-53):** request/response app logic over an explicit `Http` capability. `std.http.receive` reads the host-provided method/path/body, `send` responds, and `marv run --grant Http examples/http_echo.mv` returns the deterministic interpreter test-host body. |
+| [`http_router.mv`](http_router.mv) | **Runnable (MARV-63):** listener/router shape over explicit `Net` authority. `net.listen` creates a linear `Listener`, `accept_http` yields one `Http` exchange, two routes respond (including a JSON body), and the listener is closed exactly once. `marv run --entry serve_once --grant Net examples/http_router.mv` uses the deterministic interpreter host. |
 | [`spawn.mv`](spawn.mv) | **Runnable (MARV-56):** structured-concurrency first slice over an explicit `Spawn` capability. `std.spawn.spawn_i64` returns linear task handles, `join_i64` consumes them, and `marv run --grant Spawn examples/spawn.mv` records two `Spawn.start` effects before returning `42`. |
 | [`resource_lifecycle.mv`](resource_lifecycle.mv) | **Checks (MARV-64):** linear resource capabilities — `File`, `Listener`, and `Conn` values returned by `Fs`/`Net` operations must be closed exactly once. |
 | [`unsafe_audit.mv`](unsafe_audit.mv) | **Checks (MARV-57):** `unsafe fn` with a required `SAFETY:` doc comment. It appears in `marv/unsafeSites` and contributes unsafe-site metadata to `marv store audit` when committed. |
@@ -51,6 +52,7 @@ contract arithmetic, and `old(e)`); `color.mv` when `enum`/`match` landed; `gene
 `bytes_utf8.mv` when the source-level `std.bytes` UTF-8 helpers landed (MARV-54);
 `json.mv` when the first `std.json` scalar/flat-object slice landed (MARV-55);
 `http_echo.mv` when the first host-provided HTTP request capability landed (MARV-53);
+`http_router.mv` when listener-accepted HTTP exchanges landed (MARV-63);
 `spawn.mv` when scoped `Spawn` task handles landed (MARV-56);
 `unsafe_audit.mv` when `unsafe fn` audit metadata landed (MARV-57).
 `factorial.mv`, `arithmetic.mv`, `color.mv`, `mutation.mv`, `loops.mv`,
@@ -59,7 +61,8 @@ contract arithmetic, and `old(e)`); `color.mv` when `enum`/`match` landed; `gene
 (`factorial`, `arithmetic`, `loops`, `arrays`, `slices`) also run on the Cranelift JIT (`marv build --run`)
 and WebAssembly (`marv build --target wasm-component`, then via wasmtime or the browser
 demo in [`../web/`](../web)). `hello`/`read_file` run on the interpreter under
-`marv run --grant Io`, and `http_echo` runs under `marv run --grant Http`
+`marv run --grant Io`, `http_echo` runs under `marv run --grant Http`, and
+`http_router` runs under `marv run --entry serve_once --grant Net`
 (capability ops are interpreter-modeled; Cranelift rejects `perform`). `spawn.mv` runs on the
 interpreter under `marv run --grant Spawn`; its host operations are modeled as recorded
 effects. `generics.mv` constructs an `enum` (`Ordering`); now that aggregate codegen

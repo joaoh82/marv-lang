@@ -44,10 +44,8 @@ interface Net {
 }
 
 /// HTTP request/response authority supplied by a server host. `Http` is the
-/// app-facing request capability for one host-provided request: reading method,
-/// path, and UTF-8 body text, then sending one response. Raw byte bodies and
-/// production listener/router serving are follow-ups tied to bytes/JSON and
-/// MARV-63.
+/// app-facing request capability for one host-provided request: handlers can
+/// read method/path/UTF-8 body text, then send a response through the host.
 interface Http {
     fn method(http: &Http) -> !str
     fn path(http: &Http) -> !str
@@ -74,6 +72,7 @@ linear interface File {
 /// exactly once when the serving scope exits.
 linear interface Listener {
     fn accept(listener: &Listener) -> !Conn
+    fn accept_http(listener: &Listener) -> !Http
     fn close(listener: Listener) -> !
 }
 

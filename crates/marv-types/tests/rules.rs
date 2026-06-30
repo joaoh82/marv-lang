@@ -69,6 +69,13 @@ fn check_spawn_src(src: &str) -> Vec<Diagnostic> {
     check_with_std(&[&spawn_src, src])
 }
 
+/// Parse the real `std.io`/`std.http` pair plus a source module.
+fn check_http_src(src: &str) -> Vec<Diagnostic> {
+    let root = repo_root();
+    let http_src = std::fs::read_to_string(root.join("std/http.mv")).unwrap();
+    check_with_std(&[&http_src, src])
+}
+
 /// Assert exactly one diagnostic, with the given code, and return it.
 #[track_caller]
 fn one(diags: Vec<Diagnostic>, code: Code) -> Diagnostic {
@@ -528,6 +535,62 @@ fn listener_ok(net: Net) -> ! {
     assert!(
         diags.is_empty(),
         "linear resource happy paths should check clean, got: {diags:#?}"
+    );
+}
+
+#[test]
+fn source_http_listener_accepts_exchange_and_closes_cleanly() {
+    let diags = check_with_std(&[r#"
+mod app
+import std.io (Http, Listener, Net)
+
+fn ok(net: Net) -> ! {
+    let listener: Listener = net.listen("127.0.0.1", (8080 as u16))?
+    let http: Http = listener.accept_http()?
+    let body = http.body_text()?
+    let sent = http.respond((200 as u16), "ok")?
+    let done = listener.close()?
+    ()
+}
+"#]);
+    assert!(
+        diags.is_empty(),
+        "HTTP listener happy path should check clean, got: {diags:#?}"
+    );
+}
+
+#[test]
+fn source_http_router_example_checks_clean() {
+    let diags = check_http_src(
+        r#"
+mod app
+import std.io (Http, Listener, Net)
+
+fn serve_once(net: Net) -> !str {
+    let listener: Listener = net.listen("127.0.0.1", (8080 as u16))?
+    let http = listener.accept_http()?
+    let method: str = http.method()?
+    let path: str = http.path()?
+    let body: str = http.body_text()?
+    if ((method == "GET") and (path == "/health")) {
+        let sent = http.respond((200 as u16), "{\"ok\":true}")?
+        let closed = listener.close()?
+        "health"
+    } else if ((method == "POST") and (path == "/echo")) {
+        let sent = http.respond((200 as u16), body)?
+        let closed = listener.close()?
+        "echo"
+    } else {
+        let sent = http.respond((404 as u16), "not found")?
+        let closed = listener.close()?
+        "not-found"
+    }
+}
+"#,
+    );
+    assert!(
+        diags.is_empty(),
+        "HTTP router example should check clean, got: {diags:#?}"
     );
 }
 
