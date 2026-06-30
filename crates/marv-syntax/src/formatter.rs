@@ -249,6 +249,9 @@ fn format_fn(decl: &FnDecl) -> String {
     if decl.is_pure {
         s.push_str("pure ");
     }
+    if decl.is_unsafe {
+        s.push_str("unsafe ");
+    }
     s.push_str("fn ");
     s.push_str(&decl.name);
     s.push_str(&format_generics(&decl.generics));
@@ -514,6 +517,45 @@ fn format_expr(expr: &Expr) -> String {
         Expr::Array(elems) => {
             let parts: Vec<String> = elems.iter().map(format_expr).collect();
             format!("[{}]", parts.join(", "))
+        }
+        Expr::ListLiteral { alloc, items } => {
+            let item_parts: Vec<String> = items.iter().map(format_expr).collect();
+            let items = format!("[{}]", item_parts.join(", "));
+            match alloc {
+                Some(alloc) => {
+                    format!("List {{ alloc: {}, items: {} }}", format_expr(alloc), items)
+                }
+                None => format!("List {{ items: {} }}", items),
+            }
+        }
+        Expr::SetLiteral { alloc, items } => {
+            let item_parts: Vec<String> = items.iter().map(format_expr).collect();
+            let items = format!("[{}]", item_parts.join(", "));
+            match alloc {
+                Some(alloc) => {
+                    format!("Set {{ alloc: {}, items: {} }}", format_expr(alloc), items)
+                }
+                None => format!("Set {{ items: {} }}", items),
+            }
+        }
+        Expr::MapLiteral {
+            alloc,
+            keys,
+            values,
+        } => {
+            let key_parts: Vec<String> = keys.iter().map(format_expr).collect();
+            let value_parts: Vec<String> = values.iter().map(format_expr).collect();
+            let keys = format!("[{}]", key_parts.join(", "));
+            let values = format!("[{}]", value_parts.join(", "));
+            match alloc {
+                Some(alloc) => format!(
+                    "Map {{ alloc: {}, keys: {}, values: {} }}",
+                    format_expr(alloc),
+                    keys,
+                    values
+                ),
+                None => format!("Map {{ keys: {}, values: {} }}", keys, values),
+            }
         }
         Expr::Try(inner) => format!("{}?", format_expr(inner)),
         // A cast is fully parenthesized, like a binary node, so the canonical

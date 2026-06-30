@@ -155,6 +155,9 @@ pub struct DefInfo {
     pub requires: usize,
     /// Number of `ensures` clauses.
     pub ensures: usize,
+    /// `SAFETY:` justification for an `unsafe fn`, if this definition is an
+    /// unsafe audit site. This is source metadata, not Core identity.
+    pub unsafe_site: Option<String>,
     /// This definition alone, canonically formatted (`marv/canonical` def scope).
     pub canonical: String,
     /// Real source span of the definition's header — keyword(s) through name
@@ -344,21 +347,48 @@ fn analyze_source(text: &str) -> FileAnalysis {
         let qualified = qualify(&module_path, &entry.name);
         let item_span = spans_by_name.get(entry.name.as_str()).copied();
         let header = item_span.map(|s| line_index.span(s.header));
+        let (params, ret, is_pure, def_canonical) = source_signature(&module, &entry.name);
         // The capability fix inserts a leading parameter just inside `(`; that
         // is a resolved zero-width insertion point for a `MissingCapability` fix.
         let cap_edit = item_span
             .and_then(|s| s.param_insert)
             .map(|p| line_index.span((p, p)));
         for d in check_def(&world, &entry.def, Some(&entry.name)) {
-            let edit_span = if d.code == Code::MissingCapability {
-                cap_edit
+            let info = if d.code == Code::MissingCapability && is_pure {
+                let pure_edit = item_span
+                    .map(|s| s.header.0)
+                    .and_then(|start| {
+                        text.get(start as usize..start as usize + 5)
+                            .map(|prefix| (start, prefix))
+                    })
+                    .and_then(|(start, prefix)| {
+                        if prefix == "pure " {
+                            Some(line_index.span((start, start + 5)))
+                        } else {
+                            None
+                        }
+                    });
+                let mut info = diag_to_info(&d, Some(qualified.clone()), header, pure_edit);
+                for fix in &mut info.fixes {
+                    fix.title =
+                        "remove `pure` marker so capability parameters declare the effect".into();
+                    for edit in &mut fix.edits {
+                        edit.new_text.clear();
+                    }
+                }
+                info
             } else {
-                None
+                let edit_span = if d.code == Code::MissingCapability {
+                    cap_edit
+                } else {
+                    None
+                };
+                diag_to_info(&d, Some(qualified.clone()), header, edit_span)
             };
-            diagnostics.push(diag_to_info(&d, Some(qualified.clone()), header, edit_span));
+            diagnostics.push(info);
         }
         let row = effect_row(&world, &entry.def);
-        let (params, ret, is_pure, def_canonical) = source_signature(&module, &entry.name);
+        let unsafe_site = source_unsafe_site(&module, &entry.name);
         defs.push(DefInfo {
             name: entry.name.clone(),
             qualified,
@@ -373,6 +403,7 @@ fn analyze_source(text: &str) -> FileAnalysis {
             error_set: row.errors.iter().map(|h| world.error_name(h)).collect(),
             requires: entry.def.requires.len(),
             ensures: entry.def.ensures.len(),
+            unsafe_site,
             canonical: def_canonical,
             span: header,
         });
@@ -430,6 +461,21 @@ fn source_signature(module: &Module, name: &str) -> (Vec<ParamInfo>, String, boo
         }
     }
     (Vec::new(), "()".into(), false, String::new())
+}
+
+fn source_unsafe_site(module: &Module, name: &str) -> Option<String> {
+    for item in &module.items {
+        if let Item::Fn(f) = item {
+            if f.name == name && f.is_unsafe {
+                return f
+                    .docs
+                    .iter()
+                    .find_map(|d| d.trim_start().strip_prefix("SAFETY:"))
+                    .map(|s| s.trim().to_string());
+            }
+        }
+    }
+    None
 }
 
 /// Render an item by itself in canonical form (a module containing only it,
@@ -518,6 +564,7 @@ fn analyze_core(text: &str) -> FileAnalysis {
             error_set: row.errors.iter().map(|h| world.error_name(h)).collect(),
             requires: d.def.requires.len(),
             ensures: d.def.ensures.len(),
+            unsafe_site: None,
             canonical: String::new(),
             span: None,
         });

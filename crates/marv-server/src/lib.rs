@@ -225,6 +225,7 @@ impl Server {
             "signature" => self.signature(params),
             "errorSet" => self.error_set(params),
             "effects" => self.effects(params),
+            "unsafeSites" => self.unsafe_sites(params),
             "callers" => self.call_edges(params, Direction::Callers),
             "callees" => self.call_edges(params, Direction::Callees),
             "canonical" => self.canonical(params),
@@ -494,6 +495,26 @@ impl Server {
         let name = self.def_param(params)?;
         let (_f, d) = self.find_def(&snap, &name)?;
         Ok(json!({ "errorSet": d.error_set }))
+    }
+
+    fn unsafe_sites(&mut self, params: &Value) -> RpcResult {
+        let snap = self.snapshot(params)?.clone();
+        let mut sites = Vec::new();
+        for f in &snap.files {
+            let analysis = self.analyze_file(f);
+            for d in &analysis.defs {
+                if let Some(justification) = &d.unsafe_site {
+                    sites.push(json!({
+                        "file": f.path,
+                        "def": d.qualified,
+                        "hash": d.hash,
+                        "justification": justification,
+                        "span": span_json(&f.path, d.span.as_ref()),
+                    }));
+                }
+            }
+        }
+        Ok(json!({ "sites": sites }))
     }
 
     fn core(&mut self, params: &Value) -> RpcResult {

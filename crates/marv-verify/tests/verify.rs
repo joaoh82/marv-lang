@@ -1224,6 +1224,106 @@ fn enum_match_counterexample() {
     );
 }
 
+// MARV-59: generic non-recursive ADT declarations are instantiated before
+// havocking their fields, so `Box[i64]` projects as an integer field rather
+// than reporting the old blanket "generic ADTs unsupported" fallback.
+const GENERIC_STRUCT_PARAM: &str = "\
+mod adts
+
+struct Box[T] { value: T }
+
+pure fn unwrap_box(b: Box[i64]) -> i64
+    requires b.value >= 0
+    ensures result >= 0
+{
+    b.value
+}
+";
+
+#[test]
+fn proves_generic_struct_param_contract() {
+    let (def, names, world) = lower_one(GENERIC_STRUCT_PARAM);
+    let outcome = verify_def(&def, &names, &world);
+    if skip_if_no_solver(&outcome) {
+        return;
+    }
+    assert_eq!(
+        outcome,
+        VerifyOutcome::Proved,
+        "a generic struct parameter should substitute its field type and prove, got {outcome:?}"
+    );
+}
+
+// Generic enum fields get the same substitution; a false claim still has to
+// produce a counterexample instead of becoming an `unsupported` escape hatch.
+const GENERIC_ENUM_MATCH_BUGGY: &str = "\
+mod adts
+
+enum Maybe[T] {
+    None,
+    Some(T),
+}
+
+pure fn get_or_zero(m: Maybe[i64]) -> i64
+    ensures result >= 0
+{
+    match m {
+        Maybe.None => 0,
+        Maybe.Some(v) => v,
+    }
+}
+";
+
+#[test]
+fn generic_enum_match_counterexample() {
+    let (def, names, world) = lower_one(GENERIC_ENUM_MATCH_BUGGY);
+    let outcome = verify_def(&def, &names, &world);
+    if skip_if_no_solver(&outcome) {
+        return;
+    }
+    assert!(
+        matches!(outcome, VerifyOutcome::Failed { .. }),
+        "a negative generic enum payload should refute the ensures, got {outcome:?}"
+    );
+}
+
+// Recursive ADTs remain outside the first MARV-59 slice. The important safety
+// property is that the verifier says so honestly, not that it expands forever
+// or silently proves a postcondition from an incomplete model.
+const RECURSIVE_ADT_UNSUPPORTED: &str = "\
+mod adts
+
+enum List {
+    Nil,
+    Cons(i64, List),
+}
+
+pure fn head_or_zero(xs: List) -> i64
+    ensures result >= 0
+{
+    match xs {
+        List.Nil => 0,
+        List.Cons(v, rest) => v,
+    }
+}
+";
+
+#[test]
+fn recursive_adt_reports_honest_unsupported() {
+    let (def, names, world) = lower_one(RECURSIVE_ADT_UNSUPPORTED);
+    let outcome = verify_def(&def, &names, &world);
+    if skip_if_no_solver(&outcome) {
+        return;
+    }
+    match outcome {
+        VerifyOutcome::Unsupported { reason } => assert!(
+            reason.contains("recursive types"),
+            "unsupported reason should name recursive types, got {reason}"
+        ),
+        other => panic!("recursive ADTs should stay unsupported, got {other:?}"),
+    }
+}
+
 // A bounded forall inside a loop *invariant*: every element written so far is
 // the constant 7. Quantifiers in invariants use de Bruijn indices and bind
 // index 0 in their body.

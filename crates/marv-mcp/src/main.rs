@@ -68,6 +68,12 @@ const TOOLS: &[Tool] = &[
         params: &[SNAP, DEF],
     },
     Tool {
+        name: "marv_unsafe_sites",
+        method: "marv/unsafeSites",
+        description: "List unsafe functions/blocks in a snapshot with SAFETY justifications for audit.",
+        params: &[SNAP],
+    },
+    Tool {
         name: "marv_callers",
         method: "marv/callers",
         description: "Definitions that call the given definition.",

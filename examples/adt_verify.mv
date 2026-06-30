@@ -1,0 +1,30 @@
+mod adt_verify
+
+struct Box[T] { value: T }
+
+enum Maybe[T] {
+    None,
+    Some(T),
+}
+
+pure fn unwrap_box(b: Box[i64]) -> i64
+    requires (b.value >= 0)
+    ensures (result >= 0)
+{
+    b.value
+}
+
+pure fn get_or_zero(m: Maybe[i64]) -> i64
+    ensures (result >= 0)
+{
+    match m {
+        Maybe.None => 0,
+        Maybe.Some(v) => {
+            if (v >= 0) {
+                v
+            } else {
+                0
+            }
+        },
+    }
+}

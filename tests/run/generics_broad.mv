@@ -1,0 +1,81 @@
+mod generics_broad
+
+enum Ordering {
+    Lt,
+    Eq,
+    Gt,
+}
+
+interface Ord[T] {
+    fn cmp(a: T, b: T) -> Ordering
+}
+
+impl Ord[i32] {
+    fn cmp(a: i32, b: i32) -> Ordering {
+        if (a < b) {
+            Ordering.Lt
+        } else if (a > b) {
+            Ordering.Gt
+        } else {
+            Ordering.Eq
+        }
+    }
+}
+
+impl Ord[i64] {
+    fn cmp(a: i64, b: i64) -> Ordering {
+        if (a < b) {
+            Ordering.Lt
+        } else if (a > b) {
+            Ordering.Gt
+        } else {
+            Ordering.Eq
+        }
+    }
+}
+
+fn max[T: Ord](a: T, b: T) -> T {
+    match cmp(a, b) {
+        Ordering.Lt => b,
+        Ordering.Eq => a,
+        Ordering.Gt => a,
+    }
+}
+
+fn min[T: Ord](a: T, b: T) -> T {
+    match cmp(a, b) {
+        Ordering.Lt => a,
+        Ordering.Eq => a,
+        Ordering.Gt => b,
+    }
+}
+
+fn clamp[T: Ord](lo: T, value: T, hi: T) -> T {
+    min(max(value, lo), hi)
+}
+
+fn cmp_score[T: Ord](a: T, b: T) -> i64 {
+    match cmp(a, b) {
+        Ordering.Lt => 1,
+        Ordering.Eq => 2,
+        Ordering.Gt => 3,
+    }
+}
+
+fn pair_score[A: Ord, B: Ord](a0: A, a1: A, b0: B, b1: B) -> i64 {
+    ((cmp_score(a0, a1) * 10) + cmp_score(b0, b1))
+}
+
+pure fn nested_clamp(lo: i64, value: i64, hi: i64) -> i64 {
+    clamp(lo, value, hi)
+}
+
+pure fn mixed_instantiations(a: i64, b: i64, c: i64, d: i64) -> i64 {
+    let wide: i64 = cmp_score(a, b)
+    let narrow: i64 = cmp_score((c as i32), (d as i32))
+    ((wide * 10) + narrow)
+}
+
+pure fn mixed_pair_score(a: i64, b: i64, c: i64, d: i64) -> i64 {
+    pair_score(a, b, (c as i32), (d as i32))
+}

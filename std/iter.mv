@@ -1,0 +1,36 @@
+mod std.iter
+import std.collections (List, get, len)
+
+/// A value-semantic iterator over a list. It carries the collection by value;
+/// construction does not allocate, and iteration reads through the `Iter[T]`
+/// protocol below.
+struct IndexIter[T] { items: List[T] }
+
+/// First iterator protocol slice. `T` is the yielded item type; `IndexIter[T]`
+/// is the first concrete implementor.
+interface Iter[T] {
+    fn iter_len_impl(iter: IndexIter[T]) -> usize
+    fn iter_get_impl(iter: IndexIter[T], index: usize) -> T
+}
+
+fn from_list[T](items: List[T]) -> IndexIter[T] {
+    IndexIter { items: items }
+}
+
+fn iter_len[T: Iter](iter: IndexIter[T]) -> usize {
+    iter_len_impl(iter)
+}
+
+fn iter_get[T: Iter](iter: IndexIter[T], index: usize) -> T {
+    iter_get_impl(iter, index)
+}
+
+impl Iter[i64] {
+    fn iter_len_impl(iter: IndexIter[i64]) -> usize {
+        len(iter.items)
+    }
+
+    fn iter_get_impl(iter: IndexIter[i64], index: usize) -> i64 {
+        get(iter.items, index)
+    }
+}

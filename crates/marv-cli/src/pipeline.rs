@@ -114,7 +114,7 @@ fn load_source(src: &str, path: &Path) -> Result<Loaded, LoadError> {
     for (idx, lowered_module) in lowered.into_iter().enumerate() {
         let ast_module = &all[idx];
         let prefix = ast_module.name.join(".");
-        let metas = store_meta_for_module(&lowered_module);
+        let metas = store_meta_for_module(&lowered_module, ast_module);
         for (entry, meta) in lowered_module.defs.into_iter().zip(metas.into_iter()) {
             let name = if idx == 0 {
                 entry.name.clone()
@@ -373,7 +373,10 @@ fn runtime_defs_for_defs(
     (runtime_defs, aliases)
 }
 
-fn store_meta_for_module(m: &marv_core::LoweredModule) -> Vec<DefMeta> {
+fn store_meta_for_module(
+    m: &marv_core::LoweredModule,
+    ast_module: &marv_syntax::Module,
+) -> Vec<DefMeta> {
     let cap_ops_by_name: std::collections::HashMap<&str, Vec<StoredOpSig>> = m
         .interfaces
         .iter()
@@ -413,8 +416,25 @@ fn store_meta_for_module(m: &marv_core::LoweredModule) -> Vec<DefMeta> {
                 .get(entry.name.as_str())
                 .cloned()
                 .unwrap_or_default(),
+            unsafe_sites: unsafe_sites_for_fn(ast_module, &entry.name),
         })
         .collect()
+}
+
+fn unsafe_sites_for_fn(module: &marv_syntax::Module, name: &str) -> Vec<String> {
+    for item in &module.items {
+        if let marv_syntax::Item::Fn(f) = item {
+            if f.name == name && f.is_unsafe {
+                return f
+                    .docs
+                    .iter()
+                    .find_map(|d| d.trim_start().strip_prefix("SAFETY:"))
+                    .map(|s| vec![s.trim().to_string()])
+                    .unwrap_or_else(|| vec![String::new()]);
+            }
+        }
+    }
+    Vec::new()
 }
 
 impl Loaded {

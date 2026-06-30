@@ -170,6 +170,23 @@ growth. `len(list)` reads word 0, and
 The existing `for x in collection` desugar works unchanged because it is already
 defined in terms of `len` and index.
 
+The first `Iter[T]` protocol slice (MARV-52) keeps those direct indexed paths for
+arrays, slices, strings, and `List[T]`, but lets `std.iter.IndexIter[T]` opt into
+protocol lowering. A `for x in it` where `it: IndexIter[i64]` lowers through the
+generic `std.iter.iter_len` / `std.iter.iter_get` wrappers; their specialized
+instances dispatch via the `Iter[i64]` impl and then use the same backend-safe
+list operations. No executor, allocation, or ambient authority is introduced by
+iteration itself.
+
+Collection literals (MARV-51) introduce no new backend primitive. `List { alloc:
+alloc, items: [e0, e1, …] }` lowers to `Core::ListNew` with capacity set to the
+item count, then one `Core::ListPush` per item. `Set { alloc: alloc, items:
+[...] }` lowers through `std.collections.set_with_capacity` and `set_insert`, so
+duplicates follow ordinary set semantics. `Map { alloc: alloc, keys: [...],
+values: [...] }` lowers to the current list-backed map entry storage. The
+explicit `Alloc` field is required, so these literals remain visible allocation
+sites.
+
 ### The Tier-1 bounds check (MARV-34)
 
 A runtime subscript outside `0..len` — an element read `a[i]`/`s[i]` or a slice
@@ -207,6 +224,12 @@ checker already rejects a function that performs a capability outside its
 declared effect row *before* it can run, so the runtime grant check is
 defense-in-depth, not the primary line of defense.
 
+`Spawn` follows the same path in the interpreter. `std.spawn.spawn_i64` performs
+`Spawn.start` and returns a `linear TaskI64`; `join_i64` consumes it. Running
+`examples/spawn.mv` with `--grant Spawn` returns `42` and records two
+`Spawn` effects. Without the grant, the entry is refused at the boundary; if a
+task handle is not joined, `marv check` reports the linearity error before run.
+
 ## The differential test (the M4 gate)
 
 `crates/marv-codegen-cl/tests/differential.rs` loads each program in
@@ -230,6 +253,8 @@ the results are equal to each other and to a hand-computed golden value:
 | `generics.mv`   | a monomorphized generic (`max[T: Ord]` matching on `Ordering`, specialized to `i64` and dispatched to `impl Ord[i64]`) — runnable on all three backends since the enum got a layout (MARV-9); closes the gap noted in MARV-5 — MARV-26 |
 | `arrays.mv`     | array literals + `len` + index read `a[i]` + index store `a[i] = e` (functional element update); a `len`-bounded `while` loop over an array — MARV-30 |
 | `slices.mv`     | runtime-length slices `[]T`: construct (array→slice), `len`/index, a `Core::IndexSet` element store over a runtime length, and `total` over a slice of structs (`sales[i].amount`) — MARV-33; `for x in s` over a slice and over a slice of structs, nested `for`s (depth-keyed index names), and sequential `for`s — MARV-20 |
+| `iter.mv`       | `std.iter.IndexIter[i64]` over a `List[i64]`; `for x in it` lowers through the `Iter[i64]` protocol wrappers instead of direct `len`/index — MARV-52 |
+| `json.mv`       | `std.json` first slice: scalar serialization with explicit `Alloc` runs three-way; parser/typed-error paths are interpreter-smoked — MARV-55 |
 
 Both differential harnesses also carry an **out-of-bounds corpus** (MARV-34):
 slice reads at `len` and at `-1`, a slice store at `len`, and an array read at
@@ -257,6 +282,7 @@ marv build tests/run/uses_ungranted_cap.core.json   # E0110, exits non-zero
 marv run   examples/factorial.mv --entry factorial 6        # 720 (interpreter)
 marv build --run examples/factorial.mv --entry factorial 6  # 720 (Cranelift JIT)
 marv run   examples/arithmetic.mv                            # 42  (entry defaults to main)
+marv run --grant Spawn examples/spawn.mv                     # 42 + two Spawn effects
 ```
 
 ## The WebAssembly backend (M5)

@@ -92,10 +92,11 @@ marv store gc [--store .marv]
 ```
 
 `audit` prints each blob's reviewed flag, lockfile reachability, dependency
-count, and unsafe-site count. The unsafe-site list is currently empty because
-`unsafe fn` remains spec-only surface, but the view is wired so the metadata can
-land there when the parser/checker grow it. `gc` removes blobs unreachable from
-every current lockfile binding and rewrites the blob directory.
+count, and unsafe-site count. Unsafe sites come from source-level `unsafe fn`
+metadata and its required `SAFETY:` justification; this metadata lives beside
+Core identity, so audit can flag unsafe boundaries without changing a
+definition's content hash. `gc` removes blobs unreachable from every current
+lockfile binding and rewrites the blob directory.
 
 ## Self-hosting
 

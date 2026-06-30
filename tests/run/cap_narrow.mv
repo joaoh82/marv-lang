@@ -1,0 +1,7 @@
+mod cap_narrow
+import std.io (Io)
+
+fn main(io: Io) -> ! {
+    let out = io.stdout()
+    out.write("hello from wasm\n")
+}

@@ -166,10 +166,23 @@ impl FnMeta {
 
 /// Whether a parameter of this type carries no wasm ABI slot (unit or capability).
 fn is_no_slot(t: &Type, world: &World) -> bool {
-    match t {
+    match cap_abi_success(t) {
         Type::Unit => true,
         Type::Nominal { def, .. } => world.is_cap(def),
         _ => false,
+    }
+}
+
+fn cap_abi_success(t: &Type) -> &Type {
+    match t {
+        Type::Nominal { def, args }
+            if *def == symbol_hash("Result")
+                && args.len() == 2
+                && matches!(&args[1], Type::Nominal { def, .. } if *def == symbol_hash("@error-union")) =>
+        {
+            &args[0]
+        }
+        _ => t,
     }
 }
 
@@ -622,8 +635,9 @@ fn collect_imports(fns: &[(Hash, &str, &Def)], world: &World) -> Result<Vec<CapI
                         }
                     }
                 }
-                let returns_value = match &sig.ret {
+                let returns_value = match cap_abi_success(&sig.ret) {
                     Type::Unit => false,
+                    Type::Nominal { def, .. } if world.is_cap(def) => false,
                     Type::Int(_) | Type::Bool | Type::Str => true,
                     other => {
                         return Err(WasmError::Unsupported(format!(
@@ -663,7 +677,8 @@ fn walk_caps(
         }
         Core::Let { value, body } => {
             walk_caps(value, tys, world, f)?;
-            tys.push(None);
+            let value_ty = layout::type_of(world, value, tys);
+            tys.push(value_ty);
             walk_caps(body, tys, world, f)?;
             tys.pop();
         }
@@ -2344,7 +2359,7 @@ impl Trans<'_> {
             .world
             .cap(&cap_def)
             .and_then(|c| c.ops.get(op.0 as usize))
-            .map(|s| !matches!(s.ret, Type::Unit))
+            .map(|s| !is_no_slot(&s.ret, self.world))
             .unwrap_or(false);
         if returns {
             Ok(Out::Stack)

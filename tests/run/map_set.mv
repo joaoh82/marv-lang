@@ -1,6 +1,6 @@
 mod map_set
 import std.io (Alloc)
-import std.collections (Map, Set, map_new, map_insert, map_remove, map_contains, map_get_or, map_len, set_new, set_insert, set_remove, set_contains, set_len)
+import std.collections (Map, Set, map_new, map_insert, map_remove, map_contains, map_get_or, map_len, map_i64_new, map_i64_insert, map_i64_remove, map_i64_contains, map_i64_get_or, map_i64_len, set_new, set_insert, set_remove, set_contains, set_len, set_i64_new, set_i64_insert, set_i64_remove, set_i64_contains, set_i64_len)
 
 fn choose(cond: bool, yes: i64, no: i64) -> i64 {
     if cond {
@@ -34,6 +34,25 @@ fn exercise(alloc: Alloc) -> i64 {
     seen = set_remove(alloc, seen, ("r" + "ed"))
     let removed_seen_score: i64 = choose(set_contains(seen, "red"), 700, 7)
     total = (total + removed_seen_score)
+    var nums: Map[i64, i64] = map_i64_new(alloc)
+    nums = map_i64_insert(alloc, nums, 7, 70)
+    nums = map_i64_insert(alloc, nums, 11, 110)
+    nums = map_i64_insert(alloc, nums, 7, 75)
+    total = (total + choose(map_i64_contains(nums, 7), 300, 4))
+    total = (total + map_i64_get_or(nums, 7, 0))
+    total = (total + ((map_i64_len(nums) as i64) * 10))
+    nums = map_i64_remove(alloc, nums, 11)
+    total = (total + choose(map_i64_contains(nums, 11), 900, 13))
+    total = (total + (map_i64_len(nums) as i64))
+    var ids: Set[i64] = set_i64_new(alloc)
+    ids = set_i64_insert(alloc, ids, 4)
+    ids = set_i64_insert(alloc, ids, 4)
+    ids = set_i64_insert(alloc, ids, 9)
+    total = (total + choose(set_i64_contains(ids, 4), 400, 5))
+    total = (total + ((set_i64_len(ids) as i64) * 10))
+    ids = set_i64_remove(alloc, ids, 4)
+    total = (total + choose(set_i64_contains(ids, 4), 800, 17))
+    total = (total + (set_i64_len(ids) as i64))
     total
 }
 

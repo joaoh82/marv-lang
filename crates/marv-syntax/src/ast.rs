@@ -235,7 +235,7 @@ pub struct Variant {
     pub fields: Vec<Type>,
 }
 
-/// `[pure] fn name(params) [-> ret] [requires e]* [ensures e]* { body }`.
+/// `[pure] [unsafe] fn name(params) [-> ret] [requires e]* [ensures e]* { body }`.
 ///
 /// Contract clauses (`spec/01` §7) sit between the signature and the body, each
 /// on its own line. `requires` expressions may mention the parameters;
@@ -246,6 +246,9 @@ pub struct FnDecl {
     /// Doc-comment lines preceding the declaration (see [`ErrorDecl::docs`]).
     pub docs: Vec<String>,
     pub is_pure: bool,
+    /// Whether this function is an explicit unsafe audit boundary. This is
+    /// source metadata, not part of the Core identity.
+    pub is_unsafe: bool,
     pub name: String,
     /// Generic type parameters, e.g. `[T]` (or `[T: Ord]`) for `fn sort[T](...)`.
     /// Empty for a non-generic function.
@@ -457,6 +460,29 @@ pub enum Expr {
     /// fixed-length product whose type is `[N]T`; lowers to a `Core::Array`. The
     /// empty form `[]` parses but needs a type annotation to fix its element type.
     Array(Vec<Expr>),
+    /// `List { alloc: alloc, items: [e0, e1, ...] }` — an explicit-allocation
+    /// growable list literal. The `alloc` field is optional in the AST so the
+    /// lowerer can produce a specific diagnostic for `List { items: [...] }`,
+    /// but valid programs must provide it.
+    ListLiteral {
+        alloc: Option<Box<Expr>>,
+        items: Vec<Expr>,
+    },
+    /// `Set { alloc: alloc, items: [e0, e1, ...] }` — an explicit-allocation set
+    /// literal over the current `std.collections.Set[str]` slice.
+    SetLiteral {
+        alloc: Option<Box<Expr>>,
+        items: Vec<Expr>,
+    },
+    /// `Map { alloc: alloc, keys: [k0, k1], values: [v0, v1] }` — an
+    /// explicit-allocation map literal. Parallel arrays keep the syntax inside
+    /// the already-implemented expression grammar (there is no tuple literal
+    /// surface yet).
+    MapLiteral {
+        alloc: Option<Box<Expr>>,
+        keys: Vec<Expr>,
+        values: Vec<Expr>,
+    },
     /// `Name { field: expr, ... }` — a struct literal (product construction,
     /// `spec/02` §B `primary` struct-literal form). `path` names the struct;
     /// `fields` are the field initializers, written in any order (lowering

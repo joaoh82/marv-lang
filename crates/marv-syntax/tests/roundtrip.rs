@@ -252,6 +252,7 @@ fn gen_fn(rng: &mut Rng) -> FnDecl {
     FnDecl {
         docs: gen_docs(rng),
         is_pure,
+        is_unsafe: false,
         name,
         generics,
         params,

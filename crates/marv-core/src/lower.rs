@@ -117,6 +117,11 @@ pub enum LowerError {
     /// length, so a slice (`[]T`, no compile-time length) or a base whose type
     /// M1 cannot resolve is not yet supported.
     IndexAssignUnsupported,
+    /// A growable collection literal omitted its explicit allocator. marv does
+    /// not permit hidden growable allocation.
+    CollectionLiteralMissingAlloc { kind: &'static str },
+    /// A map literal's parallel key/value arrays differ in length.
+    MapLiteralLengthMismatch { keys: usize, values: usize },
 }
 
 impl std::fmt::Display for LowerError {
@@ -226,6 +231,14 @@ impl std::fmt::Display for LowerError {
                 f,
                 "index assignment `a[i] = e` requires a fixed-length array base (`[N]T`); a slice \
                  (`[]T`) has no compile-time length to unroll the element update over yet"
+            ),
+            LowerError::CollectionLiteralMissingAlloc { kind } => {
+                write!(f, "{kind} literal requires an explicit `alloc` field")
+            }
+            LowerError::MapLiteralLengthMismatch { keys, values } => write!(
+                f,
+                "map literal requires the same number of keys and values (got {keys} keys and \
+                 {values} values)"
             ),
         }
     }
@@ -808,6 +821,12 @@ impl Builder {
     }
 }
 
+#[derive(Clone)]
+struct LocalStruct {
+    fields: Vec<Field>,
+    linear: bool,
+}
+
 /// Module-level context shared across every definition's lowering.
 struct Lowerer {
     /// Dotted module path, e.g. `["geometry"]`.
@@ -821,7 +840,7 @@ struct Lowerer {
     /// *not* know into a clear [`LowerError::UnresolvedImportedEnum`].
     imports: HashMap<String, String>,
     /// Struct declarations by source name, for projection-index resolution.
-    structs: HashMap<String, Vec<Field>>,
+    structs: HashMap<String, LocalStruct>,
     /// In-module function return types, for best-effort projection typing.
     fn_rets: HashMap<String, Option<SType>>,
     /// Constructor / enum registry (may span several modules; see [`EnumReg`]).
@@ -863,7 +882,13 @@ impl Lowerer {
             match item {
                 Item::Struct(s) => {
                     local_items.insert(s.name.clone());
-                    structs.insert(s.name.clone(), s.fields.clone());
+                    structs.insert(
+                        s.name.clone(),
+                        LocalStruct {
+                            fields: s.fields.clone(),
+                            linear: s.linear,
+                        },
+                    );
                 }
                 Item::Fn(f) => {
                     local_items.insert(f.name.clone());
@@ -1091,8 +1116,12 @@ impl Lowerer {
         let mut keys = Vec::new();
         let mut spec_bounds = Vec::new();
         let mut args_meta = Vec::new();
+        let active: HashSet<String> = self.active_generics.iter().cloned().collect();
         for g in &gf.decl.generics {
             let concrete = map.get(&g.name)?.clone();
+            if stype_mentions_generics(&concrete, &active) {
+                return None;
+            }
             let key = type_key(&concrete);
             let bound = g
                 .bound
@@ -1520,7 +1549,10 @@ impl Lowerer {
                 self.lower_cexpr(base, params, allow_result, binders, cenv)?,
                 self.lower_cexpr(index, params, allow_result, binders, cenv)?,
             ))),
-            Expr::Slice(_, _, _) => Err(LowerError::ContractOperandUnsupported),
+            Expr::Slice(_, _, _)
+            | Expr::ListLiteral { .. }
+            | Expr::SetLiteral { .. }
+            | Expr::MapLiteral { .. } => Err(LowerError::ContractOperandUnsupported),
             // `base.field` — a struct field projection, resolved to its
             // declaration index against the synthetic contract scope (a
             // quantifier binder shadowing the root name cannot carry fields).
@@ -1840,6 +1872,20 @@ impl Lowerer {
         env: &[Binding],
         b: &mut Builder,
     ) -> Result<Atom, LowerError> {
+        if let Expr::ListLiteral { alloc, items } = e {
+            return self.emit_list_literal(alloc.as_deref(), items, Some(expected), env, b);
+        }
+        if let Expr::SetLiteral { alloc, items } = e {
+            return self.emit_set_literal(alloc.as_deref(), items, env, b);
+        }
+        if let Expr::MapLiteral {
+            alloc,
+            keys,
+            values,
+        } = e
+        {
+            return self.emit_map_literal(alloc.as_deref(), keys, values, Some(expected), env, b);
+        }
         if let Expr::Call(callee, args) = e {
             if let Expr::Var(name) = &**callee {
                 if self.is_std_collection_op(name) && self.resolve_local(name, env).is_none() {
@@ -1969,6 +2015,17 @@ impl Lowerer {
                 let node = self.emit_array(items, env, b)?;
                 Ok(b.push(node))
             }
+            Expr::ListLiteral { alloc, items } => {
+                self.emit_list_literal(alloc.as_deref(), items, None, env, b)
+            }
+            Expr::SetLiteral { alloc, items } => {
+                self.emit_set_literal(alloc.as_deref(), items, env, b)
+            }
+            Expr::MapLiteral {
+                alloc,
+                keys,
+                values,
+            } => self.emit_map_literal(alloc.as_deref(), keys, values, None, env, b),
             Expr::Struct { path, fields } => {
                 let node = self.emit_struct_lit(path, fields, env, b)?;
                 Ok(b.push(node))
@@ -2014,6 +2071,130 @@ impl Lowerer {
             .map(|e| self.emit_atom(e, env, b))
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Core::Array { elem, items: atoms })
+    }
+
+    fn emit_list_literal(
+        &self,
+        alloc: Option<&Expr>,
+        items: &[Expr],
+        expected: Option<&SType>,
+        env: &[Binding],
+        b: &mut Builder,
+    ) -> Result<Atom, LowerError> {
+        let Some(alloc_expr) = alloc else {
+            return Err(LowerError::CollectionLiteralMissingAlloc { kind: "List" });
+        };
+        let elem_stype = expected
+            .and_then(list_elem_stype)
+            .cloned()
+            .unwrap_or_else(|| self.array_elem_stype(items, env));
+        let elem = self.lower_type(&elem_stype, &self.active_generics);
+        let alloc = self.emit_atom(alloc_expr, env, b)?;
+        let mut list = b.push(Core::ListNew {
+            elem,
+            alloc: alloc.clone(),
+            capacity: Atom::Lit(Literal::Int(items.len() as i64)),
+        });
+        for item in items {
+            let value = self.emit_atom(item, env, b)?;
+            list = b.push(Core::ListPush {
+                alloc: alloc.clone(),
+                list,
+                value,
+            });
+        }
+        Ok(list)
+    }
+
+    fn emit_set_literal(
+        &self,
+        alloc: Option<&Expr>,
+        items: &[Expr],
+        env: &[Binding],
+        b: &mut Builder,
+    ) -> Result<Atom, LowerError> {
+        let Some(alloc_expr) = alloc else {
+            return Err(LowerError::CollectionLiteralMissingAlloc { kind: "Set" });
+        };
+        let alloc = self.emit_atom(alloc_expr, env, b)?;
+        let mut set = b.push(Core::App {
+            func: Atom::Global(symbol_hash("std.collections.set_with_capacity")),
+            arg: alloc.clone(),
+        });
+        set = b.push(Core::App {
+            func: set,
+            arg: Atom::Lit(Literal::Int(items.len() as i64)),
+        });
+        for item in items {
+            let value = self.emit_atom(item, env, b)?;
+            let mut inserted = b.push(Core::App {
+                func: Atom::Global(symbol_hash("std.collections.set_insert")),
+                arg: alloc.clone(),
+            });
+            inserted = b.push(Core::App {
+                func: inserted,
+                arg: set,
+            });
+            set = b.push(Core::App {
+                func: inserted,
+                arg: value,
+            });
+        }
+        Ok(set)
+    }
+
+    fn emit_map_literal(
+        &self,
+        alloc: Option<&Expr>,
+        keys: &[Expr],
+        values: &[Expr],
+        expected: Option<&SType>,
+        env: &[Binding],
+        b: &mut Builder,
+    ) -> Result<Atom, LowerError> {
+        let Some(alloc_expr) = alloc else {
+            return Err(LowerError::CollectionLiteralMissingAlloc { kind: "Map" });
+        };
+        if keys.len() != values.len() {
+            return Err(LowerError::MapLiteralLengthMismatch {
+                keys: keys.len(),
+                values: values.len(),
+            });
+        }
+        let value_stype = expected
+            .and_then(map_value_stype)
+            .cloned()
+            .unwrap_or_else(|| self.array_elem_stype(values, env));
+        let value_ty = self.lower_type(&value_stype, &self.active_generics);
+        let alloc = self.emit_atom(alloc_expr, env, b)?;
+        let entry_ty = Type::Nominal {
+            def: symbol_hash("std.collections.Entry"),
+            args: vec![Type::Str, value_ty],
+        };
+        let mut entries = b.push(Core::ListNew {
+            elem: entry_ty,
+            alloc: alloc.clone(),
+            capacity: Atom::Lit(Literal::Int(keys.len() as i64)),
+        });
+        for (key, value) in keys.iter().zip(values) {
+            let key = self.emit_atom(key, env, b)?;
+            let value = self.emit_atom(value, env, b)?;
+            let entry = b.push(Core::Ctor {
+                ty: symbol_hash("std.collections.Entry"),
+                tag: 0,
+                fields: vec![Atom::Lit(Literal::Int(0)), key, value],
+            });
+            entries = b.push(Core::ListPush {
+                alloc: alloc.clone(),
+                list: entries,
+                value: entry,
+            });
+        }
+        Ok(b.push(Core::Ctor {
+            ty: symbol_hash("std.collections.Map"),
+            tag: 0,
+            fields: vec![entries],
+        }))
     }
 
     /// Best-effort surface element type of an array literal: the inferred type of
@@ -2184,6 +2365,31 @@ impl Lowerer {
                 })
             }
             Expr::Array(items) => self.emit_array(items, env, b),
+            Expr::ListLiteral { alloc, items } => Ok(Core::Atom(self.emit_list_literal(
+                alloc.as_deref(),
+                items,
+                None,
+                env,
+                b,
+            )?)),
+            Expr::SetLiteral { alloc, items } => Ok(Core::Atom(self.emit_set_literal(
+                alloc.as_deref(),
+                items,
+                env,
+                b,
+            )?)),
+            Expr::MapLiteral {
+                alloc,
+                keys,
+                values,
+            } => Ok(Core::Atom(self.emit_map_literal(
+                alloc.as_deref(),
+                keys,
+                values,
+                None,
+                env,
+                b,
+            )?)),
             Expr::Struct { path, fields } => self.emit_struct_lit(path, fields, env, b),
             Expr::Field(base, field) => {
                 if let Some(c) = self.field_nullary_ctor(base, field, env) {
@@ -2399,7 +2605,7 @@ impl Lowerer {
             })?;
         // Reject any initializer naming a field the struct does not declare.
         for init in inits {
-            if !decl.iter().any(|f| f.name == init.name) {
+            if !decl.fields.iter().any(|f| f.name == init.name) {
                 return Err(LowerError::UnknownField {
                     ty: sname.clone(),
                     field: init.name.clone(),
@@ -2408,7 +2614,7 @@ impl Lowerer {
         }
         // Emit one atom per declared field, in declaration order; every field
         // must be initialized exactly once.
-        let field_names: Vec<String> = decl.iter().map(|f| f.name.clone()).collect();
+        let field_names: Vec<String> = decl.fields.iter().map(|f| f.name.clone()).collect();
         let mut fields = Vec::with_capacity(field_names.len());
         for fname in &field_names {
             let init = inits.iter().find(|i| &i.name == fname).ok_or_else(|| {
@@ -2505,13 +2711,15 @@ impl Lowerer {
                         .ok_or_else(|| LowerError::UnresolvedProjection {
                             field: field.clone(),
                         })?;
-                let idx = decl.iter().position(|f| &f.name == field).ok_or_else(|| {
-                    LowerError::UnknownField {
+                let idx = decl
+                    .fields
+                    .iter()
+                    .position(|f| &f.name == field)
+                    .ok_or_else(|| LowerError::UnknownField {
                         ty: sname.clone(),
                         field: field.clone(),
-                    }
-                })? as u32;
-                let n = decl.len();
+                    })? as u32;
+                let n = decl.fields.len();
                 let ty_hash = self.struct_ty_hash(&sname);
 
                 // The current value of the aggregate being updated.
@@ -2882,9 +3090,23 @@ impl Lowerer {
     ) -> Result<(), LowerError> {
         let idx_name = format!("#for{}", b.depth());
         let idx_var = Expr::Var(idx_name.clone());
-        let len_call = Expr::Call(Box::new(Expr::Var("len".into())), vec![iter.clone()]);
+        let use_iter_protocol = self
+            .type_of_expr(iter, env)
+            .as_ref()
+            .and_then(iter_elem_stype)
+            .is_some();
+        let len_name = if use_iter_protocol { "iter_len" } else { "len" };
+        let get_name = if use_iter_protocol { "iter_get" } else { "" };
+        let len_call = Expr::Call(Box::new(Expr::Var(len_name.into())), vec![iter.clone()]);
         let cond = Expr::Binary(Box::new(idx_var.clone()), BinOp::Lt, Box::new(len_call));
-        let elem = Expr::Index(Box::new(iter.clone()), Box::new(idx_var.clone()));
+        let elem = if use_iter_protocol {
+            Expr::Call(
+                Box::new(Expr::Var(get_name.into())),
+                vec![iter.clone(), idx_var.clone()],
+            )
+        } else {
+            Expr::Index(Box::new(iter.clone()), Box::new(idx_var.clone()))
+        };
 
         let mut stmts = Vec::with_capacity(body.stmts.len() + 2);
         stmts.push(Stmt::Let {
@@ -3059,7 +3281,10 @@ impl Lowerer {
                 self.lower_loop_cexpr(base, env, base_level, binders)?,
                 self.lower_loop_cexpr(index, env, base_level, binders)?,
             ))),
-            Expr::Slice(_, _, _) => Err(LowerError::ContractOperandUnsupported),
+            Expr::Slice(_, _, _)
+            | Expr::ListLiteral { .. }
+            | Expr::SetLiteral { .. }
+            | Expr::MapLiteral { .. } => Err(LowerError::ContractOperandUnsupported),
             Expr::Field(base, fname) => {
                 if let Expr::Var(root) = field_root(base) {
                     if binders.iter().any(|b| b == root) {
@@ -3241,12 +3466,29 @@ impl Lowerer {
                     if let Some(i) = generics.iter().position(|g| g == &path[0]) {
                         return Type::Var(i as u32);
                     }
+                    if self
+                        .structs
+                        .get(&path[0])
+                        .map(|s| s.linear)
+                        .unwrap_or(false)
+                    {
+                        return Type::Linear(Box::new(self.lower_named(path, &[])));
+                    }
                 }
                 self.lower_named(path, &[])
             }
             SType::Generic { path, args } => {
                 let lowered: Vec<Type> =
                     args.iter().map(|a| self.lower_type(a, generics)).collect();
+                if path.len() == 1
+                    && self
+                        .structs
+                        .get(&path[0])
+                        .map(|s| s.linear)
+                        .unwrap_or(false)
+                {
+                    return Type::Linear(Box::new(self.lower_named(path, &lowered)));
+                }
                 self.lower_named(path, &lowered)
             }
             SType::Slice(inner) => Type::Slice(Box::new(self.lower_type(inner, generics))),
@@ -3337,6 +3579,7 @@ impl Lowerer {
                 field: field.to_string(),
             })?;
         fields
+            .fields
             .iter()
             .position(|f| f.name == field)
             .map(|i| i as u32)
@@ -3362,6 +3605,7 @@ impl Lowerer {
                 let sname = struct_name(&bt)?;
                 let fields = self.structs.get(&sname)?;
                 fields
+                    .fields
                     .iter()
                     .find(|f| f.name == *field)
                     .map(|f| f.ty.clone())
@@ -3387,7 +3631,12 @@ impl Lowerer {
                         _ => None,
                     }
                 }
-                Expr::Var(fname) => self.fn_rets.get(fname).cloned().flatten(),
+                Expr::Var(fname) => self
+                    .fn_rets
+                    .get(fname)
+                    .cloned()
+                    .flatten()
+                    .map(|t| self.subst_surface(&t)),
                 // A capability narrowing op (`io.fs()`) has the operation's
                 // declared return type, so `let fs = io.fs()` types `fs` as the
                 // narrowed capability and its later method calls also lower to
@@ -3401,6 +3650,21 @@ impl Lowerer {
             // A struct literal has the named struct's type, so a binding to it
             // (`let p = Point { .. }`) resolves field projections on `p`.
             Expr::Struct { path, .. } => Some(SType::Named(path.clone())),
+            Expr::ListLiteral { items, .. } => Some(SType::Generic {
+                path: vec!["List".to_string()],
+                args: vec![self.array_elem_stype(items, env)],
+            }),
+            Expr::SetLiteral { .. } => Some(SType::Generic {
+                path: vec!["Set".to_string()],
+                args: vec![SType::Named(vec!["str".to_string()])],
+            }),
+            Expr::MapLiteral { values, .. } => Some(SType::Generic {
+                path: vec!["Map".to_string()],
+                args: vec![
+                    SType::Named(vec!["str".to_string()]),
+                    self.array_elem_stype(values, env),
+                ],
+            }),
             // Indexing a slice or array yields its element type. The base may be
             // a second-class reference to the collection (`sales: &[]Sale`), so
             // peel any `&`/`&mut` before matching.
@@ -3418,6 +3682,7 @@ impl Lowerer {
                 }
                 _ => None,
             },
+            Expr::Cast(_, ty) => Some(ty.clone()),
             Expr::Binary(l, BinOp::Add, r) => {
                 let lt = self.type_of_expr(l, env)?;
                 let rt = self.type_of_expr(r, env)?;
@@ -3798,6 +4063,30 @@ fn list_elem_stype(t: &SType) -> Option<&SType> {
             args.first()
         }
         SType::Ref { inner, .. } => list_elem_stype(inner),
+        _ => None,
+    }
+}
+
+fn map_value_stype(t: &SType) -> Option<&SType> {
+    match t {
+        SType::Generic { path, args }
+            if path.last().map(|s| s == "Map").unwrap_or(false) && args.len() == 2 =>
+        {
+            args.get(1)
+        }
+        SType::Ref { inner, .. } => map_value_stype(inner),
+        _ => None,
+    }
+}
+
+fn iter_elem_stype(t: &SType) -> Option<&SType> {
+    match t {
+        SType::Generic { path, args }
+            if path.last().map(|s| s == "IndexIter").unwrap_or(false) && args.len() == 1 =>
+        {
+            args.first()
+        }
+        SType::Ref { inner, .. } => iter_elem_stype(inner),
         _ => None,
     }
 }

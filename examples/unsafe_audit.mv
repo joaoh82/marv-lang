@@ -1,0 +1,10 @@
+mod unsafe_audit
+
+/// SAFETY: this demo has no raw operation; the marker exists to show audit metadata.
+unsafe fn audited_identity(x: i64) -> i64 {
+    x
+}
+
+pure fn main() -> i64 {
+    42
+}

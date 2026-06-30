@@ -11,18 +11,17 @@
 //!
 //! ## Two honest departures from the literal spec text
 //!
-//! - **The Fs flow is driven over ingested Core, not source.** The M0 front end
-//!   emits no `perform`, so a capability misuse cannot be *written* in `.mv`
-//!   source yet (documented in `marv_types::check`). The protocol's Core-snapshot
-//!   ingestion (`spec/03` §3.1, `marv_db::corespec`) lets the *real* checker run
-//!   the flow end to end. The `check`/`applyFix` *requests* are exactly as in the
-//!   spec.
+//! - **The original Fs flow is driven over ingested Core.** Source-level
+//!   capability misuse is now expressible too, and has its own `applyFix`
+//!   regression below. The Core-snapshot path remains because the protocol
+//!   accepts both `.mv` source and hand-authored Core (`spec/03` §3.1,
+//!   `marv_db::corespec`).
 //! - **The error code is `E0110`, not the prose example's `E0307`.** §6 fixes the
 //!   real numbering by check family (capabilities are `E011x`); the M2 checker
 //!   and `spec/03` §6 are the source of truth, and the `E0307` in the §4.1 prose
 //!   is an older illustrative number. Spans over *Core-ingested* files are `null`
-//!   (Core has no source text); over `.mv` source they are real, def-granular
-//!   spans (MARV-12) — see the source-span tests below.
+//!   (Core has no source text); over `.mv` source they are real spans, including
+//!   source-fix edit spans where the front end can derive them.
 
 use marv_core::ir::*;
 use marv_core::symbol_hash;
@@ -161,6 +160,111 @@ fn missing_fs_fix_flow() {
         json!({ "snapshotId": s2, "def": "report.load" }),
     );
     assert_eq!(eff["effects"], json!(["Fs"]));
+}
+
+#[test]
+fn source_missing_capability_apply_fix_removes_pure_marker() {
+    let mut server = Server::new();
+    let src = "\
+mod demo
+
+interface Fs {
+    fn read(fs: &Fs, path: str) -> ![]u8
+}
+
+pure fn read_file(fs: Fs, path: str) -> ![]u8 {
+    fs.read(path)
+}
+";
+    let open = call(
+        &mut server,
+        "marv/openSnapshot",
+        json!({ "files": [ { "path": "demo.mv", "text": src } ] }),
+    );
+    let s1 = open["snapshotId"].as_str().unwrap().to_string();
+
+    let checked = call(&mut server, "marv/check", json!({ "snapshotId": s1 }));
+    let diags = checked["diagnostics"].as_array().unwrap();
+    assert_eq!(
+        diags.len(),
+        1,
+        "expected one MissingCapability: {checked:#}"
+    );
+    let d = &diags[0];
+    assert_eq!(d["code"], "E0110");
+    let fix = &d["fixes"][0];
+    assert_eq!(
+        fix["title"],
+        "remove `pure` marker so capability parameters declare the effect"
+    );
+    let span = &fix["edits"][0]["span"];
+    assert_eq!(span["file"], "demo.mv");
+    let (lo, hi) = (
+        span["startByte"].as_u64().unwrap() as usize,
+        span["endByte"].as_u64().unwrap() as usize,
+    );
+    assert_eq!(&src[lo..hi], "pure ");
+    assert_eq!(fix["edits"][0]["newText"], "");
+
+    let fixed = call(
+        &mut server,
+        "marv/applyFix",
+        json!({ "snapshotId": s1, "diagnosticCode": "E0110", "def": "demo.read_file" }),
+    );
+    let s2 = fixed["snapshotId"].as_str().unwrap().to_string();
+    assert_ne!(s2, s1, "applyFix returns a new snapshot");
+    assert_eq!(
+        fixed["diagnostics"].as_array().unwrap().len(),
+        0,
+        "source repair re-checks clean: {fixed:#}"
+    );
+
+    let sig = call(
+        &mut server,
+        "marv/signature",
+        json!({ "snapshotId": s2, "def": "demo.read_file" }),
+    );
+    assert_eq!(sig["pure"], false);
+    assert_eq!(sig["effects"], json!(["Fs"]));
+}
+
+#[test]
+fn unsafe_sites_lists_source_safety_justifications() {
+    let mut server = Server::new();
+    let src = "\
+mod demo
+
+/// SAFETY: host boundary validates the raw value before calling this function.
+unsafe fn raw_value(x: i64) -> i64 {
+    x
+}
+
+pure fn safe_value(x: i64) -> i64 {
+    x
+}
+";
+    let open = call(
+        &mut server,
+        "marv/openSnapshot",
+        json!({ "files": [ { "path": "demo.mv", "text": src } ] }),
+    );
+    let snapshot = open["snapshotId"].as_str().unwrap();
+
+    let unsafe_sites = call(
+        &mut server,
+        "marv/unsafeSites",
+        json!({ "snapshotId": snapshot }),
+    );
+    let sites = unsafe_sites["sites"].as_array().unwrap();
+    assert_eq!(sites.len(), 1, "expected one unsafe site: {unsafe_sites:#}");
+    assert_eq!(sites[0]["file"], "demo.mv");
+    assert_eq!(sites[0]["def"], "demo.raw_value");
+    assert!(sites[0]["hash"].as_str().unwrap().starts_with("b3:"));
+    assert_eq!(
+        sites[0]["justification"],
+        "host boundary validates the raw value before calling this function."
+    );
+    assert_eq!(sites[0]["span"]["file"], "demo.mv");
 }
 
 #[test]

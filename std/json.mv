@@ -1,0 +1,378 @@
+mod std.json
+import std.io (Alloc)
+import std.collections (List, with_capacity, push)
+import std.str (from_chars)
+
+/// Typed JSON parse errors. JSON parsing returns data-flow errors instead of
+/// panicking or silently accepting malformed input.
+error JsonError { UnexpectedEnd, UnexpectedChar, ExpectedColon, ExpectedCommaOrEnd, ExpectedString, ExpectedNumber, ExpectedValue, TrailingInput }
+
+/// First JSON value slice: scalars plus a validated source-backed flat object.
+/// Arrays and materialized nested objects stay with the recursive ADT and
+/// general map work tracked later in MARV-48.
+enum JsonScalar {
+    Null,
+    Bool(bool),
+    Number(i64),
+    String(str),
+}
+
+struct JsonObject { source: str }
+
+struct ParsedScalar { scalar_value: JsonScalar, next_index: usize }
+
+struct ParsedString { string_value: str, next_index: usize }
+
+pure fn is_ws(c: char) -> bool {
+    ((((c == ' ') or (c == '\n')) or (c == '\r')) or (c == '\t'))
+}
+
+pure fn char_eq_at(text: str, index: usize, expected: char) -> bool {
+    if (index < len(text)) {
+        (text[index] == expected)
+    } else {
+        false
+    }
+}
+
+pure fn ws_at(text: str, index: usize) -> bool {
+    if (index < len(text)) {
+        is_ws(text[index])
+    } else {
+        false
+    }
+}
+
+pure fn is_digit(c: char) -> bool {
+    let n: i64 = (c as i64)
+    ((n >= ('0' as i64)) and (n <= ('9' as i64)))
+}
+
+pure fn digit_at(text: str, index: usize) -> bool {
+    if (index < len(text)) {
+        is_digit(text[index])
+    } else {
+        false
+    }
+}
+
+pure fn digit_value(c: char) -> i64 {
+    ((c as i64) - ('0' as i64))
+}
+
+pure fn skip_ws(text: str, index: usize) -> usize {
+    var i: usize = index
+    while ws_at(text, i) {
+        i = (i + 1)
+    }
+    i
+}
+
+pure fn key_matches_at(input: str, key: str, quote: usize) -> bool {
+    var j: usize = 0
+    var same: bool = true
+    while (((j < len(key)) and same) and (((quote + 1) + j) < len(input))) {
+        same = (input[((quote + 1) + j)] == key[j])
+        j = (j + 1)
+    }
+    (((same and (j == len(key))) and (((quote + 1) + j) < len(input))) and (input[((quote + 1) + j)] == '"'))
+}
+
+fn parse_string_body(input: str, start: usize) -> !ParsedString {
+    var i: usize = (start + 1)
+    var done: bool = false
+    while ((i < len(input)) and not done) {
+        let c: char = input[i]
+        if (c == '"') {
+            done = true
+        } else {
+            i = (i + 1)
+        }
+    }
+    if done {
+        ParsedString { string_value: input[(start + 1)..i], next_index: (i + 1) }
+    } else {
+        JsonError.UnexpectedEnd
+    }
+}
+
+fn parse_string_at(alloc: Alloc, input: str, index: usize) -> !ParsedString {
+    let start: usize = skip_ws(input, index)
+    if not char_eq_at(input, start, '"') {
+        JsonError.ExpectedString
+    } else {
+        parse_string_body(input, start)
+    }
+}
+
+pure fn number_sign(text: str, index: usize) -> i64 {
+    if char_eq_at(text, index, '-') {
+        -1
+    } else {
+        1
+    }
+}
+
+pure fn number_digits_start(text: str, index: usize) -> usize {
+    if char_eq_at(text, index, '-') {
+        (index + 1)
+    } else {
+        index
+    }
+}
+
+fn parse_number_at(text: str, index: usize) -> !ParsedScalar {
+    let start: usize = skip_ws(text, index)
+    let sign: i64 = number_sign(text, start)
+    var i: usize = number_digits_start(text, start)
+    if not digit_at(text, i) {
+        JsonError.ExpectedNumber
+    } else {
+        var value: i64 = 0
+        while digit_at(text, i) {
+            value = ((value * 10) + digit_value(text[i]))
+            i = (i + 1)
+        }
+        ParsedScalar { scalar_value: JsonScalar.Number((value * sign)), next_index: i }
+    }
+}
+
+pure fn has_null_at(text: str, index: usize) -> bool {
+    (((char_eq_at(text, index, 'n') and char_eq_at(text, (index + 1), 'u')) and char_eq_at(text, (index + 2), 'l')) and char_eq_at(text, (index + 3), 'l'))
+}
+
+pure fn has_true_at(text: str, index: usize) -> bool {
+    (((char_eq_at(text, index, 't') and char_eq_at(text, (index + 1), 'r')) and char_eq_at(text, (index + 2), 'u')) and char_eq_at(text, (index + 3), 'e'))
+}
+
+pure fn has_false_at(text: str, index: usize) -> bool {
+    ((((char_eq_at(text, index, 'f') and char_eq_at(text, (index + 1), 'a')) and char_eq_at(text, (index + 2), 'l')) and char_eq_at(text, (index + 3), 's')) and char_eq_at(text, (index + 4), 'e'))
+}
+
+fn parse_scalar_at(alloc: Alloc, text: str, index: usize) -> !ParsedScalar {
+    let i: usize = skip_ws(text, index)
+    if (i >= len(text)) {
+        JsonError.UnexpectedEnd
+    } else if has_null_at(text, i) {
+        ParsedScalar { scalar_value: JsonScalar.Null, next_index: (i + 4) }
+    } else if has_true_at(text, i) {
+        ParsedScalar { scalar_value: JsonScalar.Bool(true), next_index: (i + 4) }
+    } else if has_false_at(text, i) {
+        ParsedScalar { scalar_value: JsonScalar.Bool(false), next_index: (i + 5) }
+    } else if (text[i] == '"') {
+        let parsed: ParsedString = parse_string_at(alloc, text, i)?
+        ParsedScalar { scalar_value: JsonScalar.String(parsed.string_value), next_index: parsed.next_index }
+    } else if (char_eq_at(text, i, '-') or digit_at(text, i)) {
+        parse_number_at(text, i)
+    } else {
+        JsonError.ExpectedValue
+    }
+}
+
+fn parse_scalar(alloc: Alloc, text: str) -> !JsonScalar {
+    let parsed: ParsedScalar = parse_scalar_at(alloc, text, 0)?
+    let end: usize = skip_ws(text, parsed.next_index)
+    if (end == len(text)) {
+        parsed.scalar_value
+    } else {
+        JsonError.TrailingInput
+    }
+}
+
+fn finish_object(text: str, index: usize) -> !JsonObject {
+    let end: usize = skip_ws(text, index)
+    if (end == len(text)) {
+        JsonObject { source: text }
+    } else {
+        JsonError.TrailingInput
+    }
+}
+
+fn parse_object_fields(alloc: Alloc, text: str, index: usize) -> !JsonObject {
+    var i: usize = index
+    var done: bool = false
+    while ((i < len(text)) and not done) {
+        let key: ParsedString = parse_string_at(alloc, text, i)?
+        i = skip_ws(text, key.next_index)
+        if not char_eq_at(text, i, ':') {
+            JsonError.ExpectedColon
+        } else {
+            let value: ParsedScalar = parse_scalar_at(alloc, text, (i + 1))?
+            i = skip_ws(text, value.next_index)
+            if char_eq_at(text, i, ',') {
+                i = skip_ws(text, (i + 1))
+            } else if char_eq_at(text, i, '}') {
+                done = true
+                i = (i + 1)
+            } else {
+                JsonError.ExpectedCommaOrEnd
+            }
+        }
+    }
+    if done {
+        finish_object(text, i)
+    } else {
+        JsonError.UnexpectedEnd
+    }
+}
+
+fn parse_object_body(alloc: Alloc, text: str, open_index: usize) -> !JsonObject {
+    let i: usize = skip_ws(text, (open_index + 1))
+    if char_eq_at(text, i, '}') {
+        finish_object(text, (i + 1))
+    } else {
+        parse_object_fields(alloc, text, i)
+    }
+}
+
+fn parse_object(alloc: Alloc, text: str) -> !JsonObject {
+    let i: usize = skip_ws(text, 0)
+    if not char_eq_at(text, i, '{') {
+        JsonError.UnexpectedChar
+    } else {
+        parse_object_body(alloc, text, i)
+    }
+}
+
+pure fn find_key_value_start(object: JsonObject, key: str) -> usize {
+    let text: str = object.source
+    var i: usize = 0
+    var out: usize = len(text)
+    var found: bool = false
+    while ((i < len(text)) and not found) {
+        if (char_eq_at(text, i, '"') and key_matches_at(text, key, i)) {
+            let after_key: usize = ((i + len(key)) + 2)
+            let colon: usize = skip_ws(text, after_key)
+            if char_eq_at(text, colon, ':') {
+                out = skip_ws(text, (colon + 1))
+                found = true
+            } else {
+                i = (i + 1)
+            }
+        } else {
+            i = (i + 1)
+        }
+    }
+    out
+}
+
+fn object_get_or(alloc: Alloc, object: JsonObject, key: str, fallback: JsonScalar) -> !JsonScalar {
+    let start: usize = find_key_value_start(object, key)
+    if (start < len(object.source)) {
+        let parsed: ParsedScalar = parse_scalar_at(alloc, object.source, start)?
+        parsed.scalar_value
+    } else {
+        fallback
+    }
+}
+
+pure fn object_len(object: JsonObject) -> usize {
+    let text: str = object.source
+    var i: usize = 0
+    var count: usize = 0
+    while (i < len(text)) {
+        count = add_if(count, (text[i] == ':'))
+        i = (i + 1)
+    }
+    count
+}
+
+pure fn add_if(count: usize, include: bool) -> usize {
+    if include {
+        (count + 1)
+    } else {
+        count
+    }
+}
+
+pure fn as_bool(value: JsonScalar, fallback: bool) -> bool {
+    match value {
+        JsonScalar.Bool(flag) => flag,
+        _ => fallback,
+    }
+}
+
+pure fn as_number(value: JsonScalar, fallback: i64) -> i64 {
+    match value {
+        JsonScalar.Number(n) => n,
+        _ => fallback,
+    }
+}
+
+pure fn as_string(value: JsonScalar, fallback: str) -> str {
+    match value {
+        JsonScalar.String(s) => s,
+        _ => fallback,
+    }
+}
+
+fn serialize_positive_number(alloc: Alloc, nval: i64) -> str {
+    var place: i64 = 1
+    while (place <= (nval / 10)) {
+        place = (place * 10)
+    }
+    var chars: List[char] = with_capacity(alloc, 20)
+    while (place > 0) {
+        let digit: i64 = ((nval / place) % 10)
+        chars = push(alloc, chars, ((('0' as i64) + digit) as char))
+        place = (place / 10)
+    }
+    from_chars(alloc, chars)
+}
+
+fn serialize_negative_number(alloc: Alloc, nval: i64) -> str {
+    let n: i64 = (0 - nval)
+    var place: i64 = 1
+    while (place <= (n / 10)) {
+        place = (place * 10)
+    }
+    var chars: List[char] = with_capacity(alloc, 20)
+    chars = push(alloc, chars, '-')
+    while (place > 0) {
+        let digit: i64 = ((n / place) % 10)
+        chars = push(alloc, chars, ((('0' as i64) + digit) as char))
+        place = (place / 10)
+    }
+    from_chars(alloc, chars)
+}
+
+fn serialize_number(alloc: Alloc, nval: i64) -> str {
+    if (nval == 0) {
+        "0"
+    } else if (nval < 0) {
+        serialize_negative_number(alloc, nval)
+    } else {
+        serialize_positive_number(alloc, nval)
+    }
+}
+
+fn quote_string(alloc: Alloc, text: str) -> str {
+    var chars: List[char] = with_capacity(alloc, (len(text) + 2))
+    chars = push(alloc, chars, '"')
+    for c in text {
+        chars = push(alloc, chars, c)
+    }
+    chars = push(alloc, chars, '"')
+    from_chars(alloc, chars)
+}
+
+fn serialize_scalar(alloc: Alloc, value: JsonScalar) -> str {
+    match value {
+        JsonScalar.Null => "null",
+        JsonScalar.Bool(flag) => bool_text(flag),
+        JsonScalar.Number(n) => serialize_number(alloc, n),
+        JsonScalar.String(s) => quote_string(alloc, s),
+    }
+}
+
+pure fn bool_text(flag: bool) -> str {
+    if flag {
+        "true"
+    } else {
+        "false"
+    }
+}
+
+pure fn serialize_object(object: JsonObject) -> str {
+    object.source
+}

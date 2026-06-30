@@ -67,6 +67,7 @@ analysis path.
 | `marv/signature` | `{ name, params, ret, effects, errorSet, pure, requires, ensures, hash }`. |
 | `marv/effects` | `{ effects }` — the **inferred** capability row. |
 | `marv/errorSet` | `{ errorSet }` — the **inferred** error set. |
+| `marv/unsafeSites` | `{ sites }` — unsafe audit boundaries as `{ file, def, hash, justification, span }`. |
 | `marv/callers` / `marv/callees` | `{ callers }` / `{ callees }` — call edges, by qualified name. |
 | `marv/canonical` | `{ text }` — the canonical form of a `def` or `file`. |
 | `marv/core` | `{ hash, core, deps, alphaCanonical }` — the Core IR and content identity (`spec/03` §4.4). |
@@ -101,8 +102,11 @@ Three boundaries are worth stating plainly, continuing the M1/M2 notes:
    diagnostic, `typeAt`, and `verify` carries a **real** span — the byte range and
    `{line, col}` of the enclosing definition's header — threaded from the lexer
    through the parser's `ItemSpan` side table (the AST and Core hashing are
-   untouched). A `MissingCapability` fix resolves its edit to the parameter-list
-   insertion point, so `applyFix` lands at a real offset. What is *not* yet
+   untouched). A `MissingCapability` source fix resolves its edit to a real
+   offset: for a `pure fn` that already receives the capability, `applyFix`
+   removes the `pure ` marker so the capability parameter declares the effect;
+   for Core-ingested snapshots the equivalent repair updates the function's
+   effect row. What is *not* yet
    exact is sub-definition granularity: `spec/02` §F rule 4 keeps spans out of the
    span-free Core IR the checker runs over, so a diagnostic points at its def's
    header rather than the offending sub-expression (that finer grain needs a
@@ -116,8 +120,8 @@ Three boundaries are worth stating plainly, continuing the M1/M2 notes:
    Because the protocol is agent-facing and agents may hold Core directly, a
    snapshot file can still be ingested as a Core module (`spec/03` §3.1) to drive
    the same checker over hand-authored IR. `applyFix` over either form makes the
-   declaration honest — adding the missing capability parameter, the structured
-   equivalent of inserting `fs: Fs` into a signature.
+   declaration honest — source fixes edit the signature text, and Core fixes
+   update the structured effect row.
 
 3. **The prose example's `E0307` is `E0110`.** `spec/03` §6 fixes the real error
    numbering by check family (capabilities are `E011x`); the `E0307` in the §4.1
