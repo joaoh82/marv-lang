@@ -249,6 +249,7 @@ impl ModuleIr {
         let mut out = String::new();
         out.push_str("; marv LLVM backend (MARV-69)\n");
         out.push_str("declare ptr @calloc(i64, i64)\n");
+        out.push_str("declare i32 @memcmp(ptr, ptr, i64)\n");
         out.push_str("declare void @abort()\n\n");
         for func in self.funcs {
             out.push_str(&func);
@@ -418,12 +419,10 @@ impl<'a> FuncBuilder<'a> {
                 self.terminated = true;
                 Ok(Slot::Returned)
             }
-            Core::ListNew { .. }
-            | Core::ListPush { .. }
-            | Core::ListPop { .. }
-            | Core::ListSet { .. } => Err(LlvmError::Unsupported(
-                "std.collections.List runtime operations".into(),
-            )),
+            Core::ListNew { capacity, .. } => self.eval_list_new(capacity),
+            Core::ListPush { list, value, .. } => self.eval_list_push(list, value),
+            Core::ListPop { list } => self.eval_list_pop(list),
+            Core::ListSet { list, index, value } => self.eval_list_set(list, index, value),
             Core::Lam { .. } => Err(LlvmError::Unsupported("first-class lambda".into())),
             Core::Perform { .. } => Err(LlvmError::Unsupported(
                 "capability perform (use the interpreter or WASM host imports)".into(),
@@ -518,6 +517,16 @@ impl<'a> FuncBuilder<'a> {
         }
         let v = |i: usize| vals[i].clone();
         let out = match op {
+            Add if args.first().is_some_and(|a| self.atom_is_str(a)) => {
+                return Ok(Slot::Val(self.eval_string_concat(&v(0), &v(1))));
+            }
+            Eq if args.first().is_some_and(|a| self.atom_is_str(a)) => {
+                return Ok(Slot::Val(self.eval_string_eq(&v(0), &v(1))));
+            }
+            Ne if args.first().is_some_and(|a| self.atom_is_str(a)) => {
+                let eq = self.eval_string_eq(&v(0), &v(1));
+                return Ok(Slot::Val(self.bin("xor", &eq, "1")));
+            }
             Add => self.bin("add", &v(0), &v(1)),
             Sub => self.bin("sub", &v(0), &v(1)),
             Mul => self.bin("mul", &v(0), &v(1)),
@@ -536,12 +545,16 @@ impl<'a> FuncBuilder<'a> {
             Len => self.load_word(&v(0), "0"),
             Index => {
                 self.emit_bounds_check(&v(0), &v(1));
-                let slot = self.bin("add", &v(1), "1");
+                let header_words = if args.first().is_some_and(|a| self.atom_uses_list_layout(a)) {
+                    "2"
+                } else {
+                    "1"
+                };
+                let slot = self.bin("add", &v(1), header_words);
                 self.load_word(&v(0), &slot)
             }
-            Slice | FromChars => {
-                return Err(LlvmError::Unsupported("string slice/from_chars".into()))
-            }
+            Slice => return Ok(Slot::Val(self.eval_string_slice(&v(0), &v(1), &v(2)))),
+            FromChars => return Ok(Slot::Val(self.eval_string_from_chars(&v(1)))),
         };
         Ok(Slot::Val(out))
     }
@@ -566,6 +579,7 @@ impl<'a> FuncBuilder<'a> {
 
     fn eval_proj(&mut self, base: &Atom, idx: u32) -> Result<Slot, LlvmError> {
         let base_slot = self.eval_atom(base)?;
+        let base_ty = layout::atom_type(self.world, base, &self.tys);
         match base_slot {
             Slot::Tuple { fields, .. } => fields
                 .get(idx as usize)
@@ -573,6 +587,9 @@ impl<'a> FuncBuilder<'a> {
                 .ok_or_else(|| LlvmError::Unsupported("projection out of range".into())),
             other => {
                 let ptr = self.as_word(other)?;
+                if idx == 0 && base_ty.as_ref().is_some_and(is_list_type) {
+                    return Ok(Slot::Val(ptr));
+                }
                 Ok(Slot::Val(
                     self.load_word(&ptr, &(idx as i64 + 1).to_string()),
                 ))
@@ -600,6 +617,95 @@ impl<'a> FuncBuilder<'a> {
         let slot = self.bin("add", &idx, "1");
         self.store_word(&newptr, &slot, &val);
         Ok(Slot::Val(newptr))
+    }
+
+    fn eval_list_new(&mut self, capacity: &Atom) -> Result<Slot, LlvmError> {
+        let cap = self.eval_atom(capacity)?;
+        let cap = self.as_word(cap)?;
+        let total = self.bin("add", &cap, "2");
+        let ptr = self.alloc_words(&total);
+        self.store_word(&ptr, "0", "0");
+        self.store_word(&ptr, "1", &cap);
+        Ok(Slot::Val(ptr))
+    }
+
+    fn eval_list_push(&mut self, list: &Atom, value: &Atom) -> Result<Slot, LlvmError> {
+        let ptr = self.eval_atom(list)?;
+        let ptr = self.as_word(ptr)?;
+        let val = self.eval_atom(value)?;
+        let val = self.as_word(val)?;
+        let len = self.load_word(&ptr, "0");
+        let cap = self.load_word(&ptr, "1");
+        let has_space = self.cmp("ult", &len, &cap);
+        let has_space = self.i1(&has_space);
+        let inplace = self.label("list.push.inplace");
+        let grow = self.label("list.push.grow");
+        let merge = self.label("list.push.merge");
+        self.emit(format!(
+            "br i1 {has_space}, label %{inplace}, label %{grow}"
+        ));
+        self.terminated = true;
+
+        self.push_label(inplace.clone());
+        let new_len = self.bin("add", &len, "1");
+        self.store_word(&ptr, "0", &new_len);
+        let slot = self.bin("add", &len, "2");
+        self.store_word(&ptr, &slot, &val);
+        self.emit(format!("br label %{merge}"));
+        self.terminated = true;
+        let inplace_end = self.current_label.clone();
+
+        self.push_label(grow.clone());
+        let doubled = self.bin("mul", &cap, "2");
+        let too_small = self.cmp("ult", &doubled, "4");
+        let new_cap = self.select_i64(&too_small, "4", &doubled);
+        let total = self.bin("add", &new_cap, "2");
+        let newptr = self.alloc_words(&total);
+        let copy_total = self.bin("add", &len, "2");
+        self.copy_words(&ptr, &newptr, &copy_total);
+        let new_len = self.bin("add", &len, "1");
+        self.store_word(&newptr, "0", &new_len);
+        self.store_word(&newptr, "1", &new_cap);
+        let slot = self.bin("add", &len, "2");
+        self.store_word(&newptr, &slot, &val);
+        self.emit(format!("br label %{merge}"));
+        self.terminated = true;
+        let grow_end = self.current_label.clone();
+
+        self.push_label(merge);
+        let out = self.tmp();
+        self.emit(format!(
+            "{out} = phi i64 [ {ptr}, %{inplace_end} ], [ {newptr}, %{grow_end} ]"
+        ));
+        Ok(Slot::Val(out))
+    }
+
+    fn eval_list_pop(&mut self, list: &Atom) -> Result<Slot, LlvmError> {
+        let ptr = self.eval_atom(list)?;
+        let ptr = self.as_word(ptr)?;
+        let len = self.load_word(&ptr, "0");
+        self.emit_bounds_check(&ptr, "0");
+        let new_len = self.bin("sub", &len, "1");
+        self.store_word(&ptr, "0", &new_len);
+        Ok(Slot::Val(ptr))
+    }
+
+    fn eval_list_set(
+        &mut self,
+        list: &Atom,
+        index: &Atom,
+        value: &Atom,
+    ) -> Result<Slot, LlvmError> {
+        let ptr = self.eval_atom(list)?;
+        let ptr = self.as_word(ptr)?;
+        let idx = self.eval_atom(index)?;
+        let idx = self.as_word(idx)?;
+        let val = self.eval_atom(value)?;
+        let val = self.as_word(val)?;
+        self.emit_bounds_check(&ptr, &idx);
+        let slot = self.bin("add", &idx, "2");
+        self.store_word(&ptr, &slot, &val);
+        Ok(Slot::Val(ptr))
     }
 
     fn eval_match(&mut self, scrutinee: &Atom, branches: &[Branch]) -> Result<Slot, LlvmError> {
@@ -637,30 +743,56 @@ impl<'a> FuncBuilder<'a> {
         self.terminated = true;
 
         self.push_label(then_label.clone());
-        let then_slot = self.eval(&branches[1].body)?;
-        let then_end = self.current_label.clone();
+        let mut then_slot = self.eval(&branches[1].body)?;
         let then_live = !self.terminated;
         if then_live {
+            then_slot = self.materialize_branch_slot(then_slot)?;
+            let then_end = self.current_label.clone();
             self.emit(format!("br label %{merge_label}"));
             self.terminated = true;
-        }
+            self.push_label(else_label.clone());
 
-        self.push_label(else_label.clone());
-        let else_slot = self.eval(&branches[0].body)?;
-        let else_end = self.current_label.clone();
-        let else_live = !self.terminated;
-        if else_live {
-            self.emit(format!("br label %{merge_label}"));
-            self.terminated = true;
-        }
+            let mut else_slot = self.eval(&branches[0].body)?;
+            let else_live = !self.terminated;
+            let else_end = if else_live {
+                else_slot = self.materialize_branch_slot(else_slot)?;
+                let end = self.current_label.clone();
+                self.emit(format!("br label %{merge_label}"));
+                self.terminated = true;
+                end
+            } else {
+                self.current_label.clone()
+            };
 
-        self.merge_slots(
-            merge_label,
-            vec![
-                (then_slot, then_end, then_live),
-                (else_slot, else_end, else_live),
-            ],
-        )
+            self.merge_slots(
+                merge_label,
+                vec![
+                    (then_slot, then_end, then_live),
+                    (else_slot, else_end, else_live),
+                ],
+            )
+        } else {
+            let then_end = self.current_label.clone();
+            self.push_label(else_label.clone());
+            let mut else_slot = self.eval(&branches[0].body)?;
+            let else_live = !self.terminated;
+            let else_end = if else_live {
+                else_slot = self.materialize_branch_slot(else_slot)?;
+                let end = self.current_label.clone();
+                self.emit(format!("br label %{merge_label}"));
+                self.terminated = true;
+                end
+            } else {
+                self.current_label.clone()
+            };
+            self.merge_slots(
+                merge_label,
+                vec![
+                    (then_slot, then_end, then_live),
+                    (else_slot, else_end, else_live),
+                ],
+            )
+        }
     }
 
     fn eval_match_boxed(
@@ -701,20 +833,34 @@ impl<'a> FuncBuilder<'a> {
                 self.env.push(Slot::Val(slot));
                 self.tys.push(None);
             }
-            let slot = self.eval(&br.body)?;
+            let mut slot = self.eval(&br.body)?;
             for _ in 0..pushed {
                 self.env.pop();
                 self.tys.pop();
             }
-            let end = self.current_label.clone();
             let live = !self.terminated;
             if live {
+                slot = self.materialize_branch_slot(slot)?;
+                let end = self.current_label.clone();
                 self.emit(format!("br label %{merge_label}"));
                 self.terminated = true;
+                arms.push((slot, end, live));
+            } else {
+                let end = self.current_label.clone();
+                arms.push((slot, end, live));
             }
-            arms.push((slot, end, live));
         }
         self.merge_slots(merge_label, arms)
+    }
+
+    fn materialize_branch_slot(&mut self, slot: Slot) -> Result<Slot, LlvmError> {
+        match slot {
+            Slot::Tuple { .. } => {
+                let v = self.as_word(slot)?;
+                Ok(Slot::Val(v))
+            }
+            other => Ok(other),
+        }
     }
 
     fn merge_slots(
@@ -730,55 +876,54 @@ impl<'a> FuncBuilder<'a> {
         if live.len() == 1 {
             return Ok(live[0].0.clone());
         }
-        match &live[0].0 {
-            Slot::Val(_) | Slot::Unit => {
-                let incoming = live
-                    .into_iter()
-                    .map(|(slot, label, _)| match slot {
-                        Slot::Val(v) => Ok(format!("[ {v}, %{label} ]")),
-                        Slot::Unit => Ok(format!("[ 0, %{label} ]")),
-                        other => Err(LlvmError::Unsupported(format!(
-                            "cannot merge branch result {other:?}"
-                        ))),
+        if live
+            .iter()
+            .all(|(slot, _, _)| matches!(slot, Slot::Tuple { .. }))
+        {
+            match &live[0].0 {
+                Slot::Tuple { fields, .. } => {
+                    let mut merged = Vec::with_capacity(fields.len());
+                    for field_i in 0..fields.len() {
+                        let incoming = live
+                            .iter()
+                            .map(|(slot, label, _)| {
+                                let Slot::Tuple { fields, .. } = slot else {
+                                    unreachable!("all live branch results are tuples");
+                                };
+                                let v = self.as_word(fields[field_i].clone())?;
+                                Ok(format!("[ {v}, %{label} ]"))
+                            })
+                            .collect::<Result<Vec<_>, _>>()?
+                            .join(", ");
+                        let tmp = self.tmp();
+                        self.emit(format!("{tmp} = phi i64 {incoming}"));
+                        merged.push(Slot::Val(tmp));
+                    }
+                    let tag = match &live[0].0 {
+                        Slot::Tuple { tag, .. } => *tag,
+                        _ => 0,
+                    };
+                    Ok(Slot::Tuple {
+                        tag,
+                        fields: merged,
                     })
-                    .collect::<Result<Vec<_>, _>>()?
-                    .join(", ");
-                let tmp = self.tmp();
-                self.emit(format!("{tmp} = phi i64 {incoming}"));
-                Ok(Slot::Val(tmp))
-            }
-            Slot::Tuple { fields, .. } => {
-                let mut merged = Vec::with_capacity(fields.len());
-                for field_i in 0..fields.len() {
-                    let incoming = live
-                        .iter()
-                        .map(|(slot, label, _)| {
-                            let Slot::Tuple { fields, .. } = slot else {
-                                return Err(LlvmError::Unsupported(
-                                    "branch tuple/non-tuple mismatch".into(),
-                                ));
-                            };
-                            let v = self.as_word(fields[field_i].clone())?;
-                            Ok(format!("[ {v}, %{label} ]"))
-                        })
-                        .collect::<Result<Vec<_>, _>>()?
-                        .join(", ");
-                    let tmp = self.tmp();
-                    self.emit(format!("{tmp} = phi i64 {incoming}"));
-                    merged.push(Slot::Val(tmp));
                 }
-                let tag = match &live[0].0 {
-                    Slot::Tuple { tag, .. } => *tag,
-                    _ => 0,
-                };
-                Ok(Slot::Tuple {
-                    tag,
-                    fields: merged,
-                })
+                other => Err(LlvmError::Unsupported(format!(
+                    "cannot merge branch result {other:?}"
+                ))),
             }
-            other => Err(LlvmError::Unsupported(format!(
-                "cannot merge branch result {other:?}"
-            ))),
+        } else {
+            let incoming = live
+                .into_iter()
+                .map(|(slot, label, _)| {
+                    let v = self.as_word(slot)?;
+                    Ok(format!("[ {v}, %{label} ]"))
+                })
+                .collect::<Result<Vec<_>, _>>()?
+                .join(", ");
+            let tmp = self.tmp();
+            self.emit(format!("{tmp} = phi i64 {incoming}"));
+            Ok(Slot::Val(tmp))
         }
     }
 
@@ -844,14 +989,151 @@ impl<'a> FuncBuilder<'a> {
     }
 
     fn eval_loop_body(&mut self, body: &Core, k: usize) -> Result<Vec<Slot>, LlvmError> {
-        let slot = self.eval(body)?;
-        match slot {
-            Slot::Tuple { fields, .. } if fields.len() == k => Ok(fields),
-            Slot::Returned => Ok(Vec::new()),
-            other => Err(LlvmError::Unsupported(format!(
-                "loop body did not produce {k} carried value(s): {other:?}"
-            ))),
+        match body {
+            Core::Let { value, body } => {
+                let v = self.eval(value)?;
+                if matches!(v, Slot::Returned) {
+                    return Ok(Vec::new());
+                }
+                let t = layout::type_of(self.world, value, &mut self.tys);
+                self.env.push(v);
+                self.tys.push(t);
+                let out = self.eval_loop_body(body, k);
+                self.env.pop();
+                self.tys.pop();
+                out
+            }
+            Core::Match {
+                scrutinee,
+                branches,
+            } => self.eval_loop_match(scrutinee, branches, k),
+            _ => {
+                let slot = self.eval(body)?;
+                match slot {
+                    Slot::Tuple { fields, .. } if fields.len() == k => Ok(fields),
+                    Slot::Unit if k == 0 => Ok(Vec::new()),
+                    Slot::Returned => Ok(Vec::new()),
+                    other => Err(LlvmError::Unsupported(format!(
+                        "loop body did not produce {k} carried value(s): {other:?}"
+                    ))),
+                }
+            }
         }
+    }
+
+    fn eval_loop_match(
+        &mut self,
+        scrutinee: &Atom,
+        branches: &[Branch],
+        k: usize,
+    ) -> Result<Vec<Slot>, LlvmError> {
+        let scrut_ty = layout::atom_type(self.world, scrutinee, &self.tys);
+        let boxed = scrut_ty
+            .as_ref()
+            .map(|t| layout::is_boxed(self.world, t))
+            .unwrap_or(false);
+        let merge = self.label("loop.match.end");
+        let mut arms = Vec::new();
+
+        if boxed {
+            let ptr = self.eval_atom(scrutinee)?;
+            let ptr = self.as_word(ptr)?;
+            let tag = self.load_word(&ptr, "0");
+            let default_label = self.label("loop.match.default");
+            let arm_labels = (0..branches.len())
+                .map(|_| self.label("loop.match.arm"))
+                .collect::<Vec<_>>();
+            let cases = arm_labels
+                .iter()
+                .enumerate()
+                .map(|(i, label)| format!("i64 {i}, label %{label}"))
+                .collect::<Vec<_>>()
+                .join("\n    ");
+            self.emit(format!(
+                "switch i64 {tag}, label %{default_label} [\n    {cases}\n  ]"
+            ));
+            self.terminated = true;
+
+            self.push_label(default_label);
+            self.emit("call void @abort()");
+            self.emit("unreachable");
+            self.terminated = true;
+
+            for (i, br) in branches.iter().enumerate() {
+                self.push_label(arm_labels[i].clone());
+                let pushed = br.binds as usize;
+                for field_i in 0..pushed {
+                    let slot = self.load_word(&ptr, &(field_i as i64 + 1).to_string());
+                    self.env.push(Slot::Val(slot));
+                    self.tys.push(None);
+                }
+                let next = self.eval_loop_body(&br.body, k)?;
+                for _ in 0..pushed {
+                    self.env.pop();
+                    self.tys.pop();
+                }
+                arms.push(self.finish_loop_match_arm(next, &merge)?);
+            }
+        } else {
+            if branches.len() != 2 || branches.iter().any(|b| b.binds != 0) {
+                return Err(LlvmError::Unsupported(
+                    "loop branch join on a value whose layout could not be determined".into(),
+                ));
+            }
+            let cond = self.eval_atom(scrutinee)?;
+            let cond = self.as_word(cond)?;
+            let cond = self.i1(&cond);
+            let then_label = self.label("loop.if.then");
+            let else_label = self.label("loop.if.else");
+            self.emit(format!(
+                "br i1 {cond}, label %{then_label}, label %{else_label}"
+            ));
+            self.terminated = true;
+
+            self.push_label(then_label);
+            let then_next = self.eval_loop_body(&branches[1].body, k)?;
+            arms.push(self.finish_loop_match_arm(then_next, &merge)?);
+
+            self.push_label(else_label);
+            let else_next = self.eval_loop_body(&branches[0].body, k)?;
+            arms.push(self.finish_loop_match_arm(else_next, &merge)?);
+        }
+
+        let live = arms.into_iter().flatten().collect::<Vec<_>>();
+        if live.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.push_label(merge);
+        let mut merged = Vec::with_capacity(k);
+        for field_i in 0..k {
+            let incoming = live
+                .iter()
+                .map(|(words, label)| format!("[ {}, %{label} ]", words[field_i]))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let tmp = self.tmp();
+            self.emit(format!("{tmp} = phi i64 {incoming}"));
+            merged.push(Slot::Val(tmp));
+        }
+        Ok(merged)
+    }
+
+    fn finish_loop_match_arm(
+        &mut self,
+        next: Vec<Slot>,
+        merge: &str,
+    ) -> Result<Option<(Vec<String>, String)>, LlvmError> {
+        if self.terminated {
+            return Ok(None);
+        }
+        let words = next
+            .into_iter()
+            .map(|slot| self.as_word(slot))
+            .collect::<Result<Vec<_>, _>>()?;
+        let label = self.current_label.clone();
+        self.emit(format!("br label %{merge}"));
+        self.terminated = true;
+        Ok(Some((words, label)))
     }
 
     fn as_word(&mut self, slot: Slot) -> Result<String, LlvmError> {
@@ -883,26 +1165,94 @@ impl<'a> FuncBuilder<'a> {
         ptr
     }
 
-    fn load_word(&mut self, base: &str, index: &str) -> String {
+    fn ptr_at(&mut self, base: &str, index: &str) -> String {
         let raw = self.tmp();
         self.emit(format!("{raw} = inttoptr i64 {base} to ptr"));
         let addr = self.tmp();
         self.emit(format!(
             "{addr} = getelementptr i64, ptr {raw}, i64 {index}"
         ));
+        addr
+    }
+
+    fn load_word(&mut self, base: &str, index: &str) -> String {
+        let addr = self.ptr_at(base, index);
         let out = self.tmp();
         self.emit(format!("{out} = load i64, ptr {addr}"));
         out
     }
 
     fn store_word(&mut self, base: &str, index: &str, value: &str) {
-        let raw = self.tmp();
-        self.emit(format!("{raw} = inttoptr i64 {base} to ptr"));
-        let addr = self.tmp();
-        self.emit(format!(
-            "{addr} = getelementptr i64, ptr {raw}, i64 {index}"
-        ));
+        let addr = self.ptr_at(base, index);
         self.emit(format!("store i64 {value}, ptr {addr}"));
+    }
+
+    fn eval_string_concat(&mut self, left: &str, right: &str) -> String {
+        let llen = self.load_word(left, "0");
+        let rlen = self.load_word(right, "0");
+        let total = self.bin("add", &llen, &rlen);
+        let words = self.bin("add", &total, "1");
+        let out = self.alloc_words(&words);
+        self.store_word(&out, "0", &total);
+        self.copy_word_range(left, "1", &out, "1", &llen);
+        let dst_start = self.bin("add", &llen, "1");
+        self.copy_word_range(right, "1", &out, &dst_start, &rlen);
+        out
+    }
+
+    fn eval_string_eq(&mut self, left: &str, right: &str) -> String {
+        let llen = self.load_word(left, "0");
+        let rlen = self.load_word(right, "0");
+        let same_len = self.cmp("eq", &llen, &rlen);
+        let lchars = self.ptr_at(left, "1");
+        let rchars = self.ptr_at(right, "1");
+        let bytes = self.bin("mul", &llen, "8");
+        let raw = self.tmp();
+        self.emit(format!(
+            "{raw} = call i32 @memcmp(ptr {lchars}, ptr {rchars}, i64 {bytes})"
+        ));
+        let same_bytes_i1 = self.tmp();
+        self.emit(format!("{same_bytes_i1} = icmp eq i32 {raw}, 0"));
+        let same_bytes = self.tmp();
+        self.emit(format!("{same_bytes} = zext i1 {same_bytes_i1} to i64"));
+        self.bin("and", &same_len, &same_bytes)
+    }
+
+    fn eval_string_slice(&mut self, ptr: &str, lo: &str, hi: &str) -> String {
+        if self.opts.bounds_checks {
+            let len = self.load_word(ptr, "0");
+            let lo_ok = self.cmp("ule", lo, &len);
+            let hi_ok = self.cmp("ule", hi, &len);
+            let order_ok = self.cmp("ule", lo, hi);
+            let both = self.bin("and", &lo_ok, &hi_ok);
+            let ok = self.bin("and", &both, &order_ok);
+            let ok = self.i1(&ok);
+            let pass = self.label("slice.pass");
+            let fail = self.label("slice.fail");
+            self.emit(format!("br i1 {ok}, label %{pass}, label %{fail}"));
+            self.terminated = true;
+            self.push_label(fail);
+            self.emit("call void @abort()");
+            self.emit("unreachable");
+            self.terminated = true;
+            self.push_label(pass);
+        }
+        let count = self.bin("sub", hi, lo);
+        let words = self.bin("add", &count, "1");
+        let out = self.alloc_words(&words);
+        self.store_word(&out, "0", &count);
+        let src_start = self.bin("add", lo, "1");
+        self.copy_word_range(ptr, &src_start, &out, "1", &count);
+        out
+    }
+
+    fn eval_string_from_chars(&mut self, list: &str) -> String {
+        let len = self.load_word(list, "0");
+        let words = self.bin("add", &len, "1");
+        let out = self.alloc_words(&words);
+        self.store_word(&out, "0", &len);
+        self.copy_word_range(list, "2", &out, "1", &len);
+        out
     }
 
     fn copy_words(&mut self, src: &str, dst: &str, total: &str) {
@@ -932,6 +1282,51 @@ impl<'a> FuncBuilder<'a> {
         self.terminated = true;
 
         self.push_label(exit);
+    }
+
+    fn copy_word_range(
+        &mut self,
+        src: &str,
+        src_start: &str,
+        dst: &str,
+        dst_start: &str,
+        count: &str,
+    ) {
+        let slot = self.tmp();
+        self.emit(format!("{slot} = alloca i64"));
+        self.emit(format!("store i64 0, ptr {slot}"));
+        let header = self.label("copy.range.header");
+        let body = self.label("copy.range.body");
+        let exit = self.label("copy.range.exit");
+        self.emit(format!("br label %{header}"));
+        self.terminated = true;
+
+        self.push_label(header.clone());
+        let k = self.tmp();
+        self.emit(format!("{k} = load i64, ptr {slot}"));
+        let more = self.cmp("ult", &k, count);
+        let more = self.i1(&more);
+        self.emit(format!("br i1 {more}, label %{body}, label %{exit}"));
+        self.terminated = true;
+
+        self.push_label(body);
+        let src_slot = self.bin("add", src_start, &k);
+        let dst_slot = self.bin("add", dst_start, &k);
+        let word = self.load_word(src, &src_slot);
+        self.store_word(dst, &dst_slot, &word);
+        let next = self.bin("add", &k, "1");
+        self.emit(format!("store i64 {next}, ptr {slot}"));
+        self.emit(format!("br label %{header}"));
+        self.terminated = true;
+
+        self.push_label(exit);
+    }
+
+    fn select_i64(&mut self, cond_i64: &str, yes: &str, no: &str) -> String {
+        let cond = self.i1(cond_i64);
+        let out = self.tmp();
+        self.emit(format!("{out} = select i1 {cond}, i64 {yes}, i64 {no}"));
+        out
     }
 
     fn emit_bounds_check(&mut self, base: &str, index: &str) {
@@ -979,6 +1374,16 @@ impl<'a> FuncBuilder<'a> {
         let op = if signed { "sext" } else { "zext" };
         self.emit(format!("{e} = {op} i{bits} {t} to i64"));
         e
+    }
+
+    fn atom_uses_list_layout(&self, a: &Atom) -> bool {
+        layout::atom_type(self.world, a, &self.tys)
+            .as_ref()
+            .is_some_and(|t| is_list_type(t) || matches!(t, Type::Array(_, 0)))
+    }
+
+    fn atom_is_str(&self, a: &Atom) -> bool {
+        layout::atom_type(self.world, a, &self.tys).as_ref() == Some(&Type::Str)
     }
 }
 
@@ -1154,6 +1559,18 @@ fn peel_param_types(mut ty: &Type) -> Vec<Type> {
         ty = ret;
     }
     params
+}
+
+fn is_list_type(t: &Type) -> bool {
+    match t {
+        Type::Nominal { def, args }
+            if *def == symbol_hash("std.collections.List") && args.len() == 1 =>
+        {
+            true
+        }
+        Type::Linear(inner) => is_list_type(inner),
+        _ => false,
+    }
 }
 
 fn is_no_slot(t: &Type, world: &World) -> bool {

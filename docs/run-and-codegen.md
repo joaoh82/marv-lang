@@ -97,10 +97,11 @@ agreement is preserved.
 
 The LLVM release backend follows the same honesty rule. Its first MARV-69 slice
 covers scalar arithmetic/casts, calls/recursion, bool `if`/`match`, `while`,
-early `return`, boxed structs/enums, arrays, and runtime-length slice updates.
-It intentionally reports `unsupported` for reachable capability `perform`,
-`raise`, list/map/set runtime helpers, and string-builder operations until those
-paths are lowered into LLVM too.
+early `return`, boxed structs/enums, arrays, runtime-length slice updates,
+`List[T]` grow/set/pop/index operations, string concat/equality/slice/from_chars,
+iterator loops, and the current map/set corpus paths. It intentionally reports
+`unsupported` for reachable capability `perform`, `raise`, and unsafe/resource
+host integration until those paths are lowered into LLVM too.
 
 ### Cranelift AOT objects and executables (MARV-68)
 
@@ -131,9 +132,9 @@ closure and reports the entry arity.
 This backend does not require `llvm-config` or in-process LLVM bindings. The IR
 uses the same one-word value model as Cranelift: scalars are `i64`; boxed
 aggregates and arrays are heap blocks with the tag/length in word 0; projections,
-enum matches, `len`, `index`, and slice updates operate over that layout. Debug
-builds emit Tier-1 bounds checks that abort through LLVM IR's `abort` call;
-`--release` omits those checks.
+enum matches, `len`, `index`, slice updates, runtime lists, and strings operate
+over that layout. Debug builds emit Tier-1 bounds checks that abort through LLVM
+IR's `abort` call; `--release` omits those checks.
 
 ### Reachability-pruned builds (MARV-8)
 
